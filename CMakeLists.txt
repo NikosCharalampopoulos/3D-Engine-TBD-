@@ -42,6 +42,60 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(glfw glm)
 
+# --- Assimp: model/scene loading (Phase 5) --------------------------------
+# Assimp is a big, general-purpose asset importer library; left at its
+# defaults it also builds its own tools, sample apps, a full test suite, an
+# export pipeline, and ~50 format importers, all of which cost real build
+# time we don't need. Every cache variable below is set (as a CACHE BOOL
+# ... FORCE) *before* FetchContent_Declare/MakeAvailable runs, so it wins
+# over the OPTION() calls in Assimp's own CMakeLists.txt -- CMake's option()
+# only initializes a cache variable if it doesn't already exist, so
+# declaring ours first here means Assimp's later option() calls are no-ops
+# that keep our values instead of resetting them to Assimp's own defaults.
+#
+# BUILD_SHARED_LIBS is forced OFF here too (Assimp's own ADD_LIBRARY(assimp
+# ...) call has no explicit STATIC/SHARED and just follows this global
+# variable, defaulting to ON upstream). Doing this after glfw/glm are already
+# fetched+built above means it can't retroactively affect them; forcing it
+# static avoids engine_app needing a runtime rpath/LD_LIBRARY_PATH pointing
+# at build/_deps/assimp-build for a shared libassimp.so at run time, which
+# matters for tools/run_headless.sh launching the executable directly.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
+# Assimp defaults ASSIMP_WARNINGS_AS_ERRORS to ON; a newer host compiler than
+# Assimp v5.4.3 was tested against can easily trip a warning this project
+# doesn't own and has no business failing our build over -- Assimp's own
+# warnings aren't ours to fix (see the phase brief), so just don't let them
+# be fatal.
+set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+# This container has zlib1g-dev installed, so Assimp's own find_package(ZLIB)
+# succeeds against the system library -- no need to vendor/build Assimp's
+# bundled copy.
+set(ASSIMP_BUILD_ZLIB OFF CACHE BOOL "" FORCE)
+
+# Restrict importers to just what this phase's Model class + test asset
+# actually need: OBJ (assets/models/scene.obj, hand-authored for this phase)
+# and glTF (the other common runtime-friendly format, cheap to also enable)
+# instead of Assimp's full ~50-importer default set.
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    assimp
+    GIT_REPOSITORY https://github.com/assimp/assimp.git
+    GIT_TAG        v5.4.3
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_MakeAvailable(assimp)
+
 # --- GLAD (OpenGL 3.3 core loader) ----------------------------------------
 # Vendored as plain source files rather than fetched: GLAD is a code
 # generator, not a library with a stable git tag/CMake target, so a
@@ -68,6 +122,7 @@ add_executable(engine_app
     src/mesh.cpp
     src/camera.cpp
     src/texture.cpp
+    src/model.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)
@@ -81,6 +136,7 @@ target_link_libraries(engine_app PRIVATE
     glm::glm
     glad
     stb_image
+    assimp
 )
 
 if(UNIX AND NOT APPLE)

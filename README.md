@@ -5,10 +5,13 @@ OpenGL bare-metal basics. This repository is developed in phases; this
 document covers **Phase 0 (project scaffolding and a proven build/run
 pipeline), Phase 1 (a real window + main-loop foundation), Phase 2
 (shaders + a rendered, per-face-colored cube), Phase 3 (a real
-free-fly Camera + Transform, replacing the hardcoded view/projection), and
+free-fly Camera + Transform, replacing the hardcoded view/projection),
 Phase 4 (a Texture class, a Material bundling it with a Shader, and
 Blinn-Phong directional lighting -- the flat per-face-colored cube is now a
-single textured, lit surface).**
+single textured, lit surface), and Phase 5 (Assimp-based model/scene
+loading -- the single hardcoded cube is replaced with a real `engine::Model`
+that loads a multi-object scene from a file and renders its whole node
+hierarchy).**
 
 Phase 0 does *not* contain engine logic -- it exists to prove that the
 toolchain (CMake, dependency fetching, a GL 3.3 core context, and a headless
@@ -22,14 +25,15 @@ render/swap main loop) pair -- see "Phase 1: window + main loop" below.
 ## Directory layout
 
 ```
-CMakeLists.txt        Root build: fetches deps, builds engine_app
+CMakeLists.txt        Root build: fetches deps (incl. Assimp), builds engine_app
 src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
-                       shader.cpp, mesh.cpp, camera.cpp, texture.cpp)
+                       shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
-                       texture, material)
+                       texture, material, model)
 external/              Vendored small/single-header libs (stb_image, glad)
-assets/                Shaders, textures, models (assets/textures/checker.png)
+assets/                Shaders, textures, models (assets/textures/checker.png,
+                       assets/models/scene.obj + scene.mtl)
 tools/                 Build/run/screenshot scripts
 tests/                 Placeholder for later phases (empty CMakeLists)
 ```
@@ -350,6 +354,102 @@ is the verified-working method here; fix or reinstall Pillow
   lit top face vs. the shadowed side face (e.g. `(226,133,40)` vs.
   `(57,34,12)`) confirms the directional-light shading gradient.
 
+## Phase 5: Assimp model loading + a node hierarchy
+
+- **Assimp integration** (`CMakeLists.txt`) -- fetched via `FetchContent`
+  pinned to release tag `v5.4.3`. Every relevant Assimp cache variable is
+  force-set *before* `FetchContent_Declare`/`MakeAvailable` runs, so it wins
+  over the `OPTION()` calls in Assimp's own `CMakeLists.txt` (which only
+  initialize a cache variable if it doesn't already exist): `BUILD_SHARED_LIBS
+  OFF` (a static `libassimp.a`, so `engine_app` needs no runtime
+  rpath/`LD_LIBRARY_PATH` to find a shared lib), `ASSIMP_BUILD_TESTS`/
+  `ASSIMP_BUILD_ASSIMP_TOOLS`/`ASSIMP_BUILD_SAMPLES`/`ASSIMP_BUILD_DOCS`/
+  `ASSIMP_INSTALL OFF`, `ASSIMP_NO_EXPORT ON` (this phase only imports),
+  `ASSIMP_WARNINGS_AS_ERRORS OFF` (Assimp defaults this ON; a newer host
+  compiler tripping one of *its* warnings isn't something this project
+  should let fail the build), `ASSIMP_BUILD_ZLIB OFF` (this container has
+  `zlib1g-dev`, so Assimp's own `find_package(ZLIB)` finds the system copy).
+  Importer scope is deliberately narrowed via
+  `ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF` plus `ASSIMP_BUILD_OBJ_IMPORTER`/
+  `ASSIMP_BUILD_GLTF_IMPORTER ON` -- confirmed at configure time by CMake's
+  own `Enabled importer formats: OBJ GLTF` status line -- instead of Assimp's
+  full ~50-format default set, which meaningfully cuts build time/scope.
+  `assimp` is linked into `engine_app` alongside `glfw`/`glm::glm`/`glad`/
+  `stb_image`.
+- **`engine::Model` / `engine::ModelNode`** (`include/engine/model.hpp`,
+  `src/model.cpp`) -- loads a whole scene via `Assimp::Importer::ReadFile()`
+  with `aiProcess_Triangulate | aiProcess_GenSmoothNormals` (no
+  `aiProcess_FlipUVs`: this engine's `Texture` already flips rows on load to
+  put a texture's own (0,0) at OpenGL's v=0, and `scene.obj`'s hand-written
+  `vt` values already follow that same bottom-left-origin convention --
+  adding the flag would flip an already-correct mapping). A null/incomplete
+  scene (or `importer.GetErrorString()` on failure) is logged via `LOG_ERROR`
+  and turned into a thrown `std::runtime_error`, mirroring
+  `Shader`/`Window`/`Texture`'s throw-on-failure convention -- never a raw
+  null-scene dereference. Every `aiMesh` becomes an `engine::Mesh` (missing
+  normals/UV channels default to a zero vector/`vec2` rather than reading
+  `mesh->mNormals`/`mesh->mTextureCoords[0]` when either can be null; a
+  non-triangular leftover face is skipped with a warning instead of
+  desyncing the `GL_TRIANGLES` draw call). Every `aiNode` becomes a
+  `ModelNode` (name, local transform, mesh indices, children), preserving
+  the scene's parent/child structure; a node's `aiMatrix4x4` (Assimp: row-
+  major, translation in the last column of each row) is converted to
+  `glm::mat4` (column-major) by placing each element at its transposed
+  `[col][row]` slot -- not a raw memcpy, which would silently transpose the
+  whole matrix. Each `aiMaterial` becomes one `engine::Material`: its
+  diffuse texture (if any) is resolved relative to the model file's own
+  directory and loaded, falling back to the engine's existing checker
+  texture (still tinted by the material's own `Kd`/shininess) if there is no
+  diffuse texture or it fails to load -- a material this engine doesn't
+  fully understand never crashes the load. `Model::draw(shader, rootTransform)`
+  recurses depth-first, composing `worldTransform = parentTransform *
+  node.localTransform` at each node, uploading that node's `uModel`/
+  `uNormalMatrix`, then binding each of the node's mesh(es)' `Material` and
+  drawing. Fully RAII: `Model` owns every `Mesh`/`Material` it built (plus a
+  `defaultMaterial_` fallback) by value, so its destructor releases every GL
+  handle with no manual cleanup code, and it's move-only for the same reason
+  `Mesh`/`Material`/`Texture` are (each owns scarce GL handles).
+- **Test asset** (`assets/models/scene.obj` + `scene.mtl`) -- hand-authored:
+  a table (a wide flat box), a small box sitting exactly on the table's top
+  face, and a separate pyramid off to the side with a deliberate 0.4-unit
+  gap from the table -- three distinct objects at different positions/
+  heights, proving the node-hierarchy + transform-composition code actually
+  places more than one mesh, not just that a single mesh loads. Each object
+  has its own `Kd`-only material (no texture image), so `Model`'s
+  no-diffuse-texture fallback path (default checker texture, tinted by
+  `Kd`) is exercised for every mesh in this asset. Plain OBJ has no
+  per-object transform field of its own (unlike glTF/FBX), so each object's
+  vertices are given directly in final world-space coordinates and Assimp's
+  OBJ importer gives each object node an identity local transform --
+  documented in a comment at the top of `scene.obj` rather than left as an
+  unexplained gap. Non-identity composition is still exercised end to end
+  via `Application`'s `sceneTransform_` (a fixed 12-degree Y rotation applied
+  above the whole node tree, composed with each node's own, mostly-identity
+  transform).
+- **Wired into `Application`**: the single `cube_`/`material_` pair is
+  replaced with one `model_` (loaded from `assets/models/scene.obj`) and a
+  `sceneTransform_` (`engine::Transform`, replacing `cubeTransform_`).
+  `render()` sets view/projection/lighting uniforms once per frame (they're
+  scene-level state, unchanged by the repeated same-program `glUseProgram`
+  calls each `Material::bind()` makes while `Model::draw()` walks the tree),
+  then calls `model_.draw(shader_, sceneTransform_.getModelMatrix())`.
+  Camera position/lighting are unchanged from Phase 3/4.
+- **Verify**: `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh
+  build/engine_app build/phase5_screenshot.png` renders a pyramid, a table,
+  and a box on the table at clearly different screen positions. Checked
+  with ImageMagick: `convert phase5_screenshot.png -fuzz 10% -transparent
+  "rgb(100,149,237)"` (the clear color) isolates the rendered geometry from
+  the background, and `-define connected-components:verbose=true
+  -connected-components 4` on the resulting mask finds **two** disjoint
+  non-background components -- one ~94x83px (the pyramid) and one
+  ~209x106px (the table + box, touching in screen space) -- confirming
+  multiple distinct clusters at different image locations rather than one
+  blob. The overall trimmed bounding box of non-background pixels is
+  272x147px (out of the 800x600 frame), far larger than the roughly
+  cube-sized footprint Phase 4's single half-extent-0.5 cube produced at the
+  same unchanged camera position -- confirming the scene's actual extent
+  (~2.7 world units wide) rather than a single ~1-unit cube.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -358,6 +458,7 @@ is the verified-working method here; fix or reinstall Pillow
 | **GLM**     | CMake `FetchContent` (git, tag `1.0.1`)      | Header-only math library with GLSL-like syntax (vectors, matrices, transforms) -- avoids hand-rolling matrix/vector math for later phases (cameras, transforms). |
 | **stb_image** | Vendored single header in `external/stb/` (`stb_image.h`, from github.com/nothings/stb) | Public-domain, single-header, no build step -- simplest possible texture loading path. Vendored unused since Phase 0; Phase 4's `engine::Texture` (`src/texture.cpp`) is the first phase to `#include` it, and the only translation unit that `#define`s `STB_IMAGE_IMPLEMENTATION`. |
 | **GL loader** | Hand-written, vendored in `external/glad/` | See below. |
+| **Assimp** | CMake `FetchContent` (git, tag `v5.4.3`) | De facto standard asset-import library; loads Phase 5's OBJ/glTF scenes via one well-known API instead of hand-rolling per-format parsers. Importer scope narrowed to just OBJ + glTF (see "Phase 5" above) to keep build time/scope down. |
 
 ### GL loader: why hand-written instead of a generated GLAD
 
@@ -410,3 +511,8 @@ textured, Blinn-Phong-lit one -- `engine::Texture` loads
 shader and simple tint/shininess properties, and `basic.vert`/`basic.frag`
 implement ambient+diffuse+specular directional lighting with a proper
 normal matrix; see "Phase 4: Texture + Material + Phong lighting" above.
+Phase 5 replaces that single hardcoded cube with `engine::Model`, which
+loads a whole multi-object scene (`assets/models/scene.obj`) via Assimp and
+recursively draws its node hierarchy, each node's mesh(es) placed by its own
+composed world transform; see "Phase 5: Assimp model loading + a node
+hierarchy" above.

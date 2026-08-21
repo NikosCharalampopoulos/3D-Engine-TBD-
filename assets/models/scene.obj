@@ -1,0 +1,109 @@
+# Phase 5 test asset: a small hand-authored scene with three separate
+# objects at different positions/heights -- a table, a small box sitting on
+# top of the table, and a separate pyramid off to the side -- specifically
+# to prove engine::Model's node hierarchy + transform composition places
+# more than one mesh correctly (see the "Node hierarchy" note below), not
+# just that a single mesh loads.
+#
+# Node hierarchy note: plain OBJ has no per-object transform concept of its
+# own (unlike glTF/FBX/etc. -- there is no node-matrix field in this
+# format), so each object's vertex positions below are already given in
+# final world-space coordinates rather than relative to a per-node local
+# transform. Assimp's OBJ importer reflects this by giving each object node
+# an identity local transform; engine::Model's node-transform composition
+# code (parentWorldTransform * node.localTransform, see model.cpp) still
+# runs for every node here -- it just composes identities for this
+# particular asset's per-object nodes. What non-identity composition looks
+# like in practice comes from Application's outer sceneTransform_ (a fixed
+# rotation) applied above this file's whole node tree, and from each node's
+# accumulated-parent-transform chain down from the scene's root node -- see
+# src/application.cpp and model.cpp's drawNode().
+#
+# All three objects share the coordinate-quad texcoord layout and the
+# 6-direction face-normal set mesh.cpp's makeCube() uses (front/back/right/
+# left/top/bottom, each face a CCW quad as seen from outside), just written
+# out by hand for OBJ's shared v/vt/vn index-list format instead of
+# mesh.cpp's interleaved-and-duplicated-per-face C++ arrays.
+
+mtllib scene.mtl
+
+# --- Shared texcoords (bottom-left, bottom-right, top-right, top-left --
+# same order makeCube() uses for every face) ---
+vt 0.0 0.0
+vt 1.0 0.0
+vt 1.0 1.0
+vt 0.0 1.0
+
+# --- Shared face normals (box faces) ---
+vn 0.0 0.0 1.0
+vn 0.0 0.0 -1.0
+vn 1.0 0.0 0.0
+vn -1.0 0.0 0.0
+vn 0.0 1.0 0.0
+vn 0.0 -1.0 0.0
+# --- Pyramid side-face normals (approximate outward direction; the vertex
+# shader normalizes these, so only the direction/sign needs to be right) ---
+vn 0.0 0.5 -1.0
+vn 1.0 0.5 0.0
+vn 0.0 0.5 1.0
+vn -1.0 0.5 0.0
+
+# --- Table: a wide, flat box. Center (0.2, 0.1, 0.1), half-extents
+# (0.8, 0.1, 0.4) -> x in [-0.6, 1.0], y in [0.0, 0.2], z in [-0.3, 0.5].
+v -0.6 0.0 -0.3
+v 1.0 0.0 -0.3
+v 1.0 0.0 0.5
+v -0.6 0.0 0.5
+v -0.6 0.2 -0.3
+v 1.0 0.2 -0.3
+v 1.0 0.2 0.5
+v -0.6 0.2 0.5
+
+# --- Box on the table: center (0.5, 0.38, 0.1), half-extents
+# (0.22, 0.18, 0.18) -> x in [0.28, 0.72], y in [0.20, 0.56] (bottom sits
+# exactly on the table's y = 0.2 top face), z in [-0.08, 0.28].
+v 0.28 0.20 -0.08
+v 0.72 0.20 -0.08
+v 0.72 0.20 0.28
+v 0.28 0.20 0.28
+v 0.28 0.56 -0.08
+v 0.72 0.56 -0.08
+v 0.72 0.56 0.28
+v 0.28 0.56 0.28
+
+# --- Pyramid: separate object, off to the side, with a deliberate gap
+# between it and the table (not just touching/adjacent) so the two read as
+# clearly disjoint shapes on screen. Square base center (-1.35, 0, -0.3),
+# half-extent 0.35 -> x in [-1.70, -1.00] (a 0.40-unit gap from the table's
+# x = -0.6 edge), z in [-0.65, 0.05]; apex at (-1.35, 0.7, -0.3).
+v -1.70 0.0 -0.65
+v -1.00 0.0 -0.65
+v -1.00 0.0 0.05
+v -1.70 0.0 0.05
+v -1.35 0.7 -0.3
+
+o Table
+usemtl Table
+f 4/1/1 3/2/1 7/3/1 8/4/1
+f 2/1/2 1/2/2 5/3/2 6/4/2
+f 3/1/3 2/2/3 6/3/3 7/4/3
+f 1/1/4 4/2/4 8/3/4 5/4/4
+f 8/1/5 7/2/5 6/3/5 5/4/5
+f 1/1/6 2/2/6 3/3/6 4/4/6
+
+o BoxOnTable
+usemtl Box
+f 12/1/1 11/2/1 15/3/1 16/4/1
+f 10/1/2 9/2/2 13/3/2 14/4/2
+f 11/1/3 10/2/3 14/3/3 15/4/3
+f 9/1/4 12/2/4 16/3/4 13/4/4
+f 16/1/5 15/2/5 14/3/5 13/4/5
+f 9/1/6 10/2/6 11/3/6 12/4/6
+
+o Pyramid
+usemtl Pyramid
+f 17/1/7 18/2/7 21/3/7
+f 18/1/8 19/2/8 21/3/8
+f 19/1/9 20/2/9 21/3/9
+f 20/1/10 17/2/10 21/3/10
+f 17/1/6 18/2/6 19/3/6 20/4/6

@@ -16,6 +16,11 @@ Testing/
 # Object / binary artifacts
 *.o
 *.obj
+# ...except Wavefront OBJ 3D model assets (same ".obj" extension as a
+# compiler object file, but a real committed asset here, not build output) --
+# Phase 5's assets/models/*.obj test scenes must not be swept up by the rule
+# above.
+!assets/models/*.obj
 *.a
 *.so
 *.so.*

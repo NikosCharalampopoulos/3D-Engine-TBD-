@@ -16,7 +16,6 @@
 
 #include "engine/gl_debug.hpp"
 #include "engine/log.hpp"
-#include "engine/texture.hpp"
 
 namespace engine {
 
@@ -26,8 +25,8 @@ namespace {
 // loop actually work" clear color: a screenshot averaging to this (rather
 // than black) proves clear+swap ran, and running it every frame (rather
 // than once) proves the loop is actually looping. It also needs to stay
-// visually distinct from every cube face color below so a screenshot can
-// tell background from geometry at a glance.
+// visually distinct from the scene's own colors (see scene.mtl) so a
+// screenshot can tell background from geometry at a glance.
 constexpr float kClearR = 0.3921f;
 constexpr float kClearG = 0.5843f;
 constexpr float kClearB = 0.9294f;
@@ -38,12 +37,17 @@ constexpr float kClearA = 1.0f;
 // the software rasterizer allows.
 constexpr auto kFrameThrottle = std::chrono::milliseconds(16);
 
-// Shader/texture asset paths, read relative to the process's working
+// Shader/model asset paths, read relative to the process's working
 // directory -- see README.md, headless runs (and normal ones) are expected
 // to be launched from the repo root so these resolve.
 constexpr const char* kVertexShaderPath = "assets/shaders/basic.vert";
 constexpr const char* kFragmentShaderPath = "assets/shaders/basic.frag";
-constexpr const char* kCubeTexturePath = "assets/textures/checker.png";
+// Phase 5's hand-authored test scene: three separate objects (a pyramid, a
+// table, and a small box sitting on top of the table) at different
+// positions, proving Model's node hierarchy + transform composition places
+// more than one mesh correctly -- see assets/models/scene.obj and
+// model.cpp.
+constexpr const char* kScenePath = "assets/models/scene.obj";
 
 // Phase 4's directional light: a fixed "sun" direction/color, not yet
 // animated or configurable -- proving the Phong math works is this phase's
@@ -62,7 +66,11 @@ constexpr glm::vec3 kAmbientColor{0.15f, 0.15f, 0.18f};
 // back -- so a headless screenshot visibly proves the view now comes from a
 // live Camera rather than that old hardcoded matrix.
 constexpr glm::vec3 kDefaultCameraPosition{2.6f, 1.9f, 3.4f};
-constexpr glm::vec3 kCubeCenter{0.0f, 0.0f, 0.0f};
+// Phase 5's scene.obj lays its three objects out (deliberately) so their
+// combined bounding box is still roughly centered near the origin -- see
+// assets/models/scene.obj -- so this unchanged Phase 3/4 camera target
+// still frames the whole scene, not just one object.
+constexpr glm::vec3 kSceneCenter{0.0f, 0.0f, 0.0f};
 
 bool cameraDemoModeFromEnv() {
     const char* value = std::getenv("ENGINE_CAMERA_DEMO");
@@ -74,8 +82,7 @@ bool cameraDemoModeFromEnv() {
 Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames)
     : window_(width, height, title),
       shader_(kVertexShaderPath, kFragmentShaderPath),
-      cube_(makeCube()),
-      material_(shader_, Texture(kCubeTexturePath), /*tint=*/glm::vec3(1.0f), /*shininess=*/32.0f),
+      model_(kScenePath, shader_),
       camera_(kDefaultCameraPosition),
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()) {
@@ -84,17 +91,18 @@ Application::Application(int width, int height, const std::string& title, std::u
     // correctly instead of painting in draw-call order.
     GL_CHECK(glEnable(GL_DEPTH_TEST));
 
-    camera_.setPositionLookingAt(kDefaultCameraPosition, kCubeCenter);
+    camera_.setPositionLookingAt(kDefaultCameraPosition, kSceneCenter);
 
-    // Same fixed two-axis rotation Phase 2 hardcoded directly into its model
-    // matrix (Rx(35) then Ry(45), i.e. model = Rx * Ry -- Ry applied to the
-    // vertex first, then Rx), just expressed as one composed quaternion on a
-    // Transform now instead of two chained glm::rotate() calls. Fixed (not
-    // time-animated) for the same reason Phase 2 fixed it: the cube reliably
-    // shows several faces in every frame regardless of which frame a
-    // headless screenshot lands on.
-    cubeTransform_.setRotation(glm::angleAxis(glm::radians(35.0f), glm::vec3(1.0f, 0.0f, 0.0f)) *
-                                glm::angleAxis(glm::radians(45.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
+    // A small fixed rotation applied above the whole model's own node
+    // hierarchy (rather than identity), for the same reason Phase 2-4 fixed
+    // cubeTransform_'s rotation: proving the composition (sceneTransform_ *
+    // accumulated parent node transform * node's own local transform, see
+    // Model::drawNode()) is actually being applied, not just compiling,
+    // regardless of which frame a headless screenshot lands on. 12 degrees
+    // is small enough that scene.obj's three objects (deliberately laid out
+    // to fit within Phase 3/4's unchanged camera framing) stay comfortably
+    // in frame after the rotation.
+    sceneTransform_.setRotation(glm::angleAxis(glm::radians(12.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
 
     if (cameraDemoMode_) {
         LOG_INFO("ENGINE_CAMERA_DEMO set: driving the camera through a scripted orbit instead of live input");
@@ -110,7 +118,7 @@ void Application::update(double deltaTime) {
         // mouse, so there's nothing for processKeyboard()/processMouseInput()
         // to read under the verification harness. Instead, step through a
         // small fixed set of known camera positions (all looking at the
-        // cube), advancing one step every kFramesPerStep frames. Keyed off
+        // scene), advancing one step every kFramesPerStep frames. Keyed off
         // frameCount_ (an exact integer, incremented once per loop iteration)
         // rather than totalTime_, so which waypoint is showing at any given
         // frame is fully deterministic and doesn't depend on how long each
@@ -120,10 +128,10 @@ void Application::update(double deltaTime) {
             {3.2f, 0.6f, 0.0f},    // orbit: right side, low
             {0.05f, 3.2f, 0.05f},  // orbit: near-overhead (exercises the pitch clamp/near-vertical case)
             {-3.2f, 0.6f, 0.0f},   // orbit: left side
-            {0.0f, 0.6f, -3.2f},   // orbit: behind the cube
+            {0.0f, 0.6f, -3.2f},   // orbit: behind the scene
         }};
         const std::size_t waypoint = (frameCount_ / kFramesPerStep) % kWaypoints.size();
-        camera_.setPositionLookingAt(kWaypoints[waypoint], kCubeCenter);
+        camera_.setPositionLookingAt(kWaypoints[waypoint], kSceneCenter);
     } else {
         // Real free-fly input: WASD + Space/Shift (or E/Q) move the camera,
         // scaled by deltaTime so speed is frame-rate independent; mouse-look
@@ -146,33 +154,31 @@ void Application::render() {
     const auto [fbWidth, fbHeight] = window_.getSize();
     const float aspect = fbHeight != 0 ? static_cast<float>(fbWidth) / static_cast<float>(fbHeight) : 1.0f;
 
-    const glm::mat4 model = cubeTransform_.getModelMatrix();
     const glm::mat4 view = camera_.getViewMatrix();
     const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
-    // transpose(inverse(mat3(model))), NOT just mat3(model) -- the latter is
-    // a common subtly-wrong shortcut that only happens to preserve normal
-    // directions under uniform scale/rotation/translation and silently
-    // skews them under non-uniform scale. Computed fresh each frame (cheap:
-    // one 3x3 inverse) rather than assuming the cube's transform never
-    // scales non-uniformly, since Transform allows exactly that.
-    const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
 
-    // material_.bind() sets the shader program, diffuse texture, and
-    // tint/shininess -- everything fixed per-material. Model/view/
-    // projection/normal-matrix and the light are scene/per-draw state, set
-    // here right after.
-    material_.bind();
-    shader_.setMat4("uModel", model);
+    // View/projection and lighting are scene-level state, constant across
+    // every node/mesh Model::draw() below is about to issue -- set once per
+    // frame on the (one, shared) shader program rather than re-set inside
+    // the per-node/per-mesh loop. GL uniform values live on the program
+    // object itself and aren't disturbed by the repeated glUseProgram calls
+    // each Material::bind() makes as Model::draw() walks the scene, so this
+    // is safe to set just once here.
+    shader_.use();
     shader_.setMat4("uView", view);
     shader_.setMat4("uProjection", projection);
-    shader_.setMat3("uNormalMatrix", normalMatrix);
     shader_.setVec3("uLightDirection", kLightDirection);
     shader_.setVec3("uLightColor", kLightColor);
     shader_.setVec3("uAmbientColor", kAmbientColor);
     shader_.setVec3("uViewPos", camera_.position());
 
-    cube_.bind();
-    cube_.draw();
+    // sceneTransform_'s matrix is the "rootTransform" Model::draw() composes
+    // above the file's own node hierarchy: model_.draw() recurses through
+    // scene.obj's node tree, uploading uModel/uNormalMatrix per node as
+    // sceneTransform * (accumulated parent node transform) * (node's own
+    // local transform), and binding + drawing each node's mesh(es) with
+    // their own Material.
+    model_.draw(shader_, sceneTransform_.getModelMatrix());
 }
 
 void Application::run() {

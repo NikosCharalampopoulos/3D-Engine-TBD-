@@ -1,0 +1,25 @@
+# Phase 5 test asset: materials for assets/models/scene.obj.
+#
+# None of these reference a texture image (no map_Kd) -- Model's material
+# loader (src/model.cpp) falls back to the engine's default checker texture
+# for any material with no diffuse texture, modulated by that material's Kd
+# as its tint, so each object below still renders in its own distinct color
+# even though all three share the same fallback texture image.
+
+newmtl Table
+Kd 0.55 0.35 0.15
+Ka 0.55 0.35 0.15
+Ks 0.20 0.20 0.20
+Ns 16.0
+
+newmtl Box
+Kd 0.15 0.35 0.75
+Ka 0.15 0.35 0.75
+Ks 0.30 0.30 0.30
+Ns 48.0
+
+newmtl Pyramid
+Kd 0.75 0.15 0.15
+Ka 0.75 0.15 0.15
+Ks 0.30 0.30 0.30
+Ns 32.0

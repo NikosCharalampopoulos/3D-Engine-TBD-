@@ -27,13 +27,24 @@
 // single whole-mesh draw() instead of drawRange() per face, since the
 // cube's six flat uColor faces are gone in favor of one textured, lit
 // surface.
+//
+// Phase 5 replaces the Phase 2-4 hardcoded single cube with a real Model
+// (Assimp-loaded scene graph, see model.hpp): render() now calls
+// model_.draw(), which recursively composes each node's local transform
+// with its parent's and uploads uModel/uNormalMatrix per node instead of
+// once per frame. sceneTransform_ is an outer Transform placed above the
+// whole model's own node hierarchy (a small fixed rotation, the same "prove
+// the composition order is right, not just that it compiles" role
+// cubeTransform_'s fixed rotation played in Phase 3-4) so the render path
+// exercises at least two composed levels: sceneTransform_ * (accumulated
+// parent node transform) * (node's own local transform). Camera and
+// lighting are otherwise unchanged from Phase 3/4.
 
 #include <cstdint>
 #include <string>
 
 #include "engine/camera.hpp"
-#include "engine/material.hpp"
-#include "engine/mesh.hpp"
+#include "engine/model.hpp"
 #include "engine/shader.hpp"
 #include "engine/transform.hpp"
 #include "engine/window.hpp"
@@ -60,17 +71,17 @@ private:
     void render();
 
     // Declaration order matters here: window_ must construct (and create
-    // the GL context) before shader_/cube_/material_ since all three do GL
-    // calls in their constructors (material_'s Texture uploads via GL, and
-    // material_ holds a pointer into shader_, so shader_ must also outlive
-    // it -- hence shader_ before material_ below). camera_/cubeTransform_ do
-    // no GL work so their position relative to those is unconstrained.
+    // the GL context) before shader_/model_ since both do GL calls in their
+    // constructors (model_'s Meshes/Materials/Textures all upload via GL,
+    // and each Material holds a pointer into shader_, so shader_ must also
+    // outlive it -- hence shader_ before model_ below). camera_/
+    // sceneTransform_ do no GL work so their position relative to those is
+    // unconstrained.
     Window window_;
     Shader shader_;
-    Mesh cube_;
-    Material material_;
+    Model model_;
     Camera camera_;
-    Transform cubeTransform_;
+    Transform sceneTransform_;
     std::uint64_t maxFrames_;
     std::uint64_t frameCount_ = 0;
     double totalTime_ = 0.0;
