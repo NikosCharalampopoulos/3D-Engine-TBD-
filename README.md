@@ -6,15 +6,19 @@ free-fly camera, GL 3.3 core shaders/meshes/textures, multi-light (directional
 directional shadow mapping, Assimp-based multi-object scene loading with a
 real node hierarchy, MSAA anti-aliasing, a thin entity/resource-cache
 layer, a procedural-sky cubemap background, an HDR + Reinhard-tonemapped
-post-process pipeline, and (Phase 9) a real metallic/roughness Cook-Torrance
+post-process pipeline, (Phase 9) a real metallic/roughness Cook-Torrance
 PBR material/shader alongside the original Blinn-Phong path, proven out on a
-4x4 metallic x roughness sphere reference grid -- built up from bare-metal
-OpenGL, and verified at every step by a headless Xvfb+Mesa run/screenshot
-harness (no GPU or display required). See "Architecture overview" right
-below for what the finished whole looks like today, or "Development history"
-further down for how it got built, phase by phase (this repo was built
-incrementally across 9 phases, each independently bug-reviewed), including
-the specific bugs each phase's review found and fixed.
+sphere reference grid, and (Phase 10) real-time image-based lighting -- a
+diffuse irradiance cubemap, a GGX-prefiltered mipmapped specular cubemap, and
+a split-sum BRDF LUT, all convolved once at startup from the existing skybox
+-- replacing that PBR path's flat placeholder ambient term with a real,
+direction- and roughness-aware one -- built up from bare-metal OpenGL, and
+verified at every step by a headless Xvfb+Mesa run/screenshot harness (no GPU
+or display required). See "Architecture overview" right below for what the
+finished whole looks like today, or "Development history" further down for
+how it got built, phase by phase (this repo was built incrementally across
+10 phases, each independently bug-reviewed), including the specific bugs
+each phase's review found and fixed.
 
 ## Architecture overview
 
@@ -82,6 +86,14 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   background via its own program (`assets/shaders/skybox.vert`/`.frag`),
   drawn last each frame with a `GL_LEQUAL` depth trick so it only shows
   through pixels nothing else drew.
+- **`IBLProbe`** (`ibl_probe.hpp`/`.cpp`, see "Phase 10" below) -- real-time
+  image-based lighting built from `Skybox`'s own cubemap: a diffuse
+  irradiance cubemap, a mipmapped GGX-prefiltered specular cubemap, and a 2D
+  BRDF integration LUT, all convolved once at startup (a handful of ordinary
+  draw calls into small offscreen FBOs, not a persistent render target) via
+  three dedicated one-time shader passes. `pbr.frag` samples all three every
+  frame to drive its ambient term -- replacing Phase 9's flat placeholder
+  ambient with real, direction- and roughness-aware image-based lighting.
 - **`Model`** (`model.hpp`/`.cpp`) -- loads a whole scene via Assimp
   (`assets/models/scene.obj`: a table, a box on the table, and a separate
   pyramid) into a tree of `ModelNode`s, each with its own local transform,
@@ -117,14 +129,17 @@ CMakeLists.txt        Root build: fetches deps (incl. Assimp), builds engine_app
 src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
                        shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp,
                        input.cpp, resource_manager.cpp, shadow_map.cpp,
-                       framebuffer.cpp, skybox.cpp)
+                       framebuffer.cpp, skybox.cpp, ibl_probe.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, entity, input,
-                       resource_manager, shadow_map, framebuffer, skybox)
+                       resource_manager, shadow_map, framebuffer, skybox,
+                       ibl_probe)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
-                       postprocess.vert/.frag, pbr.vert/.frag), textures
+                       postprocess.vert/.frag, pbr.vert/.frag,
+                       cubemap_capture.vert, irradiance_convolution.frag,
+                       prefilter.frag, brdf_lut.frag), textures
                        (checker.png, normal_bump.png, skybox/ -- 6 cubemap
                        faces), models (scene.obj + scene.mtl)
 tools/                 Build/run/screenshot scripts
@@ -992,6 +1007,120 @@ job.
     HDR/tonemap, and MSAA (`GL_SAMPLES = 4`, confirmed in the run log) are
     all still visible/active in the same screenshot -- nothing in the
     existing Blinn-Phong path or post-process pipeline was touched.
+
+### Phase 10: real-time image-based lighting (IBL)
+
+Phase 10 replaces `pbr.frag`'s flat placeholder ambient term
+(`uAmbientColor * albedo * ao * (1-metallic)`) with real image-based
+lighting, via the standard real-time split-sum approximation (Karis, "Real
+Shading in Unreal Engine 4"): the environment `Skybox` already renders is
+convolved once at startup into two precomputed environment maps plus one
+environment-independent BRDF LUT, all sampled every frame instead of a
+single hand-picked ambient constant.
+
+- **`IBLProbe`** (`include/engine/ibl_probe.hpp`/`src/ibl_probe.cpp`) --
+  built once in `Application`'s constructor from `skybox_.textureId()`,
+  producing three GL textures:
+  1. **Diffuse irradiance cubemap** (32x32/face, `GL_RGBA16F`) --
+     `assets/shaders/irradiance_convolution.frag` integrates incoming
+     radiance over the hemisphere around each texel's own direction, a
+     discretized double loop over spherical coordinates (`phi` step 0.05,
+     `theta` step 0.05) weighted by `cos(theta)*sin(theta)` (Lambert's law +
+     the solid-angle element), normalized by the actual sample count
+     accumulated rather than a closed-form constant tied to one specific
+     step size.
+  2. **Prefiltered specular cubemap** (128x128 base, 5 mips, `GL_RGBA16F`,
+     `GL_LINEAR_MIPMAP_LINEAR`) -- `assets/shaders/prefilter.frag`
+     importance-samples the GGX distribution (Hammersley sequence +
+     `ImportanceSampleGGX`, the standard `N == V == R` real-time
+     simplification) at a fixed roughness per mip (`0, 0.25, 0.5, 0.75, 1.0`
+     for mips `0..4`), rendered directly into each `(face, mip)` pair via
+     `glFramebufferTexture2D`'s mip parameter. 32 samples/texel (deliberately
+     below the 1024 a single-LUT pass can afford -- see that shader's own
+     comment) keeps the one-time convolution cost tractable on a software
+     (llvmpipe) GL rasterizer with no real GPU parallelism.
+  3. **BRDF integration LUT** (128x128, `GL_RGBA16F`, only `.rg` meaningful)
+     -- `assets/shaders/brdf_lut.frag` (paired with the existing
+     `postprocess.vert`, itself just a screen-space passthrough) integrates
+     the split-sum's environment-independent BRDF half across a
+     `(N.V, roughness)` grid, 1024 samples/texel, once.
+  - Both cubemap passes share `cubemap_capture.vert` (a fixed 90-degree-FOV
+    view/projection per face, no depth trick -- unlike `skybox.vert`, this
+    is an offline convolution pass with depth testing disabled entirely, not
+    a per-frame background draw) and a single temporary FBO reused across
+    all three passes (deleted at the end of `IBLProbe`'s constructor -- no
+    persistent render-target class needed for a one-time precompute).
+  - `GL_RGBA16F`/`GL_RGBA` used throughout (not a 3- or 2-channel format)
+    because this project's vendored `external/glad/include/glad/glad.h` is a
+    hand-pruned GL 3.3 subset (only what earlier phases needed) that doesn't
+    define `GL_RGB16F`/`GL_RG16F` -- the unused extra channel(s) are simply
+    never read back.
+- **`pbr.frag`'s new ambient term** (replacing Phase 9's flat placeholder):
+  `kS = fresnelSchlickRoughness(N.V, F0, roughness)` (the roughness-aware
+  Fresnel variant, clamping the Schlick curve's upper bound to
+  `max(1-roughness, F0)` instead of a flat 1.0 -- tempers a rough surface's
+  grazing-angle overestimate versus the plain Schlick curve direct lighting
+  uses), `kD = (1-kS)*(1-metallic)`; `diffuseIBL = irradiance(N) * albedo`;
+  `R = reflect(-V,N)`, `prefilteredColor = textureLod(prefilterMap, R,
+  roughness * MAX_REFLECTION_LOD)`; `specularIBL = prefilteredColor *
+  (F0*envBRDF.x + envBRDF.y)`; `ambient = (kD*diffuseIBL + specularIBL) *
+  ao`. `uAmbientColor` itself is no longer read by `pbr.frag` at all.
+- **Sphere-grid material revision**: now that IBL gives a fully metallic
+  surface real reflected-environment brightness instead of being near-black
+  (Phase 9's `kRoughnessRowMetallic = 0.35` was an explicit stopgap for
+  exactly this, see that constant's Phase 9 comment), the roughness-sweep
+  row goes back to fully metallic (`1.0`), and the metallic-sweep row's
+  fixed roughness drops from `0.45` to `0.2` so its IBL reflection reads as a
+  recognizably coherent, mirror-ish patch rather than a soft, generic-looking
+  glow.
+- **Bug found and fixed during this phase's own verification**: the
+  prefiltered cubemap's FBO came back `GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT`
+  for every mip level past mip 0 on this project's Mesa llvmpipe driver.
+  Root cause: `GL_TEXTURE_MAX_LEVEL` was left at its GL default of 1000 while
+  only 5 mip levels (`0..4`) were ever uploaded -- explicitly bounding
+  `GL_TEXTURE_BASE_LEVEL`/`GL_TEXTURE_MAX_LEVEL` to `[0, 4]` after upload
+  fixed it. Also found (by code review, not a run failure): a logging bug
+  where a `GLenum` framebuffer-status code was concatenated as `"0x" +
+  std::to_string(status)` -- `std::to_string` prints decimal, so the result
+  looked like hex but wasn't (`"0x36054"` for the real hex value `0x8CD6`,
+  i.e. `GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT`), which is exactly what led to
+  briefly misreading the error while debugging it; fixed with a small
+  `snprintf("0x%04X", ...)` helper matching `gl_debug.hpp`'s own formatting.
+- **Verification harness fix**: `tools/run_headless.sh`'s screenshot-capture
+  loop previously stopped polling at the *first* successful `xwd`+`convert`
+  call, which can't distinguish a genuinely rendered frame from Xvfb's still-
+  blank root window (both "succeed" -- they just capture whatever pixels are
+  there). This project's headless verification predates Phase 10, but
+  `IBLProbe`'s one-time ~1-second startup convolution (between window
+  creation and the first real rendered frame) made that pre-existing race
+  far more likely to actually manifest -- it was caught immediately, the
+  very first `run_headless.sh` capture after Phase 10 came back a ~240-byte
+  flat-black PNG. Fixed by having that loop keep polling (bounded, ~8s total)
+  until the captured file also clears a minimum size (a blank capture
+  encodes to a few hundred bytes; a real 800x600 rendered frame, tens to
+  hundreds of KB), not just "conversion succeeded."
+- **Verify**: `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh
+  build/engine_app build/phase10_screenshot.png` -- full run (including
+  `IBLProbe`'s one-time convolution) completes in well under 5 seconds.
+  Verified by actually looking at the (correctly-cropped-to-800x600)
+  screenshot, not just sampling pixels: the metallic-sweep row's most
+  metallic sphere shows a visibly larger, brighter, warm-toned reflective
+  patch than its dielectric end (rather than Phase 9's uniform matte
+  reddish-brown look); the roughness-sweep row (now fully metallic) shows a
+  sharp, mirror-like highlight at its smoothest end softening into a broad,
+  low-contrast sheen at its roughest end, with no sphere going flat black.
+  Pixel sampling backs this up quantitatively: the roughness row's peak
+  brightness strictly decreases (`751 -> 544 -> 545 -> 458` from roughness
+  `0.05` to `1.0`) while the metallic row's bright-highlight pixel fraction
+  strictly increases (`0.001 -> 0.002 -> 0.003 -> 0.004` from metallic `0`
+  to `1`). The reflection reads warm/reddish rather than sky-blue because
+  this sphere grid's albedo is a saturated, low-blue red-orange
+  (`(0.85, 0.12, 0.08)`) and a metal's specular tints by its own albedo
+  (`F0 = albedo`) -- physically correct (a copper- or gold-like metal
+  reflects a blue sky as a warm tone, not blue), not a bug. *No regression*:
+  the skybox background, shadows, ground normal mapping, HDR/tonemap, MSAA,
+  and the Blinn-Phong table/box/pyramid are all still visible/unchanged in
+  the same screenshot.
 
 ## Libraries used and why
 

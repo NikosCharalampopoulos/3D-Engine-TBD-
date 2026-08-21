@@ -42,6 +42,28 @@ uniform vec3 uViewPos;
 uniform sampler2D uShadowMap;
 uniform vec2 uShadowMapTexelSize;
 
+// --- Phase 10: image-based lighting (see engine::IBLProbe) ---
+// uIrradianceMap: a small, pre-convolved diffuse irradiance cubemap (the
+// environment integrated over a cosine-weighted hemisphere at every texel).
+// uPrefilterMap: the environment pre-convolved against the GGX specular lobe
+// at increasing roughness across its mip chain -- mip 0 = roughness 0 (a
+// crisp mirror reflection) up to MAX_REFLECTION_LOD's mip = roughness 1 (a
+// broad, blurred average). uBrdfLUT: the split-sum's precomputed BRDF
+// integral, indexed by (N.V, roughness). Together these replace the old flat
+// `uAmbientColor * albedo * ao * (1 - metallic)` placeholder ambient term
+// (see this shader's own removed Phase 9 comment) with real, direction- and
+// roughness-aware ambient lighting derived from the actual visible skybox.
+uniform samplerCube uIrradianceMap;
+uniform samplerCube uPrefilterMap;
+uniform sampler2D uBrdfLUT;
+// kPrefilterMipLevels - 1 (see IBLProbe::kPrefilterMipLevels) -- the highest
+// valid mip index of uPrefilterMap, i.e. the roughness-1.0 mip. Kept in sync
+// with that constant by hand (no shared GLSL/C++ constant crosses this
+// boundary anywhere else in this engine either -- see e.g. MAX_POINT_LIGHTS/
+// MAX_SPOT_LIGHTS above, kept in sync with application.cpp's kPointLights/
+// kSpotLights the same way).
+const float MAX_REFLECTION_LOD = 4.0;
+
 #define MAX_POINT_LIGHTS 8
 #define MAX_SPOT_LIGHTS 4
 
@@ -174,6 +196,19 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (vec3(1.0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+// The roughness-aware Fresnel variant IBL's ambient term uses instead of
+// plain fresnelSchlick() above (Karis' reference, section on IBL diffuse):
+// direct lighting's F0..1 Fresnel curve assumes a perfectly smooth mirror
+// surface, which over-estimates a rough surface's edge-on reflectance (a
+// rough dielectric's grazing-angle response is less sharply Fresnel-bright
+// than a mirror's) -- clamping the curve's upper bound to
+// max(1 - roughness, F0) instead of a flat 1.0 tempers that overestimate as
+// roughness increases, falling back to the ordinary Schlick curve exactly
+// when roughness == 0.
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
 // One light's full direct contribution: D * G * F specular, energy-conserving
 // Lambertian diffuse, both weighted by N.L and the light's incoming
 // radiance. `radiance` already has attenuation/spot-cone/shadow folded in by
@@ -283,29 +318,46 @@ void main() {
         Lo += shadeDirectLight(N, V, L, radiance, albedo, metallic, roughness, F0);
     }
 
-    // Ambient: a flat, small placeholder term (NOT real image-based lighting
-    // -- that's explicitly Phase 10's job, see this phase's brief) just so
-    // fragments in shadow/facing away from every light aren't pure black.
-    // Uses uAmbientColor (the same scene-wide ambient basic.frag adds) rather
-    // than a bare constant so both lighting models agree on how bright the
-    // scene's ambient floor is; ao (ambient occlusion) modulates only this
-    // term, per the standard convention that AO approximates occluded
-    // ambient/indirect light, not direct light (which shadow mapping already
-    // handles separately above).
+    // Ambient: real split-sum image-based lighting (Karis, "Real Shading in
+    // Unreal Engine 4"), replacing Phase 9's flat
+    // `uAmbientColor * albedo * ao * (1 - metallic)` placeholder -- see that
+    // formula's own removed comment, which named this exact upgrade as
+    // Phase 10's job. uAmbientColor itself is no longer read here at all: the
+    // whole point of IBL is that the environment's own convolved radiance
+    // (uIrradianceMap/uPrefilterMap, both derived from the actual skybox --
+    // see engine::IBLProbe) replaces a single hand-picked flat-ambient
+    // constant with a direction- and roughness-aware one.
     //
-    // Phase 9 review (second pass): this term is scaled by (1.0 - metallic),
-    // the same factor the direct-lighting diffuse term above already applies
-    // (see kD's `* (1.0 - metallic)`). A flat ambient approximates incoming
-    // *diffuse* environment light -- a fully metallic surface has no diffuse
-    // response at all, so without this factor every sphere got the same
-    // albedo-tinted glow regardless of its metallic value, masking the exact
-    // metal-vs-dielectric contrast the sphere grid exists to show. Real
-    // metals should still pick up an ambient *specular* response instead
-    // (their surroundings reflected off them) -- that's precisely what
-    // Phase 10's prefiltered-environment IBL term adds; until then, a
-    // metallic surface here correctly falls back toward the small
-    // Fresnel-only floor that direct lighting can still supply.
-    vec3 ambient = uAmbientColor * albedo * uAO * (1.0 - metallic);
+    // kS/kD split the incoming ambient energy between specular and diffuse
+    // exactly like shadeDirectLight()'s own kS/kD above, just using the
+    // roughness-aware Fresnel variant (see fresnelSchlickRoughness()'s
+    // comment) rather than plain fresnelSchlick(): direct lighting evaluates
+    // Fresnel at one specific light/view/half-vector geometry per light, but
+    // IBL's diffuse term has no single light direction to evaluate a
+    // per-light Fresnel term against, so it uses N/V directly (the same
+    // "how much of *all* incoming ambient light this surface reflects
+    // specularly vs. diffusely, from this view angle" role kS/kD play for one
+    // direct light, but averaged over the whole environment instead of one
+    // incoming ray).
+    vec3 kS = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+    vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
+
+    vec3 irradiance = texture(uIrradianceMap, N).rgb;
+    vec3 diffuseIBL = irradiance * albedo;
+
+    // The prefiltered map's mip chain is indexed by roughness directly
+    // (roughness 0 -> mip 0, roughness 1 -> the last mip, see
+    // MAX_REFLECTION_LOD/IBLProbe::kPrefilterMipLevels) -- textureLod (not a
+    // plain texture() call) is required here specifically because this LOD
+    // must be driven by the material's own roughness value, not by screen-
+    // space derivatives the way GL's automatic mip selection would pick for
+    // an ordinarily-sampled texture.
+    vec3 R = reflect(-V, N);
+    vec3 prefilteredColor = textureLod(uPrefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+    vec2 envBRDF = texture(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg;
+    vec3 specularIBL = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+
+    vec3 ambient = (kD * diffuseIBL + specularIBL) * uAO;
 
     FragColor = vec4(ambient + Lo, 1.0);
 }

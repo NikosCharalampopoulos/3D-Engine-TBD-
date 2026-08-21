@@ -62,6 +62,17 @@ const std::string kPostProcessFragmentShaderPath = resolveAssetPath("assets/shad
 // and assets/shaders/pbr.vert/pbr.frag).
 const std::string kPBRVertexShaderPath = resolveAssetPath("assets/shaders/pbr.vert");
 const std::string kPBRFragmentShaderPath = resolveAssetPath("assets/shaders/pbr.frag");
+// Phase 10: the three one-time IBL precompute programs (see
+// ibl_probe.hpp/ibl_probe.cpp). The irradiance/prefilter passes share
+// cubemap_capture.vert (a fixed-view-per-face cube render, no depth trick --
+// see that file's own header comment); the BRDF LUT pass reuses
+// postprocess.vert (an ordinary fullscreen quad with no model/view/
+// projection at all) paired with its own fragment shader.
+const std::string kCubemapCaptureVertexShaderPath = resolveAssetPath("assets/shaders/cubemap_capture.vert");
+const std::string kIrradianceFragmentShaderPath =
+    resolveAssetPath("assets/shaders/irradiance_convolution.frag");
+const std::string kPrefilterFragmentShaderPath = resolveAssetPath("assets/shaders/prefilter.frag");
+const std::string kBrdfLutFragmentShaderPath = resolveAssetPath("assets/shaders/brdf_lut.frag");
 // Phase 5's hand-authored test scene: three separate objects (a pyramid, a
 // table, and a small box sitting on top of the table) at different
 // positions, proving Model's node hierarchy + transform composition places
@@ -118,6 +129,13 @@ constexpr float kPostProcessExposure = 1.4f;
 // per-mesh Material::bind() call in the same frame (those never touch unit
 // 2).
 constexpr unsigned int kShadowMapTextureUnit = 2;
+// Phase 10: iblProbe_'s three precomputed maps, bound once per frame onto
+// pbrShader_ (see render()) at fixed texture units that don't collide with
+// any PBRMaterial::bind() call's own units (0 = albedo map, 1 = normal map --
+// see pbr_material.hpp) or kShadowMapTextureUnit above.
+constexpr unsigned int kIrradianceMapTextureUnit = 3;
+constexpr unsigned int kPrefilterMapTextureUnit = 4;
+constexpr unsigned int kBrdfLutTextureUnit = 5;
 
 // Phase 4's directional light: a fixed "sun" direction/color, not yet
 // animated or configurable -- proving the Phong math works is this phase's
@@ -389,34 +407,37 @@ constexpr glm::vec3 kSphereAlbedo{0.85f, 0.12f, 0.08f};
 // tight glint down to a broad, soft one left to right.
 constexpr float kMinPBRRoughness = 0.05f;
 constexpr float kMaxPBRRoughness = 1.0f;
-// Metallic sweep row: held at a moderate fixed roughness (deliberately well
-// above kMinPBRRoughness) so its highlight is a broad-enough, clearly visible
-// patch -- not the tiny near-single-pixel point a near-mirror roughness would
-// produce at this screen size. That size matters here specifically because
-// this row's *color* is what it demonstrates -- neutral/white-ish at
-// metallic = 0 sliding to the sphere's own red-orange tint at metallic = 1
-// (F0 = albedo) -- and a near-mirror highlight's peak texel saturates to
-// white regardless of F0 (verified while tuning this constant: at
-// kMinPBRRoughness the GGX peak is bright enough that Reinhard tonemapping
-// drives every channel to the display's white point before any F0 tint
-// survives, hiding exactly the distinction this row exists to show). 0.45
-// keeps the peak below that saturation point, letting the F0 tint actually
-// reach the screen.
-constexpr float kMetallicRowRoughness = 0.45f;
-// Roughness sweep row: NOT fully metallic (see Phase 9 review's second
-// pass) -- a metallic=1 sphere has zero diffuse term (pbr.frag's
-// `kD *= (1.0 - metallic)`), so with no image-based lighting yet (that's
-// Phase 10's job; only a few analytic point/directional lights exist right
-// now) a fully metallic sphere is legitimately near-black everywhere except
-// the couple of pixels where a light's specular reflection happens to land
-// -- physically correct, but unreadable as a demo before IBL exists to give
-// metals their usual reflected-environment brightness. 0.35 keeps this row
-// clearly metal-leaning (still visibly more reflective/tinted than a plain
-// dielectric) while its remaining diffuse term keeps every sphere in the row
-// visibly lit, so the highlight shrinking across roughness reads as a
-// distinct bright patch riding on a visible sphere, not a near-invisible
-// dot on a black one.
-constexpr float kRoughnessRowMetallic = 0.35f;
+// Metallic sweep row: held at a fixed roughness low enough for the
+// prefiltered-environment IBL reflection (see engine::IBLProbe/pbr.frag's
+// Phase 10 ambient term) to read as a recognizably crisp, mirror-ish
+// reflection rather than a soft, generic-looking glow -- not so low that the
+// GGX highlight collapses to a near-single-pixel point at this screen size
+// (Phase 9's original concern) nor so low that Reinhard tonemapping drives
+// its peak texel to the display's white point before any F0 tint survives
+// (also Phase 9's original concern, see this constant's superseded comment
+// in git history). 0.2 keeps the direct-light specular highlight comfortably
+// sized and non-saturating while giving the IBL specular term enough
+// coherence (mip ~0.2 * MAX_REFLECTION_LOD of engine::IBLProbe's prefiltered
+// cubemap) to visibly carry the skybox's own gradient across the sphere's
+// body, not just its highlight -- letting metallic = 0 -> 1 read as
+// "diffuse/matte -> reflective/mirror-ish", not just "dim -> bright".
+constexpr float kMetallicRowRoughness = 0.2f;
+// Roughness sweep row: fully metallic (Phase 10 revision -- Phase 9's
+// original 0.35 compromise is now obsolete). Phase 9's review explicitly
+// flagged 0.35 as a stopgap: "with no image-based lighting yet ... a fully
+// metallic sphere is legitimately near-black everywhere except the couple of
+// pixels where a light's specular reflection happens to land ... unreadable
+// as a demo before IBL exists to give metals their usual
+// reflected-environment brightness" (see git history for that comment in
+// full). IBL now exists (engine::IBLProbe's prefiltered specular cubemap),
+// so a fully metallic sphere here is no longer near-black: its specular IBL
+// term alone (F0 = albedo, no diffuse term to speak of) picks up a visible,
+// environment-tinted reflection at every roughness value, letting this row
+// demonstrate its intended effect -- a sharp mirror-like reflection at low
+// roughness (left) softening into a broad, blurred one at high roughness
+// (right) -- exactly the way a real metal's reflection behaves, rather than
+// the diffuse-dominated compromise 0.35 was standing in for.
+constexpr float kRoughnessRowMetallic = 1.0f;
 constexpr float kSphereAO = 1.0f;
 
 glm::mat4 computeLightSpaceMatrix() {
@@ -469,6 +490,9 @@ Application::Application(int width, int height, const std::string& title, std::u
       skyboxShader_(resources_.getShader(kSkyboxVertexShaderPath, kSkyboxFragmentShaderPath)),
       postProcessShader_(resources_.getShader(kPostProcessVertexShaderPath, kPostProcessFragmentShaderPath)),
       pbrShader_(resources_.getShader(kPBRVertexShaderPath, kPBRFragmentShaderPath)),
+      irradianceShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kIrradianceFragmentShaderPath)),
+      prefilterShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kPrefilterFragmentShaderPath)),
+      brdfShader_(resources_.getShader(kPostProcessVertexShaderPath, kBrdfLutFragmentShaderPath)),
       shadowMap_(kShadowMapWidth, kShadowMapHeight),
       // Phase 7b: sized from window_'s own real framebuffer size (already
       // constructed at this point -- see this header's declaration-order
@@ -477,6 +501,11 @@ Application::Application(int width, int height, const std::string& title, std::u
       // framebuffer is larger than the window's requested size.
       hdrFramebuffer_(window_.getSize().first, window_.getSize().second),
       skybox_(kSkyboxFacePaths),
+      // Phase 10: convolves skybox_'s own just-constructed cubemap (see
+      // ibl_probe.hpp) -- must come after skybox_ (and after
+      // irradianceShader_/prefilterShader_/brdfShader_ above), matching this
+      // header's own declaration-order comment.
+      iblProbe_(skybox_.textureId(), *irradianceShader_, *prefilterShader_, *brdfShader_),
       // Phase 7a's demo normal-mapped surface -- see mesh.hpp's
       // makeGroundPlane() and this class's Phase 7a header comment. Shares
       // shader_ (the main lit program) with every entity's Model, unlike
@@ -803,6 +832,14 @@ void Application::render() {
     pbrShader_->setVec2("uShadowMapTexelSize",
                          glm::vec2(1.0f / static_cast<float>(shadowMap_.width()),
                                    1.0f / static_cast<float>(shadowMap_.height())));
+
+    // Phase 10: iblProbe_'s three precomputed maps -- bound once per frame
+    // (they never change after startup, see ibl_probe.hpp) at fixed texture
+    // units, with pbr.frag's sampler uniforms pointed at those same units.
+    iblProbe_.bindForSampling(kIrradianceMapTextureUnit, kPrefilterMapTextureUnit, kBrdfLutTextureUnit);
+    pbrShader_->setInt("uIrradianceMap", static_cast<int>(kIrradianceMapTextureUnit));
+    pbrShader_->setInt("uPrefilterMap", static_cast<int>(kPrefilterMapTextureUnit));
+    pbrShader_->setInt("uBrdfLUT", static_cast<int>(kBrdfLutTextureUnit));
 
     sphereMesh_.bind();
     for (const SphereInstance& instance : sphereInstances_) {

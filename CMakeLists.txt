@@ -131,6 +131,7 @@ add_executable(engine_app
     src/shadow_map.cpp
     src/framebuffer.cpp
     src/skybox.cpp
+    src/ibl_probe.cpp
     src/paths.cpp
 )
 

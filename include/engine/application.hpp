@@ -122,6 +122,19 @@
 //     old flat kClearR/G/B glClearColor as what's actually visible behind
 //     the scene (that glClearColor call still runs first, as a safety
 //     fallback in case the skybox draw is ever skipped/fails).
+//
+// Phase 10 replaces pbr.frag's flat placeholder ambient term with real
+// image-based lighting (see ibl_probe.hpp): iblProbe_ is built once, in the
+// constructor, from skybox_'s own cubemap -- a diffuse irradiance cubemap, a
+// mipmapped GGX-prefiltered specular cubemap, and a 2D BRDF integration LUT,
+// the standard split-sum approximation (Karis, "Real Shading in Unreal
+// Engine 4"). render() binds all three onto pbrShader_ (fixed texture units
+// 3/4/5 -- see kIrradianceMapTextureUnit/kPrefilterMapTextureUnit/
+// kBrdfLutTextureUnit in application.cpp, chosen not to collide with unit 0
+// (albedo map)/1 (normal map)/2 (shadow map)) right alongside every other
+// per-frame pbrShader_ uniform upload, once per frame -- no change to
+// render()'s overall shape, since iblProbe_'s own three maps never change
+// after startup (this engine's skybox is static for the whole run).
 
 #include <glm/glm.hpp>
 
@@ -133,6 +146,7 @@
 #include "engine/camera.hpp"
 #include "engine/entity.hpp"
 #include "engine/framebuffer.hpp"
+#include "engine/ibl_probe.hpp"
 #include "engine/input.hpp"
 #include "engine/material.hpp"
 #include "engine/mesh.hpp"
@@ -204,6 +218,9 @@ private:
     // in its own initializer, so it too must come after window_ (anywhere
     // after is fine -- it has no other dependency). camera_ does no GL
     // work so its position relative to the above is unconstrained.
+    // iblProbe_ (Phase 10) must come after skybox_ (it convolves skybox_'s
+    // own cubemap, via skybox_.textureId()) and after irradianceShader_/
+    // prefilterShader_/brdfShader_ (its constructor uses all three, once).
     Window window_;
     ResourceManager resources_;
     std::shared_ptr<Shader> shader_;
@@ -229,6 +246,15 @@ private:
     // "shader_ must outlive entities_/groundMaterial_" constraint this
     // comment block already describes for the Blinn-Phong path).
     std::shared_ptr<Shader> pbrShader_;
+    // Phase 10: the three one-time IBL precompute programs (see
+    // ibl_probe.hpp) -- routed through resources_ like every other shader,
+    // even though (like shadowShader_) nothing else currently requests the
+    // same pairs. Must be constructed before iblProbe_ below, which uses
+    // them once, in its own constructor, and keeps no reference to them
+    // afterward.
+    std::shared_ptr<Shader> irradianceShader_;
+    std::shared_ptr<Shader> prefilterShader_;
+    std::shared_ptr<Shader> brdfShader_;
     // Phase 7a: the directional light's depth-only render target. Fixed
     // resolution (see application.cpp's kShadowMapWidth/Height), independent
     // of the window's own framebuffer size.
@@ -245,6 +271,13 @@ private:
     // Loads its own 6 face images directly (not through resources_/Texture,
     // see skybox.hpp's class comment on why it's a separate small class).
     Skybox skybox_;
+    // Phase 10: the precomputed diffuse-irradiance + prefiltered-specular
+    // cubemaps and BRDF LUT that drive pbr.frag's real image-based-lighting
+    // ambient term (see ibl_probe.hpp) -- built once here, from skybox_'s own
+    // cubemap (skybox_.textureId()), so it must be declared (and thus
+    // constructed) after skybox_ and after irradianceShader_/
+    // prefilterShader_/brdfShader_ above.
+    IBLProbe iblProbe_;
     // Phase 7a: a hand-built ground plane (see mesh.hpp's makeGroundPlane())
     // with a bound normal map, drawn directly alongside entities_ rather
     // than through Model/scene.obj -- see this header's Phase 7a comment

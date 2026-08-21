@@ -65,20 +65,39 @@ APP_PID=$!
 # GL context even though rendering hasn't started yet.
 sleep 0.4
 
-# Poll for a successful screenshot (up to ~5s) while the app is still
-# alive and drawing its cleared frames.
-for _ in $(seq 1 25); do
+# Poll for a screenshot that actually shows rendered content (up to ~8s)
+# while the app is still alive. Phase 10 added a one-time, roughly
+# ~1-second startup cost (engine::IBLProbe's offline irradiance/prefilter/
+# BRDF-LUT convolution passes, run once before the main loop's first frame
+# -- see application.cpp/ibl_probe.cpp) between window creation and the
+# first real rendered frame; a plain "first xwd+convert that succeeds wins"
+# loop (this script's original behavior) can't tell a genuinely rendered
+# frame apart from Xvfb's still-blank root window captured during that
+# window -- xwd/convert both "succeed" either way, they just capture
+# whatever pixels are there, blank or not. A blank/near-empty capture
+# encodes down to a tiny file (a few hundred bytes, a flat single-color
+# PNG) versus a real rendered 800x600 frame's tens-to-hundreds of KB, so
+# this loop now keeps polling past a merely-successful conversion until the
+# resulting file also clears a minimum size, rather than stopping at the
+# first technically-successful (but possibly still-blank) one.
+MIN_SCREENSHOT_BYTES=20000
+for _ in $(seq 1 40); do
     if ! kill -0 "${APP_PID}" 2>/dev/null; then
         break
     fi
     if command -v xwd >/dev/null 2>&1; then
         if xwd -root -display "${DISPLAY}" -out "${SCREENSHOT_OUT}.xwd" 2>/dev/null; then
             if command -v convert >/dev/null 2>&1; then
-                convert "${SCREENSHOT_OUT}.xwd" "${SCREENSHOT_OUT}" 2>/dev/null && break
+                if convert "${SCREENSHOT_OUT}.xwd" "${SCREENSHOT_OUT}" 2>/dev/null; then
+                    size=$(stat -c%s "${SCREENSHOT_OUT}" 2>/dev/null || stat -f%z "${SCREENSHOT_OUT}" 2>/dev/null || echo 0)
+                    if (( size >= MIN_SCREENSHOT_BYTES )); then
+                        break
+                    fi
+                fi
             fi
         fi
     fi
-    sleep 0.1
+    sleep 0.2
 done
 
 # Hard timeout so a hung app can never leave this script (or the headless

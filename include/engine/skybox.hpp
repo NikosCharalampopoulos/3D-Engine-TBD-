@@ -61,6 +61,13 @@ public:
     void draw(Shader& shader, const glm::mat4& view, const glm::mat4& projection,
               unsigned int textureUnit = 0) const;
 
+    // Phase 10: the raw GL cubemap texture name, exposed read-only so
+    // engine::IBLProbe (see ibl_probe.hpp) can sample this same environment
+    // when convolving the irradiance/prefiltered-specular maps -- IBL's
+    // whole premise is deriving those from whatever's actually visible as the
+    // scene's background, not a second, separately-authored environment.
+    unsigned int textureId() const { return textureId_; }
+
 private:
     unsigned int textureId_ = 0;
     // A plain unit cube (see mesh.hpp's makeCube()) -- reused as-is rather
