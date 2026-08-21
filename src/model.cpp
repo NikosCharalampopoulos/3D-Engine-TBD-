@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "engine/log.hpp"
+#include "engine/paths.hpp"
 #include "engine/resource_manager.hpp"
 #include "engine/texture.hpp"
 
@@ -22,8 +23,10 @@ namespace {
 // diffuse texture of its own (no texture at all, or one that failed to
 // load) -- reusing the same checker texture Phase 4's cube already uses
 // rather than adding a second asset or a from-memory solid-color Texture
-// constructor neither Texture nor this phase otherwise needs.
-constexpr const char* kFallbackTexturePath = "assets/textures/checker.png";
+// constructor neither Texture nor this phase otherwise needs. Resolved via
+// resolveAssetPath() against the executable's own directory, not the
+// process's cwd -- see paths.hpp.
+const std::string kFallbackTexturePath = resolveAssetPath("assets/textures/checker.png");
 
 // Converts one Assimp aiMatrix4x4 to a glm::mat4.
 //

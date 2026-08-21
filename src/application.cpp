@@ -19,6 +19,7 @@
 #include "engine/gl_debug.hpp"
 #include "engine/log.hpp"
 #include "engine/model.hpp"
+#include "engine/paths.hpp"
 
 namespace engine {
 
@@ -40,27 +41,29 @@ constexpr float kClearA = 1.0f;
 // the software rasterizer allows.
 constexpr auto kFrameThrottle = std::chrono::milliseconds(16);
 
-// Shader/model asset paths, read relative to the process's working
-// directory -- see README.md, headless runs (and normal ones) are expected
-// to be launched from the repo root so these resolve.
-constexpr const char* kVertexShaderPath = "assets/shaders/basic.vert";
-constexpr const char* kFragmentShaderPath = "assets/shaders/basic.frag";
+// Shader/model asset paths. Resolved via resolveAssetPath() against the
+// running executable's own directory (see paths.hpp) rather than used as
+// bare relative paths against the process's current working directory --
+// CMake copies assets/ next to the built binary specifically so this
+// resolves correctly regardless of the directory the exe is launched from.
+const std::string kVertexShaderPath = resolveAssetPath("assets/shaders/basic.vert");
+const std::string kFragmentShaderPath = resolveAssetPath("assets/shaders/basic.frag");
 // Phase 7a: the shadow map's own depth-only program (see
 // renderShadowPass()/shadow_map.hpp).
-constexpr const char* kShadowVertexShaderPath = "assets/shaders/shadow.vert";
-constexpr const char* kShadowFragmentShaderPath = "assets/shaders/shadow.frag";
+const std::string kShadowVertexShaderPath = resolveAssetPath("assets/shaders/shadow.vert");
+const std::string kShadowFragmentShaderPath = resolveAssetPath("assets/shaders/shadow.frag");
 // Phase 7b: the skybox's own program and the HDR-resolve fullscreen pass's
 // program (see skybox.hpp/framebuffer.hpp and Application::render()).
-constexpr const char* kSkyboxVertexShaderPath = "assets/shaders/skybox.vert";
-constexpr const char* kSkyboxFragmentShaderPath = "assets/shaders/skybox.frag";
-constexpr const char* kPostProcessVertexShaderPath = "assets/shaders/postprocess.vert";
-constexpr const char* kPostProcessFragmentShaderPath = "assets/shaders/postprocess.frag";
+const std::string kSkyboxVertexShaderPath = resolveAssetPath("assets/shaders/skybox.vert");
+const std::string kSkyboxFragmentShaderPath = resolveAssetPath("assets/shaders/skybox.frag");
+const std::string kPostProcessVertexShaderPath = resolveAssetPath("assets/shaders/postprocess.vert");
+const std::string kPostProcessFragmentShaderPath = resolveAssetPath("assets/shaders/postprocess.frag");
 // Phase 5's hand-authored test scene: three separate objects (a pyramid, a
 // table, and a small box sitting on top of the table) at different
 // positions, proving Model's node hierarchy + transform composition places
 // more than one mesh correctly -- see assets/models/scene.obj and
 // model.cpp.
-constexpr const char* kScenePath = "assets/models/scene.obj";
+const std::string kScenePath = resolveAssetPath("assets/models/scene.obj");
 
 // Phase 7a: the ground plane's own textures (see mesh.hpp's
 // makeGroundPlane() and this file's groundMesh_/groundMaterial_). The
@@ -68,17 +71,20 @@ constexpr const char* kScenePath = "assets/models/scene.obj";
 // path (see model.cpp's kFallbackTexturePath) -- ResourceManager caches by
 // path, so this is the same already-loaded Texture, not a second upload of
 // the same PNG.
-constexpr const char* kGroundDiffuseTexturePath = "assets/textures/checker.png";
-constexpr const char* kGroundNormalMapPath = "assets/textures/normal_bump.png";
+const std::string kGroundDiffuseTexturePath = resolveAssetPath("assets/textures/checker.png");
+const std::string kGroundNormalMapPath = resolveAssetPath("assets/textures/normal_bump.png");
 
 // Phase 7b: the skybox's 6 procedurally-generated face images (see
 // README.md's Phase 7b notes for how they were made and why their edges
 // line up seam-free) -- order must match skybox.hpp's documented
 // right/left/top/bottom/front/back convention exactly.
 const std::array<std::string, 6> kSkyboxFacePaths = {
-    "assets/textures/skybox/right.png",  "assets/textures/skybox/left.png",
-    "assets/textures/skybox/top.png",    "assets/textures/skybox/bottom.png",
-    "assets/textures/skybox/front.png",  "assets/textures/skybox/back.png",
+    resolveAssetPath("assets/textures/skybox/right.png"),
+    resolveAssetPath("assets/textures/skybox/left.png"),
+    resolveAssetPath("assets/textures/skybox/top.png"),
+    resolveAssetPath("assets/textures/skybox/bottom.png"),
+    resolveAssetPath("assets/textures/skybox/front.png"),
+    resolveAssetPath("assets/textures/skybox/back.png"),
 };
 
 // Phase 7a: fixed resolution for the directional light's shadow map (see

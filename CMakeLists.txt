@@ -131,6 +131,7 @@ add_executable(engine_app
     src/shadow_map.cpp
     src/framebuffer.cpp
     src/skybox.cpp
+    src/paths.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)
@@ -151,6 +152,19 @@ if(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
     target_link_libraries(engine_app PRIVATE Threads::Threads)
 endif()
+
+# Asset paths are resolved at runtime relative to the executable's own
+# directory (see src/paths.cpp), not the process's current working
+# directory -- so copy assets/ next to the built binary on every build.
+# This makes the exe runnable from any cwd (a different terminal directory,
+# double-clicking it in a file browser, a multi-config generator's
+# Debug/Release subfolder, etc.) instead of only working when launched from
+# the source tree root.
+add_custom_command(TARGET engine_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:engine_app>/assets"
+    COMMENT "Copying assets/ next to engine_app"
+)
 
 enable_testing()
 add_subdirectory(tests)

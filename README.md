@@ -153,7 +153,11 @@ via an archive/tarball download). Subsequent builds reuse the clones under
 `build/_deps/` and do not need network access. No other manual steps are
 required beyond the system packages above.
 
-The resulting executable is `build/engine_app`.
+The resulting executable is `build/engine_app`. It can be launched from any
+directory (double-clicking it, running it from an unrelated shell cwd,
+etc.) -- the build copies `assets/` next to the executable, and asset
+paths are resolved against the executable's own location at runtime
+(`src/paths.cpp`), not the process's current working directory.
 
 ## Development history
 
