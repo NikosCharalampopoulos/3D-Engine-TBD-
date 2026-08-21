@@ -74,10 +74,13 @@ set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
 # warnings aren't ours to fix (see the phase brief), so just don't let them
 # be fatal.
 set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
-# This container has zlib1g-dev installed, so Assimp's own find_package(ZLIB)
-# succeeds against the system library -- no need to vendor/build Assimp's
-# bundled copy.
-set(ASSIMP_BUILD_ZLIB OFF CACHE BOOL "" FORCE)
+# Let Assimp vendor/build its own bundled zlib instead of relying on a
+# system copy. This project's dev container happens to have zlib1g-dev
+# installed, but that's not portable -- a fresh Windows/macOS checkout (or
+# a Linux box without the -dev package) has no system zlib for Assimp's
+# find_package(ZLIB) to find, which would otherwise break the build on any
+# machine other than this one.
+set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
 
 # Restrict importers to just what this phase's Model class + test asset
 # actually need: OBJ (assets/models/scene.obj, hand-authored for this phase)

@@ -43,6 +43,9 @@ extern "C" {
 
 #include "glad/khrplatform.h"
 
+#if defined(_WIN32) && !defined(APIENTRY)
+#define APIENTRY __stdcall
+#endif
 #ifndef APIENTRY
 #define APIENTRY
 #endif
