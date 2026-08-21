@@ -484,7 +484,16 @@ plus one genuinely new rendering capability (MSAA).
   `glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API)`,
   guarded to Linux only (`#if defined(__linux__)`; EGL context creation
   isn't available on macOS), which is what actually gets `GL_SAMPLES = 4`
-  on this headless stack. GLAD's hand-written `glad.h` gained the
+  on this headless stack. This is applied unconditionally on Linux (not
+  just when GLX turns out to lack multisample configs) because it's cheap
+  and verified-safe on the one Linux target this project actually tests
+  against; it hasn't been validated against every real desktop Linux GLX
+  setup (indirect/network GLX such as `ssh -X`, an old proprietary driver,
+  a system with no `libEGL` at all), so `ENGINE_DISABLE_EGL_CONTEXT` (any
+  non-empty, non-`"0"` value) is a bug-review-added escape hatch back to
+  GLFW's default GLX path for anyone who hits a regression there, matching
+  this project's existing `ENGINE_MAX_FRAMES`/`ENGINE_CAMERA_DEMO`
+  getenv-gated-behavior convention. GLAD's hand-written `glad.h` gained the
   `GL_MULTISAMPLE`/`GL_SAMPLE_BUFFERS`/`GL_SAMPLES` enum values it didn't
   previously define (the functions used to enable/query them, `glEnable`/
   `glGetIntegerv`, were already loaded).

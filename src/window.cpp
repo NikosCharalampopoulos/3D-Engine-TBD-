@@ -3,6 +3,7 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -19,6 +20,28 @@ void glfwErrorCallback(int error, const char* description) {
 // smoother, still cheap" default most engines pick; not exposed as a knob
 // anywhere yet since nothing in this phase needs to vary it.
 constexpr int kRequestedMsaaSamples = 4;
+
+// Escape hatch for the Linux EGL-context-creation hint below. It's on by
+// default because it's verified necessary on this project's headless
+// Xvfb+llvmpipe target (see the constructor's comment) and GLFW's EGL path
+// is dlopen'd at runtime, guarded to Linux only, and fails gracefully (see
+// the constructor's window_ null-check) -- so forcing it costs nothing on a
+// system where it works. But "costs nothing" isn't the same as "can't ever
+// regress something else": a real desktop Linux box this was never
+// validated against (indirect/network GLX such as `ssh -X` or a VNC/X
+// server whose GLX works but whose EGL story is thinner, an old proprietary
+// driver, a minimal system with no libEGL at all) could genuinely work
+// today via plain GLX and stop working once EGL is forced -- unlike the
+// headless CI target, nobody has verified those. Rather than assume "can't
+// hurt" for environments nobody tested, this one env var lets a real user
+// who hits exactly that regression get back to GLFW's default GLX path
+// without needing a source change -- matching this codebase's existing
+// convention of getenv-gated escape hatches for behavior that only some
+// environments need (ENGINE_MAX_FRAMES, ENGINE_CAMERA_DEMO).
+bool eglContextDisabledFromEnv() {
+    const char* value = std::getenv("ENGINE_DISABLE_EGL_CONTEXT");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
 
 }  // namespace
 
@@ -68,7 +91,13 @@ Window::Window(int width, int height, const std::string& title) : width_(width),
     // available on macOS (no EGL there), so other platforms are left on
     // GLFW's own native default (GLFW_NATIVE_CONTEXT_API -- WGL on Windows,
     // NSGL on macOS), unaffected by this hint.
-    glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
+    //
+    // ENGINE_DISABLE_EGL_CONTEXT is the escape hatch for this (see
+    // eglContextDisabledFromEnv() above) -- unset by default, so this hint
+    // still applies unconditionally on Linux out of the box.
+    if (!eglContextDisabledFromEnv()) {
+        glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
+    }
 #endif
 
     window_ = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
