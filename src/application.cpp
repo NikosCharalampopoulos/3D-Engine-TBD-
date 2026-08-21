@@ -199,12 +199,29 @@ constexpr float kGroundUvTiling = 6.0f;
 // real position (it's meant to be infinitely far away), so this picks a
 // fixed, reasonable light-space "eye" -- a point kLightDistance back along
 // -kLightDirection from the scene's center -- purely to build an
-// orthographic view/projection pair from. kOrthoHalfExtent generously covers
-// kGroundHalfExtent (the largest thing in the scene) on every side;
+// orthographic view/projection pair from.
+//
+// kOrthoHalfExtent must cover the ground plane's *diagonal* footprint as
+// seen from the light, not just kGroundHalfExtent itself: because the light
+// looks along an oblique direction (kLightDirection has both a horizontal
+// and vertical component, not a top-down one), the light-space "right" axis
+// does not line up with the ground plane's own X or Z edges. A square of
+// half-extent kGroundHalfExtent projected onto an axis running diagonally
+// across it needs up to its full diagonal half-length
+// (kGroundHalfExtent * sqrt(2) ~= 3.68 for kGroundHalfExtent = 2.6), not
+// just kGroundHalfExtent itself, to stay fully inside [-kOrthoHalfExtent,
+// kOrthoHalfExtent]. A previous value of 3.0 here was verified (by
+// projecting the ground plane's corners into light space) to fall about 0.56
+// units short of that, silently clipping the plane's far corners out of the
+// shadow frustum -- harmless in this particular scene (nothing casts a
+// shadow anywhere near those corners) but wrong on its own terms, and a
+// latent bug for any future scene that moves a shadow-casting object out
+// there. 4.0 comfortably covers the diagonal with margin to spare.
+//
 // kOrthoNear/kOrthoFar cover the distance from that eye point back through
 // the scene and out the other side with margin.
 constexpr float kLightDistance = 6.0f;
-constexpr float kOrthoHalfExtent = 3.0f;
+constexpr float kOrthoHalfExtent = 4.0f;
 constexpr float kOrthoNear = 0.5f;
 constexpr float kOrthoFar = 12.0f;
 
