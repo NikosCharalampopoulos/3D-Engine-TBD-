@@ -6,14 +6,13 @@
 //
 // Vertex is interleaved position/normal/texCoord so later phases (lighting,
 // texturing) can add their own vertex attribute pointers into the same
-// buffer layout without restructuring it. This phase only wires up
-// `position` as an active vertex attribute (attribute location 0) --
-// `normal`/`texCoord` are real fields with real data uploaded to the GPU as
-// part of the interleaved buffer, they're just not yet exposed via
-// glVertexAttribPointer/glEnableVertexAttribArray, since nothing consumes
-// them yet (no lighting or texturing this phase). A later phase can add
-// `glEnableVertexAttribArray(1)`/`(2)` for them without touching Mesh's
-// upload path at all.
+// buffer layout without restructuring it. Phases 2-3 only wired up
+// `position` as an active vertex attribute (attribute location 0); Phase 4
+// wires up `normal` (location 1) and `texCoord` (location 2) too, since
+// that's the first phase that actually consumes them (Phong lighting needs
+// normals, texture sampling needs UVs). No upload-path changes were needed
+// to do this -- the interleaved data was already correct on the GPU, just
+// unexposed.
 //
 // Move-only for the same reason as Shader: a VAO/VBO/EBO name triple is a
 // scarce GL handle set owned by exactly one Mesh, so copying is disabled
@@ -77,10 +76,12 @@ private:
 // normal and a 0..1 texCoord quad) + a 36-entry EBO (2 triangles per face).
 // 4-per-face rather than 8 shared corners because normals differ by face,
 // so corners can't actually be shared once normals are real per-vertex
-// data. Indices are laid out as 6 contiguous faces of 6 indices each
-// (face i occupies indices [i*6, i*6+6)), so Mesh::drawRange(i * 6, 6) draws
-// exactly one face -- used by Application to give each face its own
-// uniform color this phase.
+// data. Indices are laid out as 6 contiguous faces of 6 indices each (face
+// i occupies indices [i*6, i*6+6)), so Mesh::drawRange(i * 6, 6) still
+// draws exactly one face if a caller wants that (Phase 2-3's Application
+// used it to give each face its own flat uColor; Phase 4's textured/lit
+// cube instead draws the whole mesh in one draw() call, since lighting/
+// texturing don't need per-face draw calls).
 Mesh makeCube(float halfExtent = 0.5f);
 
 }  // namespace engine

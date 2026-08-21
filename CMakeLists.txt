@@ -67,6 +67,7 @@ add_executable(engine_app
     src/shader.cpp
     src/mesh.cpp
     src/camera.cpp
+    src/texture.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

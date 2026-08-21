@@ -162,6 +162,7 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_TEXTURE_2D 0x0DE1
 #define GL_UNPACK_ALIGNMENT 0x0CF5
 #define GL_RED 0x1903
+#define GL_RG 0x8227
 #define GL_RGB 0x1907
 #define GL_RGBA 0x1908
 #define GL_RGB8 0x8051

@@ -51,6 +51,10 @@ public:
     // which glUniform* calls silently ignore per the GL spec, so this never
     // throws -- it's only appropriate to call after use()/bind().
     void setMat4(const std::string& name, const glm::mat4& value) const;
+    // For the normal matrix (transpose(inverse(mat3(model)))) and any other
+    // mat3 uniform -- added in Phase 4 alongside lighting, which is the
+    // first thing that needs one.
+    void setMat3(const std::string& name, const glm::mat3& value) const;
     void setVec3(const std::string& name, const glm::vec3& value) const;
     void setFloat(const std::string& name, float value) const;
     void setInt(const std::string& name, int value) const;

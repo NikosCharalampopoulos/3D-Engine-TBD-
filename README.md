@@ -4,8 +4,11 @@ A C++/OpenGL 3D engine, building toward a game engine, starting from
 OpenGL bare-metal basics. This repository is developed in phases; this
 document covers **Phase 0 (project scaffolding and a proven build/run
 pipeline), Phase 1 (a real window + main-loop foundation), Phase 2
-(shaders + a rendered, per-face-colored cube), and Phase 3 (a real
-free-fly Camera + Transform, replacing the hardcoded view/projection).**
+(shaders + a rendered, per-face-colored cube), Phase 3 (a real
+free-fly Camera + Transform, replacing the hardcoded view/projection), and
+Phase 4 (a Texture class, a Material bundling it with a Shader, and
+Blinn-Phong directional lighting -- the flat per-face-colored cube is now a
+single textured, lit surface).**
 
 Phase 0 does *not* contain engine logic -- it exists to prove that the
 toolchain (CMake, dependency fetching, a GL 3.3 core context, and a headless
@@ -21,11 +24,12 @@ render/swap main loop) pair -- see "Phase 1: window + main loop" below.
 ```
 CMakeLists.txt        Root build: fetches deps, builds engine_app
 src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
-                       shader.cpp, mesh.cpp, camera.cpp)
+                       shader.cpp, mesh.cpp, camera.cpp, texture.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
-                       gl_debug, version, shader, mesh, camera, transform)
+                       gl_debug, version, shader, mesh, camera, transform,
+                       texture, material)
 external/              Vendored small/single-header libs (stb_image, glad)
-assets/                Shaders, textures, models (shaders/ stubbed for now)
+assets/                Shaders, textures, models (assets/textures/checker.png)
 tools/                 Build/run/screenshot scripts
 tests/                 Placeholder for later phases (empty CMakeLists)
 ```
@@ -275,13 +279,84 @@ is the verified-working method here; fix or reinstall Pillow
   view matrix is coming from a real, different `Camera`, not a vestigial
   copy of Phase 2's hardcoded one.
 
+## Phase 4: Texture + Material + Phong lighting
+
+- **`engine::Texture`** (`include/engine/texture.hpp`, `src/texture.cpp`) --
+  RAII wrapper around a GL 2D texture object. Loads an image file via
+  `stb_image` (`src/texture.cpp` is the one translation unit in the project
+  that `#define`s `STB_IMAGE_IMPLEMENTATION`), throwing `std::runtime_error`
+  (after logging the real `stbi_failure_reason()`) if the file can't be
+  found/decoded, rather than uploading garbage. Upload format is chosen from
+  stb_image's own reported channel count (`GL_RED`/`GL_RG`/`GL_RGB`/
+  `GL_RGBA` for 1/2/3/4 channels) instead of hardcoding `GL_RGB` -- a
+  hardcoded format would read an RGBA source one byte short per pixel,
+  shearing every row's colors. Filtering is `GL_LINEAR`
+  (magnification)/`GL_LINEAR_MIPMAP_LINEAR` (minification, with
+  `glGenerateMipmap`) and wrap is `GL_REPEAT`. `bind(unit)` activates
+  `GL_TEXTURE0 + unit` and binds the texture there; move-only, same
+  rationale as `Shader`/`Mesh` (a GL texture name is a scarce handle owned
+  by exactly one `Texture`).
+- **A real texture asset**: `assets/textures/checker.png`, a 256x256 8-bit
+  RGB (`PNG24`, not palette-indexed, so stb_image reports a clean 3-channel
+  load) orange/blue checkerboard, generated with ImageMagick `convert`
+  (Pillow is broken in this container, see the Phase 1 note above) and
+  committed as a real binary asset -- not generated at build/run time.
+- **`engine::Material`** (`include/engine/material.hpp`, header-only) --
+  bundles a `Shader&` (non-owning; shaders are typically shared across many
+  materials/objects and outlive any one `Material`), an owned `Texture`
+  (diffuse map), and two simple Phong-lite properties: `tint` (`vec3`) and
+  `shininess` (`float`). `bind()` activates the shader, binds the texture,
+  and uploads the sampler/tint/shininess uniforms; model/view/projection
+  and lighting uniforms are scene/per-draw state the caller sets separately
+  right after. Move-only (holds a `Texture`). Deliberately minimal -- no
+  multi-texture-slot system, no serialization -- but shaped so Phase 5
+  (model loading) can plausibly attach one `Material` per `Mesh` later.
+- **Phong lighting** (`assets/shaders/basic.vert`/`basic.frag`, updated in
+  place since nothing else referenced the old flat-color version): standard
+  ambient + diffuse (N.L) + specular, using the Blinn-Phong halfway vector
+  (`normalize(lightDir + viewDir)`) rather than classic `reflect()` -- a
+  deliberate choice (more numerically robust, the modern convention), not
+  an oversight. One directional light (`uLightDirection`/`uLightColor`/
+  `uAmbientColor`), the minimum bar for this phase. The vertex shader
+  uploads a proper normal matrix, `transpose(inverse(mat3(uModel)))`,
+  computed on the CPU each frame in `Application::render()` -- not
+  `mat3(uModel)` directly, which is a classic subtly-wrong shortcut that
+  only happens to work under uniform scale and silently skews normals
+  otherwise (this engine's `Transform` allows non-uniform scale).
+- **`engine::Mesh`** now wires up attributes 1 (`normal`) and 2
+  (`texCoord`), left unwired since Phase 2 because nothing consumed them
+  until lighting/texturing existed; the interleaved vertex data itself
+  (and `makeCube()`'s per-face outward normals/UVs) was already correct,
+  just not exposed via `glVertexAttribPointer`/`glEnableVertexAttribArray`.
+- **Wired into `Application`**: `render()` now uploads separate
+  `uModel`/`uView`/`uProjection`/`uNormalMatrix` matrices (instead of one
+  combined `uMVP`, since the fragment shader needs a world-space fragment
+  position/normal) plus the light uniforms, binds the cube's `Material`,
+  and issues one whole-mesh `draw()` -- replacing the six
+  `drawRange()` + flat `uColor` draw calls from Phase 2-3. Camera/Transform
+  usage is otherwise unchanged from Phase 3.
+- **Verify**: same headless harness, e.g.
+  ```sh
+  ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh build/engine_app build/phase4_screenshot.png
+  convert build/phase4_screenshot.png -format %k info:   # unique color count
+  ```
+  On this container's Mesa llvmpipe software renderer this currently
+  reports 987 unique colors (vs. Phase 2-3's 5), confirming real lighting
+  gradients plus the checker texture pattern -- not a flat per-face color.
+  Spot-checking pixels within a single face (e.g. two points on the visible
+  shadowed side face) shows distinct colors (checker squares at different
+  brightness/hue, e.g. `(57,34,12)` vs. `(11,28,60)`), confirming
+  within-face variation; comparing the same checker-square color across the
+  lit top face vs. the shadowed side face (e.g. `(226,133,40)` vs.
+  `(57,34,12)`) confirms the directional-light shading gradient.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
 |-------------|---------------------------------------------|-----|
 | **GLFW**    | CMake `FetchContent` (git, tag `3.4`)        | De facto standard cross-platform windowing/input/GL-context library; actively maintained, small API surface, works fine headlessly against Xvfb. |
 | **GLM**     | CMake `FetchContent` (git, tag `1.0.1`)      | Header-only math library with GLSL-like syntax (vectors, matrices, transforms) -- avoids hand-rolling matrix/vector math for later phases (cameras, transforms). |
-| **stb_image** | Vendored single header in `external/stb/` (`stb_image.h`, from github.com/nothings/stb) | Public-domain, single-header, no build step -- simplest possible texture loading path for a later phase. Not yet `#include`d/used anywhere in Phase 0 (no textures yet), just vendored and ready. |
+| **stb_image** | Vendored single header in `external/stb/` (`stb_image.h`, from github.com/nothings/stb) | Public-domain, single-header, no build step -- simplest possible texture loading path. Vendored unused since Phase 0; Phase 4's `engine::Texture` (`src/texture.cpp`) is the first phase to `#include` it, and the only translation unit that `#define`s `STB_IMAGE_IMPLEMENTATION`. |
 | **GL loader** | Hand-written, vendored in `external/glad/` | See below. |
 
 ### GL loader: why hand-written instead of a generated GLAD
@@ -329,4 +404,9 @@ top of that loop; see "Phase 2: shaders + a rendered cube" above. Phase 3
 replaces the hardcoded view/projection/model matrices with a real
 `engine::Camera` (free-fly, yaw/pitch, WASD + mouse-look) and
 `engine::Transform` (the cube's model matrix); see "Phase 3: Camera +
-Transform" above.
+Transform" above. Phase 4 replaces the flat per-face-colored cube with a
+textured, Blinn-Phong-lit one -- `engine::Texture` loads
+`assets/textures/checker.png`, `engine::Material` bundles it with the
+shader and simple tint/shininess properties, and `basic.vert`/`basic.frag`
+implement ambient+diffuse+specular directional lighting with a proper
+normal matrix; see "Phase 4: Texture + Material + Phong lighting" above.

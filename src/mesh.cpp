@@ -28,13 +28,23 @@ Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>&
                                indices.data(), GL_STATIC_DRAW));
     }
 
-    // Attribute 0: position only, this phase. Stride spans the whole
-    // interleaved Vertex (not just vec3) so normal/texCoord already sit in
-    // the buffer at their final offsets, ready for a later phase to add
-    // attributes 1/2 without re-uploading or restructuring anything.
+    // Attribute 0: position. Attributes 1/2 (normal, texCoord) were already
+    // present in the interleaved buffer since Phase 2 but unwired until
+    // Phase 4, which is the first phase that actually consumes them
+    // (lighting needs normals, texturing needs UVs). Stride spans the whole
+    // interleaved Vertex in all three so each attribute lands at its real
+    // offset within one shared buffer.
     GL_CHECK(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                                     reinterpret_cast<void*>(offsetof(Vertex, position))));
     GL_CHECK(glEnableVertexAttribArray(0));
+
+    GL_CHECK(glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                                    reinterpret_cast<void*>(offsetof(Vertex, normal))));
+    GL_CHECK(glEnableVertexAttribArray(1));
+
+    GL_CHECK(glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                                    reinterpret_cast<void*>(offsetof(Vertex, texCoord))));
+    GL_CHECK(glEnableVertexAttribArray(2));
 
     // Unbind the VAO first so the EBO binding (which is part of VAO state)
     // stays captured; only then unbind the array buffer, which is global

@@ -19,11 +19,20 @@
 // ENGINE_CAMERA_DEMO is set) a small deterministic scripted path, since
 // there's no real keyboard/mouse under the headless Xvfb verification
 // harness. See update()'s definition for both paths.
+//
+// Phase 4 replaces Phase 2-3's flat per-face uColor rendering with a real
+// Material (Shader + Texture + tint/shininess) and Blinn-Phong directional
+// lighting: render() now uploads separate model/view/projection + normal
+// matrices (instead of one combined MVP) plus light uniforms, and issues a
+// single whole-mesh draw() instead of drawRange() per face, since the
+// cube's six flat uColor faces are gone in favor of one textured, lit
+// surface.
 
 #include <cstdint>
 #include <string>
 
 #include "engine/camera.hpp"
+#include "engine/material.hpp"
 #include "engine/mesh.hpp"
 #include "engine/shader.hpp"
 #include "engine/transform.hpp"
@@ -51,12 +60,15 @@ private:
     void render();
 
     // Declaration order matters here: window_ must construct (and create
-    // the GL context) before shader_/cube_ since both do GL calls in their
-    // constructors. camera_/cubeTransform_ do no GL work so their position
-    // relative to those is unconstrained.
+    // the GL context) before shader_/cube_/material_ since all three do GL
+    // calls in their constructors (material_'s Texture uploads via GL, and
+    // material_ holds a pointer into shader_, so shader_ must also outlive
+    // it -- hence shader_ before material_ below). camera_/cubeTransform_ do
+    // no GL work so their position relative to those is unconstrained.
     Window window_;
     Shader shader_;
     Mesh cube_;
+    Material material_;
     Camera camera_;
     Transform cubeTransform_;
     std::uint64_t maxFrames_;

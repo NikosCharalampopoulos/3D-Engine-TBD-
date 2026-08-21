@@ -16,6 +16,7 @@
 
 #include "engine/gl_debug.hpp"
 #include "engine/log.hpp"
+#include "engine/texture.hpp"
 
 namespace engine {
 
@@ -37,25 +38,22 @@ constexpr float kClearA = 1.0f;
 // the software rasterizer allows.
 constexpr auto kFrameThrottle = std::chrono::milliseconds(16);
 
-// One flat color per cube face (see makeCube()'s indexing: face i occupies
-// indices [i*6, i*6+6)), set as a uniform before that face's draw call so
-// the six faces are visually distinguishable from each other and from the
-// background -- this phase's proof that the shader+buffer pipeline actually
-// renders real geometry, not a placeholder for real lighting (Phase 4+).
-constexpr std::array<glm::vec3, 6> kFaceColors = {
-    glm::vec3{0.90f, 0.15f, 0.15f},  // +Z front:  red
-    glm::vec3{0.15f, 0.75f, 0.20f},  // -Z back:   green
-    glm::vec3{0.15f, 0.35f, 0.90f},  // +X right:  blue
-    glm::vec3{0.95f, 0.85f, 0.15f},  // -X left:   yellow
-    glm::vec3{0.85f, 0.20f, 0.85f},  // +Y top:    magenta
-    glm::vec3{0.15f, 0.85f, 0.85f},  // -Y bottom: cyan
-};
-
-// Shader source paths, read relative to the process's working directory --
-// see README.md, headless runs (and normal ones) are expected to be
-// launched from the repo root so "assets/shaders/..." resolves.
+// Shader/texture asset paths, read relative to the process's working
+// directory -- see README.md, headless runs (and normal ones) are expected
+// to be launched from the repo root so these resolve.
 constexpr const char* kVertexShaderPath = "assets/shaders/basic.vert";
 constexpr const char* kFragmentShaderPath = "assets/shaders/basic.frag";
+constexpr const char* kCubeTexturePath = "assets/textures/checker.png";
+
+// Phase 4's directional light: a fixed "sun" direction/color, not yet
+// animated or configurable -- proving the Phong math works is this phase's
+// goal, not building a full light-management system. uLightDirection points
+// *from* the light *toward* the scene (see basic.frag), coming down and
+// across so every visible cube face gets a different N.L term instead of
+// one face being lit edge-on.
+constexpr glm::vec3 kLightDirection{-0.5f, -1.0f, -0.3f};
+constexpr glm::vec3 kLightColor{1.0f, 0.95f, 0.85f};
+constexpr glm::vec3 kAmbientColor{0.15f, 0.15f, 0.18f};
 
 // Phase 2's fixed eye position, kept here only as a comment for context: it
 // was glm::vec3(0, 0, 3) looking at the origin with up (0, 1, 0). Phase 3's
@@ -77,6 +75,7 @@ Application::Application(int width, int height, const std::string& title, std::u
     : window_(width, height, title),
       shader_(kVertexShaderPath, kFragmentShaderPath),
       cube_(makeCube()),
+      material_(shader_, Texture(kCubeTexturePath), /*tint=*/glm::vec3(1.0f), /*shininess=*/32.0f),
       camera_(kDefaultCameraPosition),
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()) {
@@ -150,15 +149,30 @@ void Application::render() {
     const glm::mat4 model = cubeTransform_.getModelMatrix();
     const glm::mat4 view = camera_.getViewMatrix();
     const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
-    const glm::mat4 mvp = projection * view * model;
+    // transpose(inverse(mat3(model))), NOT just mat3(model) -- the latter is
+    // a common subtly-wrong shortcut that only happens to preserve normal
+    // directions under uniform scale/rotation/translation and silently
+    // skews them under non-uniform scale. Computed fresh each frame (cheap:
+    // one 3x3 inverse) rather than assuming the cube's transform never
+    // scales non-uniformly, since Transform allows exactly that.
+    const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
 
-    shader_.use();
-    shader_.setMat4("uMVP", mvp);
+    // material_.bind() sets the shader program, diffuse texture, and
+    // tint/shininess -- everything fixed per-material. Model/view/
+    // projection/normal-matrix and the light are scene/per-draw state, set
+    // here right after.
+    material_.bind();
+    shader_.setMat4("uModel", model);
+    shader_.setMat4("uView", view);
+    shader_.setMat4("uProjection", projection);
+    shader_.setMat3("uNormalMatrix", normalMatrix);
+    shader_.setVec3("uLightDirection", kLightDirection);
+    shader_.setVec3("uLightColor", kLightColor);
+    shader_.setVec3("uAmbientColor", kAmbientColor);
+    shader_.setVec3("uViewPos", camera_.position());
+
     cube_.bind();
-    for (std::size_t face = 0; face < kFaceColors.size(); ++face) {
-        shader_.setVec3("uColor", kFaceColors[face]);
-        cube_.drawRange(face * 6, 6);
-    }
+    cube_.draw();
 }
 
 void Application::run() {
