@@ -18,7 +18,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 APP_BIN="${1:-${REPO_ROOT}/build/engine_app}"
-SCREENSHOT_OUT="${2:-/tmp/claude-0/-home-user-3D-Engine-TBD-/07f8eadc-ba21-53c8-bb40-d7e40373b1bc/scratchpad/phase0_screenshot.png}"
+# Default lives under the repo's (gitignored) build/ directory rather than a
+# hardcoded /tmp path, so this script is portable across machines/CI and
+# doesn't depend on any particular session's scratch directory existing.
+SCREENSHOT_OUT="${2:-${REPO_ROOT}/build/phase0_screenshot.png}"
 
 if [[ ! -x "${APP_BIN}" ]]; then
     echo "error: executable not found or not executable: ${APP_BIN}" >&2

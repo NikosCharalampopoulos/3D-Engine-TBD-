@@ -51,6 +51,9 @@ FetchContent_MakeAvailable(glfw glm)
 add_library(glad STATIC external/glad/src/glad.c)
 target_include_directories(glad PUBLIC external/glad/include)
 target_link_libraries(glad PUBLIC ${CMAKE_DL_LIBS})
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(glad PRIVATE -Wall -Wextra)
+endif()
 
 # --- stb_image (single-header, vendored) ----------------------------------
 add_library(stb_image INTERFACE)
@@ -60,6 +63,10 @@ target_include_directories(stb_image INTERFACE external/stb)
 add_executable(engine_app src/main.cpp)
 
 target_include_directories(engine_app PRIVATE include)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(engine_app PRIVATE -Wall -Wextra)
+endif()
 
 target_link_libraries(engine_app PRIVATE
     glfw

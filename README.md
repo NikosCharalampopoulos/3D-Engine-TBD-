@@ -71,7 +71,7 @@ tools/run_headless.sh [path-to-engine_app] [screenshot-output.png]
 
 # Defaults:
 #   path-to-engine_app    build/engine_app
-#   screenshot-output.png /tmp/.../scratchpad/phase0_screenshot.png
+#   screenshot-output.png build/phase0_screenshot.png
 ```
 
 Equivalent manual steps, if you want to reproduce it by hand:
