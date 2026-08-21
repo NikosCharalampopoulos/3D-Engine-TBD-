@@ -64,6 +64,8 @@ add_executable(engine_app
     src/main.cpp
     src/window.cpp
     src/application.cpp
+    src/shader.cpp
+    src/mesh.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

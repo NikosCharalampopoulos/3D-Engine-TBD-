@@ -8,10 +8,18 @@
 // movement, FPS display) will need exactly this, so the pattern is
 // established here rather than bolted on later. Deliberately does not grow
 // into a scene graph / ECS / callback system -- that's later phases' job.
+//
+// Phase 2 adds the first real rendered content: render() draws a shaded
+// cube via a Shader + Mesh instead of just clearing the framebuffer. There's
+// no Camera yet (that's Phase 3), so the view/projection matrices are built
+// by hand each frame from a hardcoded eye position + GLM's perspective() --
+// see render()'s definition for the "replace this with Camera" note.
 
 #include <cstdint>
 #include <string>
 
+#include "engine/mesh.hpp"
+#include "engine/shader.hpp"
 #include "engine/window.hpp"
 
 namespace engine {
@@ -35,7 +43,12 @@ private:
     void update(double deltaTime);
     void render();
 
+    // Declaration order matters here: window_ must construct (and create
+    // the GL context) before shader_/cube_ since both do GL calls in their
+    // constructors.
     Window window_;
+    Shader shader_;
+    Mesh cube_;
     std::uint64_t maxFrames_;
     std::uint64_t frameCount_ = 0;
     double totalTime_ = 0.0;

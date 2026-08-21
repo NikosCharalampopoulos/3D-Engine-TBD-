@@ -3,7 +3,8 @@
 A C++/OpenGL 3D engine, building toward a game engine, starting from
 OpenGL bare-metal basics. This repository is developed in phases; this
 document covers **Phase 0 (project scaffolding and a proven build/run
-pipeline) and Phase 1 (a real window + main-loop foundation).**
+pipeline), Phase 1 (a real window + main-loop foundation), and Phase 2
+(shaders + a rendered, per-face-colored cube).**
 
 Phase 0 does *not* contain engine logic -- it exists to prove that the
 toolchain (CMake, dependency fetching, a GL 3.3 core context, and a headless
@@ -163,6 +164,52 @@ installed via `pip3 list` -- a dist-packages/pip conflict. `convert` above
 is the verified-working method here; fix or reinstall Pillow
 (`pip3 install --force-reinstall pillow`) if you need the Python path.
 
+## Phase 2: shaders + a rendered cube
+
+- **`engine::Shader`** (`include/engine/shader.hpp`, `src/shader.cpp`) --
+  RAII wrapper around a linked GL program (one vertex + one fragment
+  stage). Loads source from files (`assets/shaders/basic.vert` /
+  `basic.frag`), compiles each stage and links the program, logging the
+  real GL info log via `LOG_ERROR` (not failing silently) if either step
+  fails, then throwing `std::runtime_error`. `use()`/`bind()` binds the
+  program; `setMat4`/`setVec3`/`setFloat`/`setInt` look up each uniform's
+  location by name on every call (a caching layer is a later optimization).
+  Move-only, like `Window`: copying would let two destructors
+  `glDeleteProgram` the same handle.
+- **`engine::Mesh`** (`include/engine/mesh.hpp`, `src/mesh.cpp`) -- RAII
+  wrapper around a VAO + VBO + optional EBO. `Vertex` is an interleaved
+  `{position, normal, texCoord}` struct so later phases can add attributes
+  into the same buffer layout; this phase only enables `position` as an
+  active vertex attribute (attribute 0) -- `normal`/`texCoord` are real
+  uploaded data, just not yet wired to `glVertexAttribPointer`. `draw()`
+  draws the whole mesh; `drawRange(indexOffset, count)` draws a sub-range of
+  indices (used to color the cube's 6 faces individually). `makeCube()`
+  builds a 24-vertex / 36-index unit cube (4 vertices per face, since
+  normals differ by face). Move-only, same rationale as `Shader`.
+- **Rendering**: `Application::render()` now draws `makeCube()`'s geometry
+  through `basic.vert`/`basic.frag` (`assets/shaders/`) instead of just
+  clearing the framebuffer. There's no `Camera` yet (Phase 3), so
+  view/projection are a hardcoded `glm::lookAt` + `glm::perspective` built
+  fresh each frame -- a fixed (non-animated) two-axis model rotation
+  guarantees several faces are visible in every frame, including whatever
+  moment a headless screenshot lands on. Each of the 6 faces is drawn with
+  its own uniform color (`drawRange` + `setVec3("uColor", ...)`) so a
+  screenshot shows visibly distinct, flat-shaded faces rather than a solid
+  color. `GL_DEPTH_TEST` is enabled once in `Application`'s constructor and
+  the depth buffer is cleared every frame alongside color, so faces occlude
+  each other correctly.
+- **Verify**: same headless harness as Phase 1, then check the screenshot
+  has more than the 2 colors (background + faces) a flat clear would give:
+  ```sh
+  ENGINE_MAX_FRAMES=30 bash tools/run_headless.sh build/engine_app build/phase2_screenshot.png
+  convert build/phase2_screenshot.png -format %k info:      # unique color count
+  convert build/phase2_screenshot.png -colors 64 -format %c histogram:info:-
+  ```
+  On this container's Mesa llvmpipe software renderer this currently reports
+  5 unique colors: the cornflower-blue background plus red/yellow/magenta
+  (and a tiny cyan sliver) cube faces -- confirming real, distinguishable 3D
+  geometry rendered, not a flat clear.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -211,5 +258,7 @@ a handful of hardcoded frames, and exited -- proving build+link+run
 Phase 1's `src/main.cpp` now just constructs an `engine::Application`
 (800x600, "3D Engine") and calls `run()`; the window, GL context, and the
 poll/update/render/swap loop live in `engine::Window` /
-`engine::Application` (see "Phase 1: window + main loop" above). Real
-rendering content (shaders, geometry, a camera) starts in Phase 2.
+`engine::Application` (see "Phase 1: window + main loop" above). Phase 2
+adds the first real rendering content -- shaders and a colored cube -- on
+top of that loop; see "Phase 2: shaders + a rendered cube" above. A real
+`Camera` is still a later phase's job.
