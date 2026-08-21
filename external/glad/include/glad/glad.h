@@ -114,6 +114,15 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_STENCIL_TEST 0x0B90
 #define GL_BLEND 0x0BE2
 #define GL_SCISSOR_TEST 0x0C11
+#define GL_MULTISAMPLE 0x809D
+
+// Queried via glGetIntegerv (both already declared/loaded below) to confirm
+// a multisample-capable default framebuffer actually got created -- see
+// Window's constructor (Phase 6): GLFW_SAMPLES is a window *hint*, not a
+// guarantee, so the app checks the real GL_SAMPLES value it got back rather
+// than assuming the hint took effect.
+#define GL_SAMPLE_BUFFERS 0x80A8
+#define GL_SAMPLES 0x80A9
 
 #define GL_LESS 0x0201
 #define GL_EQUAL 0x0202

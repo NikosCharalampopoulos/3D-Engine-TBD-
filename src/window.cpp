@@ -15,6 +15,11 @@ void glfwErrorCallback(int error, const char* description) {
     LOG_ERROR(std::string("GLFW error ") + std::to_string(error) + ": " + description);
 }
 
+// Requested multisample sample count -- 4x is the common "looks noticeably
+// smoother, still cheap" default most engines pick; not exposed as a knob
+// anywhere yet since nothing in this phase needs to vary it.
+constexpr int kRequestedMsaaSamples = 4;
+
 }  // namespace
 
 namespace engine {
@@ -35,6 +40,36 @@ Window::Window(int width, int height, const std::string& title) : width_(width),
     // Visible (not hidden) so an X server (e.g. Xvfb) actually maps a window
     // that can be screenshotted from the outside for headless verification.
     glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
+    // Requests a multisampled default framebuffer -- must be set before
+    // glfwCreateWindow(); GLFW/GLX/EGL pick a matching framebuffer config at
+    // creation time, it can't be changed on an existing window/context.
+    // This is a hint, not a guarantee (see this file's class comment) --
+    // verified against the real GL_SAMPLES value further down, after the
+    // context exists.
+    glfwWindowHint(GLFW_SAMPLES, kRequestedMsaaSamples);
+#if defined(__linux__)
+    // On this project's Linux/X11 target, request EGL for context creation
+    // instead of GLFW's GLX default. This was verified necessary, not
+    // cosmetic: probing this repo's headless Xvfb + Mesa llvmpipe
+    // combination directly (glXGetFBConfigs) turns up zero GLX FBConfigs
+    // with GLX_SAMPLE_BUFFERS > 0 at all -- Xvfb's own GLX implementation
+    // simply never advertises a multisample-capable visual, no matter what
+    // GLFW_SAMPLES asks for, so GL_SAMPLES silently comes back 0 through
+    // GLX on this stack. The same probe against EGL
+    // (eglGetConfigs/eglGetConfigAttrib) on the same display/driver finds
+    // 25 window-capable EGL configs with up to 4 samples -- EGL's config
+    // negotiation is independent of the X server's own (limited) GLX
+    // extension, so asking GLFW to create the context via EGL instead
+    // reaches those configs and gets real multisampling. A real desktop
+    // Linux GLX driver (not Xvfb's) typically advertises multisample
+    // FBConfigs fine and wouldn't need this, but there's no reason not to
+    // prefer the API that's verified to actually deliver what was
+    // requested. Guarded to Linux only: EGL context creation isn't
+    // available on macOS (no EGL there), so other platforms are left on
+    // GLFW's own native default (GLFW_NATIVE_CONTEXT_API -- WGL on Windows,
+    // NSGL on macOS), unaffected by this hint.
+    glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
+#endif
 
     window_ = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (!window_) {
@@ -54,6 +89,24 @@ Window::Window(int width, int height, const std::string& title) : width_(width),
     LOG_INFO(std::string("OpenGL vendor:   ") + reinterpret_cast<const char*>(glGetString(GL_VENDOR)));
     LOG_INFO(std::string("OpenGL renderer: ") + reinterpret_cast<const char*>(glGetString(GL_RENDERER)));
     LOG_INFO(std::string("OpenGL version:  ") + reinterpret_cast<const char*>(glGetString(GL_VERSION)));
+
+    // GL_MULTISAMPLE only has any effect if the framebuffer GLFW actually
+    // created has sample buffers to begin with (see the GLFW_SAMPLES hint
+    // above) -- enabling it unconditionally here is harmless either way (it
+    // just has nothing to do if GL_SAMPLES comes back 0), so the real proof
+    // is the glGetIntegerv(GL_SAMPLES, ...) query right below, not this call
+    // succeeding.
+    GL_CHECK(glEnable(GL_MULTISAMPLE));
+    GLint actualSamples = 0;
+    GL_CHECK(glGetIntegerv(GL_SAMPLES, &actualSamples));
+    if (actualSamples > 0) {
+        LOG_INFO("MSAA active: GL_SAMPLES = " + std::to_string(actualSamples) + " (requested " +
+                  std::to_string(kRequestedMsaaSamples) + ")");
+    } else {
+        LOG_WARN("Requested " + std::to_string(kRequestedMsaaSamples) +
+                  "x MSAA via GLFW_SAMPLES, but GL_SAMPLES reports 0 -- this GL/driver combo did not honor the "
+                  "hint, so rendering below proceeds without multisampling");
+    }
 
     GL_CHECK(glViewport(0, 0, width_, height_));
 

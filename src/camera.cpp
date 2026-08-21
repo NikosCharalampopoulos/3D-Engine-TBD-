@@ -1,13 +1,9 @@
 #include "engine/camera.hpp"
 
-#include <GLFW/glfw3.h>
-
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
 #include <cmath>
-
-#include "engine/window.hpp"
 
 namespace engine {
 
@@ -41,27 +37,27 @@ glm::mat4 Camera::getProjectionMatrix(float aspectRatio) const {
     return glm::perspective(glm::radians(fovYDeg_), aspectRatio, nearPlane_, farPlane_);
 }
 
-void Camera::processKeyboard(const Window& window, float deltaTime) {
+void Camera::processMovement(const InputState& input, float deltaTime) {
     const float distance = movementSpeed_ * deltaTime;
 
-    if (window.isKeyPressed(GLFW_KEY_W)) {
+    if (input.moveForward) {
         position_ += front_ * distance;
     }
-    if (window.isKeyPressed(GLFW_KEY_S)) {
+    if (input.moveBackward) {
         position_ -= front_ * distance;
     }
-    if (window.isKeyPressed(GLFW_KEY_D)) {
+    if (input.moveRight) {
         position_ += right_ * distance;
     }
-    if (window.isKeyPressed(GLFW_KEY_A)) {
+    if (input.moveLeft) {
         position_ -= right_ * distance;
     }
     // Up/down along world-up (not the camera's local up_) so climbing/diving
     // stays vertical regardless of pitch -- the usual free-fly convention.
-    if (window.isKeyPressed(GLFW_KEY_SPACE) || window.isKeyPressed(GLFW_KEY_E)) {
+    if (input.moveUp) {
         position_ += worldUp_ * distance;
     }
-    if (window.isKeyPressed(GLFW_KEY_LEFT_SHIFT) || window.isKeyPressed(GLFW_KEY_Q)) {
+    if (input.moveDown) {
         position_ -= worldUp_ * distance;
     }
 }

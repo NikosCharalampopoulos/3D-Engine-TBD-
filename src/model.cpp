@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "engine/log.hpp"
+#include "engine/resource_manager.hpp"
 #include "engine/texture.hpp"
 
 namespace engine {
@@ -73,11 +74,16 @@ std::string directoryOf(const std::string& path) {
 
 }  // namespace
 
-Model::Model(const std::string& path, Shader& shader)
+Model::Model(const std::string& path, Shader& shader, ResourceManager& resourceManager)
     // Constructed up front (before the constructor body runs any Assimp
     // code) so it always exists as a safe fallback for any mesh whose own
-    // material index is out of range -- see meshMaterialIndex_ below.
-    : defaultMaterial_(shader, Texture(kFallbackTexturePath), /*tint=*/glm::vec3(1.0f), /*shininess=*/32.0f) {
+    // material index is out of range -- see meshMaterialIndex_ below. Goes
+    // through resourceManager (rather than constructing its own Texture)
+    // so this fallback texture is the same cached instance every other
+    // no-diffuse-texture material below reuses, instead of each one
+    // reloading/re-uploading the same PNG independently.
+    : defaultMaterial_(shader, resourceManager.getTexture(kFallbackTexturePath), /*tint=*/glm::vec3(1.0f),
+                       /*shininess=*/32.0f) {
     Assimp::Importer importer;
 
     // aiProcess_Triangulate: this engine's Mesh/draw() only ever issues
@@ -202,7 +208,7 @@ Model::Model(const std::string& path, Shader& shader)
                 const std::string relative = texPath.C_Str();
                 const std::string fullPath = directory.empty() ? relative : directory + "/" + relative;
                 try {
-                    materials_.emplace_back(shader, Texture(fullPath), tint, shininess);
+                    materials_.emplace_back(shader, resourceManager.getTexture(fullPath), tint, shininess);
                     boundTexture = true;
                 } catch (const std::exception& e) {
                     // Texture() throws on a missing/undecodable file; a
@@ -216,7 +222,11 @@ Model::Model(const std::string& path, Shader& shader)
             }
         }
         if (!boundTexture) {
-            materials_.emplace_back(shader, Texture(kFallbackTexturePath), tint, shininess);
+            // Goes through the cache too, so every material that lacks its
+            // own diffuse texture (this phase's whole scene.obj, see
+            // scene.mtl) shares one already-loaded Texture instead of each
+            // reloading/re-uploading the same PNG.
+            materials_.emplace_back(shader, resourceManager.getTexture(kFallbackTexturePath), tint, shininess);
         }
     }
 

@@ -18,9 +18,9 @@
 
 #include <glm/glm.hpp>
 
-namespace engine {
+#include "engine/input.hpp"
 
-class Window;
+namespace engine {
 
 class Camera {
 public:
@@ -37,12 +37,18 @@ public:
     glm::mat4 getProjectionMatrix(float aspectRatio) const;
 
     // Moves position_ along the camera's own front/right/worldUp axes based
-    // on whichever of W/A/S/D/Space/Left-Shift are currently held, scaled by
-    // deltaTime so movement speed is independent of frame rate. Reads input
-    // via Window::isKeyPressed() -- never blocks, safe to call every frame
-    // even when the window has no real input source (e.g. headless Xvfb),
-    // since isKeyPressed() simply reports "not pressed" in that case.
-    void processKeyboard(const Window& window, float deltaTime);
+    // on whichever of `input`'s movement flags are set, scaled by deltaTime
+    // so movement speed is independent of frame rate. `input` is a snapshot
+    // Application polls once per frame from Window (see input.hpp) --
+    // Camera itself no longer reaches into Window/GLFW key constants
+    // directly (Phase 3-5's processKeyboard(const Window&, float) did);
+    // decoupling Camera from the windowing layer this way is what lets it
+    // be driven identically by real input or a future non-Window input
+    // source (recorded input, a test harness, ...) without Camera itself
+    // changing. Safe to call every frame even when nothing is actually
+    // pressed (e.g. headless Xvfb, where every InputState flag is simply
+    // false) -- it's a no-op in that case, same as before.
+    void processMovement(const InputState& input, float deltaTime);
 
     // Mouse-look, driven by the *absolute* cursor position read this frame
     // (e.g. from Window::getCursorPos()); the camera itself tracks the last

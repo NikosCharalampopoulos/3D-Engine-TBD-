@@ -9,20 +9,27 @@
 // enough that Phase 5 (model loading) can plausibly attach one Material per
 // Mesh later without this needing to be redesigned.
 //
-// Holds the Texture by value (a Material is the natural owner of its own
-// diffuse map -- Phase 5's per-mesh materials will each want their own) but
-// the Shader only by pointer, since a shader program is typically shared
-// across many materials/objects at once and is owned by whatever
-// constructs the Material (Application, for now); Material does not manage
-// the Shader's lifetime and never outlives it.
+// Holds the diffuse texture as a std::shared_ptr<Texture> rather than by
+// value: since Phase 6, textures are loaded through ResourceManager's cache
+// (see resource_manager.hpp) and can legitimately be shared by several
+// Materials at once (e.g. Model's per-mesh materials that all fall back to
+// the same default checker texture) -- Material references the cached
+// Texture rather than owning an independent copy of it. The Shader is still
+// held only by pointer, since a shader program is typically shared across
+// many materials/objects at once and is owned elsewhere (ResourceManager,
+// via Application); Material does not manage the Shader's lifetime and
+// never outlives it.
 //
-// Move-only because it holds a Texture (move-only itself, see
-// texture.hpp): copying a Material would have to copy (or silently share,
-// then double-free) the GL texture name underneath it, so Material just
-// inherits move-only-ness the same way Texture does.
+// Still move-only, matching every other GL-resource-adjacent class in this
+// engine (Shader/Texture/Mesh/Model) -- shared_ptr's own copyability would
+// make Material copyable too if that delete were removed, but nothing here
+// currently needs to copy a Material, so the safer/more consistent default
+// (move-only, opt into copying later if something actually needs it) is
+// kept rather than opening that door speculatively.
 
 #include <glm/glm.hpp>
 
+#include <memory>
 #include <utility>
 
 #include "engine/shader.hpp"
@@ -32,7 +39,7 @@ namespace engine {
 
 class Material {
 public:
-    Material(Shader& shader, Texture diffuseTexture, const glm::vec3& tint = glm::vec3(1.0f),
+    Material(Shader& shader, std::shared_ptr<Texture> diffuseTexture, const glm::vec3& tint = glm::vec3(1.0f),
               float shininess = 32.0f)
         : shader_(&shader), diffuseTexture_(std::move(diffuseTexture)), tint(tint), shininess(shininess) {}
 
@@ -50,18 +57,18 @@ public:
     // sets what varies frame-to-frame.
     void bind(unsigned int textureUnit = 0) const {
         shader_->use();
-        diffuseTexture_.bind(textureUnit);
+        diffuseTexture_->bind(textureUnit);
         shader_->setInt("uDiffuseTexture", static_cast<int>(textureUnit));
         shader_->setVec3("uTint", tint);
         shader_->setFloat("uShininess", shininess);
     }
 
     Shader& shader() const { return *shader_; }
-    const Texture& diffuseTexture() const { return diffuseTexture_; }
+    const Texture& diffuseTexture() const { return *diffuseTexture_; }
 
 private:
     Shader* shader_;
-    Texture diffuseTexture_;
+    std::shared_ptr<Texture> diffuseTexture_;
 
 public:
     // Public and mutable, deliberately -- these are the only two material

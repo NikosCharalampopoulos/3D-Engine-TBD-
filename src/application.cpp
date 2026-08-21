@@ -13,9 +13,11 @@
 #include <cstdlib>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "engine/gl_debug.hpp"
 #include "engine/log.hpp"
+#include "engine/model.hpp"
 
 namespace engine {
 
@@ -81,8 +83,7 @@ bool cameraDemoModeFromEnv() {
 
 Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames)
     : window_(width, height, title),
-      shader_(kVertexShaderPath, kFragmentShaderPath),
-      model_(kScenePath, shader_),
+      shader_(resources_.getShader(kVertexShaderPath, kFragmentShaderPath)),
       camera_(kDefaultCameraPosition),
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()) {
@@ -93,16 +94,20 @@ Application::Application(int width, int height, const std::string& title, std::u
 
     camera_.setPositionLookingAt(kDefaultCameraPosition, kSceneCenter);
 
-    // A small fixed rotation applied above the whole model's own node
-    // hierarchy (rather than identity), for the same reason Phase 2-4 fixed
-    // cubeTransform_'s rotation: proving the composition (sceneTransform_ *
+    // The scene is one Entity wrapping the same Phase 5 model
+    // (assets/models/scene.obj), loaded through resources_ instead of
+    // constructed directly. A small fixed rotation is applied to its
+    // Transform (rather than identity), for the same reason Phase 2-4 fixed
+    // cubeTransform_'s rotation: proving the composition (entity transform *
     // accumulated parent node transform * node's own local transform, see
     // Model::drawNode()) is actually being applied, not just compiling,
     // regardless of which frame a headless screenshot lands on. 12 degrees
     // is small enough that scene.obj's three objects (deliberately laid out
     // to fit within Phase 3/4's unchanged camera framing) stay comfortably
     // in frame after the rotation.
-    sceneTransform_.setRotation(glm::angleAxis(glm::radians(12.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
+    Entity sceneEntity("scene", resources_.getModel(kScenePath, *shader_));
+    sceneEntity.transform.setRotation(glm::angleAxis(glm::radians(12.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
+    entities_.push_back(std::move(sceneEntity));
 
     if (cameraDemoMode_) {
         LOG_INFO("ENGINE_CAMERA_DEMO set: driving the camera through a scripted orbit instead of live input");
@@ -110,12 +115,12 @@ Application::Application(int width, int height, const std::string& title, std::u
     LOG_INFO("Application initialized");
 }
 
-void Application::update(double deltaTime) {
+void Application::update(double deltaTime, const InputState& input) {
     totalTime_ += deltaTime;
 
     if (cameraDemoMode_) {
         // Headless-safe stand-in for real input: Xvfb has no real keyboard/
-        // mouse, so there's nothing for processKeyboard()/processMouseInput()
+        // mouse, so there's nothing for processMovement()/processMouseInput()
         // to read under the verification harness. Instead, step through a
         // small fixed set of known camera positions (all looking at the
         // scene), advancing one step every kFramesPerStep frames. Keyed off
@@ -136,14 +141,15 @@ void Application::update(double deltaTime) {
         // Real free-fly input: WASD + Space/Shift (or E/Q) move the camera,
         // scaled by deltaTime so speed is frame-rate independent; mouse-look
         // reads the absolute cursor position each frame and lets Camera
-        // derive its own delta. Under Xvfb there's no real input device
-        // driving either of these -- isKeyPressed() just reports "not
-        // pressed" and the cursor position never changes -- so this simply
+        // derive its own delta. `input` is the InputState run() already
+        // polled from window_ once this frame (see input.hpp) -- Camera
+        // itself no longer touches window_ directly. Under Xvfb there's no
+        // real input device driving any of this -- every InputState flag is
+        // false and the cursor position never changes -- so this simply
         // leaves the camera at its constructor-set default pose during
         // headless verification, which is expected and fine.
-        camera_.processKeyboard(window_, static_cast<float>(deltaTime));
-        const auto [mouseX, mouseY] = window_.getCursorPos();
-        camera_.processMouseInput(mouseX, mouseY);
+        camera_.processMovement(input, static_cast<float>(deltaTime));
+        camera_.processMouseInput(input.cursorX, input.cursorY);
     }
 }
 
@@ -164,21 +170,27 @@ void Application::render() {
     // object itself and aren't disturbed by the repeated glUseProgram calls
     // each Material::bind() makes as Model::draw() walks the scene, so this
     // is safe to set just once here.
-    shader_.use();
-    shader_.setMat4("uView", view);
-    shader_.setMat4("uProjection", projection);
-    shader_.setVec3("uLightDirection", kLightDirection);
-    shader_.setVec3("uLightColor", kLightColor);
-    shader_.setVec3("uAmbientColor", kAmbientColor);
-    shader_.setVec3("uViewPos", camera_.position());
+    shader_->use();
+    shader_->setMat4("uView", view);
+    shader_->setMat4("uProjection", projection);
+    shader_->setVec3("uLightDirection", kLightDirection);
+    shader_->setVec3("uLightColor", kLightColor);
+    shader_->setVec3("uAmbientColor", kAmbientColor);
+    shader_->setVec3("uViewPos", camera_.position());
 
-    // sceneTransform_'s matrix is the "rootTransform" Model::draw() composes
-    // above the file's own node hierarchy: model_.draw() recurses through
-    // scene.obj's node tree, uploading uModel/uNormalMatrix per node as
-    // sceneTransform * (accumulated parent node transform) * (node's own
+    // Each entity's transform matrix is the "rootTransform" Model::draw()
+    // composes above the file's own node hierarchy: draw() recurses through
+    // the model's node tree, uploading uModel/uNormalMatrix per node as
+    // entity.transform * (accumulated parent node transform) * (node's own
     // local transform), and binding + drawing each node's mesh(es) with
-    // their own Material.
-    model_.draw(shader_, sceneTransform_.getModelMatrix());
+    // their own Material. This phase's scene is exactly one Entity, but
+    // iterating entities_ (rather than drawing one hardcoded model_)
+    // establishes the pattern for however many later phases add.
+    for (const Entity& entity : entities_) {
+        if (entity.model()) {
+            entity.model()->draw(*shader_, entity.transform.getModelMatrix());
+        }
+    }
 }
 
 void Application::run() {
@@ -206,7 +218,12 @@ void Application::run() {
         const double deltaTime = currentTime - lastTime;
         lastTime = currentTime;
 
-        update(deltaTime);
+        // Polled once per frame, right after pollEvents() (same timing
+        // real keyboard/mouse reads always had) and threaded down through
+        // update() to whatever needs it (currently just Camera) -- see
+        // input.hpp.
+        const InputState input = pollInputState(window_);
+        update(deltaTime, input);
         render();
         window_.swapBuffers();
 

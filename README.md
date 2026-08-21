@@ -8,10 +8,14 @@ pipeline), Phase 1 (a real window + main-loop foundation), Phase 2
 free-fly Camera + Transform, replacing the hardcoded view/projection),
 Phase 4 (a Texture class, a Material bundling it with a Shader, and
 Blinn-Phong directional lighting -- the flat per-face-colored cube is now a
-single textured, lit surface), and Phase 5 (Assimp-based model/scene
+single textured, lit surface), Phase 5 (Assimp-based model/scene
 loading -- the single hardcoded cube is replaced with a real `engine::Model`
 that loads a multi-object scene from a file and renders its whole node
-hierarchy).**
+hierarchy), and Phase 6 (engine foundations: MSAA anti-aliasing, a
+lightweight `Entity` (Transform + Model) replacing loose per-object members,
+a `ResourceManager` asset cache, and an `InputState` layer decoupling
+`Camera` from `Window` -- the final planned phase, closing out the fixed-demo
+era in favor of reusable engine plumbing).**
 
 Phase 0 does *not* contain engine logic -- it exists to prove that the
 toolchain (CMake, dependency fetching, a GL 3.3 core context, and a headless
@@ -27,10 +31,11 @@ render/swap main loop) pair -- see "Phase 1: window + main loop" below.
 ```
 CMakeLists.txt        Root build: fetches deps (incl. Assimp), builds engine_app
 src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
-                       shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp)
+                       shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp,
+                       input.cpp, resource_manager.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
-                       texture, material, model)
+                       texture, material, model, entity, input, resource_manager)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders, textures, models (assets/textures/checker.png,
                        assets/models/scene.obj + scene.mtl)
@@ -450,6 +455,109 @@ is the verified-working method here; fix or reinstall Pillow
   same unchanged camera position -- confirming the scene's actual extent
   (~2.7 world units wide) rather than a single ~1-unit cube.
 
+## Phase 6: engine foundations (MSAA, Entity, ResourceManager, InputState)
+
+Phase 6 is the final planned phase. It's deliberately a structural/
+foundations phase, not a new rendering feature on top of the scene: nothing
+about *what* gets rendered changes from Phase 5 (same camera, same
+lighting, same `scene.obj`), only *how the engine is put together* changes,
+plus one genuinely new rendering capability (MSAA).
+
+- **MSAA anti-aliasing** (`include/engine/window.hpp`, `src/window.cpp`) --
+  `Window`'s constructor now calls `glfwWindowHint(GLFW_SAMPLES, 4)` before
+  window/context creation, and `glEnable(GL_MULTISAMPLE)` right after the
+  context becomes current. `GLFW_SAMPLES` is a *hint*, not a guarantee, so
+  the constructor also queries the real `GL_SAMPLES` value via
+  `glGetIntegerv()` and logs what it actually got -- a warning (not a
+  thrown error) if it came back 0, rather than silently claiming success.
+  On this project's headless verification stack (Xvfb + Mesa llvmpipe),
+  that check mattered in practice: probing Xvfb's own GLX implementation
+  directly (`glXGetFBConfigs`) turns up **zero** GLX framebuffer configs
+  with `GLX_SAMPLE_BUFFERS > 0` -- Xvfb's GLX extension simply never
+  advertises a multisample-capable visual on this stack, so GLFW's default
+  GLX-based context creation always came back with `GL_SAMPLES = 0`
+  regardless of the hint. Probing EGL instead (`eglGetConfigs`/
+  `eglGetConfigAttrib`) on the exact same display/driver found 25
+  window-capable EGL configs with up to 4 samples -- EGL's own config
+  negotiation doesn't go through the X server's (limited) GLX extension at
+  all. `Window`'s constructor therefore also sets
+  `glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API)`,
+  guarded to Linux only (`#if defined(__linux__)`; EGL context creation
+  isn't available on macOS), which is what actually gets `GL_SAMPLES = 4`
+  on this headless stack. GLAD's hand-written `glad.h` gained the
+  `GL_MULTISAMPLE`/`GL_SAMPLE_BUFFERS`/`GL_SAMPLES` enum values it didn't
+  previously define (the functions used to enable/query them, `glEnable`/
+  `glGetIntegerv`, were already loaded).
+- **`engine::Entity`** (`include/engine/entity.hpp`, header-only) -- the
+  smallest possible "thing in the scene" concept: a `Transform` plus an
+  optional `std::shared_ptr<Model>`. Replaces Phase 5's `model_` +
+  `sceneTransform_` pair (two loose `Application` members that only worked
+  for exactly one object) with `Application::entities_`, a
+  `std::vector<Entity>`, so `render()` iterates entities rather than
+  assuming exactly one. Deliberately *not* a general archetype/sparse-set
+  ECS -- no component pools, no systems scheduler -- just enough structure
+  to establish the "things in the world have a transform + renderable data
+  and can be enumerated" pattern a later phase's real ECS could replace.
+- **`engine::ResourceManager`** (`include/engine/resource_manager.hpp`,
+  `src/resource_manager.cpp`) -- a per-key `unordered_map<key,
+  shared_ptr<T>>` cache for `Shader`/`Texture`/`Model`, populated on first
+  request (`getShader`/`getTexture`/`getModel`) and returned again on any
+  later request for the same key, instead of each asset being loaded
+  ad-hoc. `Model`'s constructor now also takes a `ResourceManager&` and
+  routes its own texture loads (each material's diffuse map, plus the
+  shared default/fallback checker texture) through the same cache --
+  concretely fixing a real redundant-load bug this refactor surfaced:
+  Phase 5's `Model` reconstructed (reloaded and re-uploaded to the GPU) its
+  own checker-texture fallback once per material that needed one, so
+  `scene.obj`'s three no-texture materials plus `defaultMaterial_` loaded
+  the exact same PNG **four separate times** every run. Verified fixed --
+  the headless run's log now shows exactly one `Texture loaded:
+  assets/textures/checker.png` line (and one matching `ResourceManager:
+  cached texture` line) for the whole run, not four. `Material` now holds
+  its diffuse texture as a `std::shared_ptr<Texture>` (previously an owned
+  `Texture` by value) so several `Material`s can share one cached instance.
+  Deliberately not a general asset-management system: no LRU/eviction, no
+  hot-reload, no async loading.
+- **`engine::InputState`** (`include/engine/input.hpp`, `src/input.cpp`) --
+  a small POD snapshot (WASD-equivalent movement flags, Escape, raw cursor
+  position) that `Application::run()` polls once per frame from `Window`
+  (`pollInputState()`) and passes down to `update()`/`Camera`, instead of
+  `Camera` calling `Window::isKeyPressed()`/`getCursorPos()` itself.
+  `Camera::processKeyboard(const Window&, float)` (Phase 3-5) became
+  `Camera::processMovement(const InputState&, float)`; `Camera` no longer
+  includes `<GLFW/glfw3.h>` or `window.hpp` at all. Not a general
+  action-mapping/rebinding system -- just the concrete fields this phase's
+  `Camera` reads.
+- **Delta-time**: unchanged from Phase 1 (`glfwGetTime()`-based), now
+  threaded through `Application::update(double deltaTime, const
+  InputState& input)` alongside the polled input rather than a second time
+  source being introduced.
+- **Verify**: same headless harness, e.g.
+  ```sh
+  ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh build/engine_app build/phase6_screenshot.png
+  ```
+  The log now includes an `MSAA active: GL_SAMPLES = 4 (requested 4)` line
+  (a `GL_SAMPLES reports 0` warning if the GL/driver combo doesn't honor
+  the hint). Pixel-level proof that real multisample blending occurred (not
+  just that the flag was accepted): sampling along the pyramid's left
+  slanted silhouette edge (a non-axis-aligned edge against the background,
+  unlike the table/box's mostly axis-aligned edges) at absolute pixel
+  `(272, 231)` finds color `(83, 82, 128)`, flanked by the background clear
+  color `(100, 149, 237)` at `(271, 231)` and the pyramid's dark checker-face
+  color `(28, 14, 26)` at `(273, 231)` -- a color matching neither
+  neighbor and lying strictly between them in every channel (R between 28
+  and 100, G between 14 and 149, B between 26 and 237), consistent with a
+  4x-MSAA-resolved partial-coverage sample (a 2 background + 1 dark + 1 lit
+  4-sample average predicts `(92.5, 82.25, 126.25)`, close to the observed
+  value). The scene composition itself is unchanged from Phase 5: `convert
+  phase6_screenshot.png -fuzz 10% -transparent "rgb(100,149,237)" -channel A
+  -connected-components 4` still finds the same two large disjoint
+  components -- ~208x105px (table + box) and ~93x81px (pyramid), matching
+  Phase 5's ~209x106px/~94x83px almost exactly -- plus a scattering of new
+  1-4px partial-alpha specks along silhouette edges that Phase 5's hard-
+  edged render didn't have, itself further evidence of the new antialiased
+  edges.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -515,4 +623,11 @@ Phase 5 replaces that single hardcoded cube with `engine::Model`, which
 loads a whole multi-object scene (`assets/models/scene.obj`) via Assimp and
 recursively draws its node hierarchy, each node's mesh(es) placed by its own
 composed world transform; see "Phase 5: Assimp model loading + a node
-hierarchy" above.
+hierarchy" above. Phase 6 renders the identical scene with real MSAA
+anti-aliasing and restructures ownership around it: the scene is now an
+`engine::Entity` in `Application::entities_` rather than a bare `model_`
+member, `Shader`/`Texture`/`Model` all load through a shared
+`engine::ResourceManager` cache instead of ad-hoc construction, and
+`engine::Camera` receives per-frame input through an `engine::InputState`
+snapshot instead of reading `Window` directly; see "Phase 6: engine
+foundations" above.

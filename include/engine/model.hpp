@@ -12,11 +12,14 @@
 //
 // Ownership: Model owns every Mesh and Material it builds from the file (by
 // value, in meshes_/materials_) plus a defaultMaterial_ fallback used for
-// any mesh whose material Assimp gave us wasn't usable. Nothing here is
-// shared with the caller, so Model's destructor cleanly releases every GL
-// handle (VAO/VBO/EBO per Mesh, texture id per Material) via each member's
-// own RAII destructor -- no manual cleanup code needed here, same as every
-// other RAII class in this engine.
+// any mesh whose material Assimp gave us wasn't usable. Each Material's
+// diffuse texture (Phase 6 on) is a std::shared_ptr<Texture> obtained from
+// the caller-supplied ResourceManager rather than an owned Texture, so
+// Model no longer independently reloads the same fallback checker texture
+// once per mesh that needs it -- Model's destructor still cleanly releases
+// every GL handle it does own (VAO/VBO/EBO per Mesh) via each member's own
+// RAII destructor; any Texture is released whenever the last shared_ptr to
+// it (here or in ResourceManager's cache) goes away.
 //
 // Move-only: Mesh and Material are themselves move-only (each owns scarce
 // GL handles), so Model inherits that the same way Application's members
@@ -34,6 +37,8 @@
 #include "engine/shader.hpp"
 
 namespace engine {
+
+class ResourceManager;
 
 // One node from the imported scene's graph: Assimp's aiNode, converted to
 // plain data this engine already understands (glm types, indices into
@@ -69,7 +74,13 @@ public:
     // `shader` is used only to construct this model's per-mesh Materials
     // (Material stores a Shader* it never owns, see material.hpp) --  Model
     // does not take ownership of it and must not outlive it.
-    Model(const std::string& path, Shader& shader);
+    //
+    // `resourceManager` is used only during construction, to load (or reuse
+    // an already-cached) Texture for each material's diffuse map and for
+    // the shared default/fallback texture -- see resource_manager.hpp.
+    // Model does not store a reference to it and does not need it to
+    // outlive the constructor call.
+    Model(const std::string& path, Shader& shader, ResourceManager& resourceManager);
 
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;

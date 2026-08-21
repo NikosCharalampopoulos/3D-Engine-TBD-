@@ -123,6 +123,8 @@ add_executable(engine_app
     src/camera.cpp
     src/texture.cpp
     src/model.cpp
+    src/input.cpp
+    src/resource_manager.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

@@ -15,6 +15,17 @@
 // GLFW's global init/terminate pair itself rather than sharing a refcount
 // with sibling windows); a later phase can add multi-window support if it's
 // ever needed.
+//
+// Phase 6 requests a multisampled default framebuffer: GLFW_SAMPLES is set
+// via glfwWindowHint() before window/context creation (GLFW handles
+// allocating the multisample-capable framebuffer itself once that hint is
+// set -- there's no separate "create an FBO" step needed for the default
+// framebuffer), and GL_MULTISAMPLE is enabled right after the context
+// becomes current. GLFW_SAMPLES is only a *hint* -- some GL/driver
+// combinations may ignore it -- so the constructor also queries the real
+// GL_SAMPLES value back via glGetIntegerv() and logs what it actually got
+// (a warning, not a thrown error, if it came back 0): this phase's bar is
+// "prove MSAA actually took effect", not just "asked for it and assumed".
 
 #include <string>
 #include <utility>
