@@ -1,30 +1,70 @@
 # 3D Engine (TBD)
 
-A C++/OpenGL 3D engine, building toward a game engine, starting from
-OpenGL bare-metal basics. This repository is developed in phases; this
-document covers **Phase 0 (project scaffolding and a proven build/run
-pipeline), Phase 1 (a real window + main-loop foundation), Phase 2
-(shaders + a rendered, per-face-colored cube), Phase 3 (a real
-free-fly Camera + Transform, replacing the hardcoded view/projection),
-Phase 4 (a Texture class, a Material bundling it with a Shader, and
-Blinn-Phong directional lighting -- the flat per-face-colored cube is now a
-single textured, lit surface), Phase 5 (Assimp-based model/scene
-loading -- the single hardcoded cube is replaced with a real `engine::Model`
-that loads a multi-object scene from a file and renders its whole node
-hierarchy), and Phase 6 (engine foundations: MSAA anti-aliasing, a
-lightweight `Entity` (Transform + Model) replacing loose per-object members,
-a `ResourceManager` asset cache, and an `InputState` layer decoupling
-`Camera` from `Window` -- the final planned phase, closing out the fixed-demo
-era in favor of reusable engine plumbing).**
+A small C++/OpenGL 3D engine: a real windowing/main-loop foundation, a
+free-fly camera, GL 3.3 core shaders/meshes/textures, Blinn-Phong
+directional lighting, Assimp-based multi-object scene loading with a real
+node hierarchy, MSAA anti-aliasing, and a thin entity/resource-cache layer
+-- built up from bare-metal OpenGL, and verified at every step by a
+headless Xvfb+Mesa run/screenshot harness (no GPU or display required). See
+"Architecture overview" right below for what the finished whole looks like
+today, or "Development history" further down for how it got built, phase by
+phase (this repo was built incrementally across 6 phases, each
+independently bug-reviewed), including the specific bugs each phase's
+review found and fixed.
 
-Phase 0 does *not* contain engine logic -- it exists to prove that the
-toolchain (CMake, dependency fetching, a GL 3.3 core context, and a headless
-run/screenshot harness) all work end to end, so later phases can focus on
-actual engine code.
+## Architecture overview
 
-Phase 1 replaces Phase 0's 5-hardcoded-frames placeholder with a real
-`Window` (RAII GLFW window + GL context) and `Application` (poll/update/
-render/swap main loop) pair -- see "Phase 1: window + main loop" below.
+`engine_app` is a single executable (no separate engine library target
+yet -- see the note at the top of `CMakeLists.txt`) built around a handful
+of small, mostly-RAII classes in `include/engine/` + `src/`:
+
+- **`Window`** (`window.hpp`/`.cpp`) -- owns the GLFW window and a GL 3.3
+  core context, requested with 4x MSAA (`GLFW_SAMPLES`, plus a Linux-only
+  EGL context-creation path needed to actually get multisampling on this
+  project's headless Xvfb+Mesa target -- see `ENGINE_DISABLE_EGL_CONTEXT`
+  below if that path ever needs disabling on a real desktop). Reports raw
+  keyboard/cursor state; holds no engine/scene state of its own.
+- **`InputState`** (`input.hpp`/`.cpp`) -- a per-frame snapshot polled once
+  from `Window` (`pollInputState()`) and passed down to whatever needs it.
+  Nothing else in the engine (notably `Camera`, and `Application`'s own
+  ESC-to-quit check) reads `Window` key/cursor state directly any more.
+- **`Application`** (`application.hpp`/`.cpp`) -- owns the `Window`, a
+  `ResourceManager`, the scene's shared `Shader`, a `std::vector<Entity>`,
+  and a `Camera`; runs the main loop (poll input -> update camera -> render
+  -> swap) until the window closes, ESC is pressed, or `ENGINE_MAX_FRAMES`
+  is reached (headless verification only -- see below).
+- **`Camera`** + **`Transform`** (`camera.hpp`/`.cpp`, `transform.hpp`) -- a
+  yaw/pitch free-fly camera driven by `InputState` (or a small scripted
+  waypoint path under `ENGINE_CAMERA_DEMO`, for headless verification where
+  there's no real input device), and a position/quaternion-rotation/scale
+  bundle used for every object's model matrix.
+- **`Shader`** / **`Mesh`** / **`Texture`** / **`Material`** -- the
+  rendering primitives: a linked GL program; an interleaved
+  position/normal/texCoord VAO+VBO+EBO; a 2D GL texture loaded via
+  stb_image; and a `Shader` + `Texture` + tint/shininess bundle bound once
+  per draw call. `assets/shaders/basic.vert`/`basic.frag` implement
+  Blinn-Phong directional lighting with a properly computed (transpose-
+  inverse) normal matrix.
+- **`Model`** (`model.hpp`/`.cpp`) -- loads a whole scene via Assimp
+  (`assets/models/scene.obj`: a table, a box on the table, and a separate
+  pyramid) into a tree of `ModelNode`s, each with its own local transform,
+  mesh indices, and children; `draw()` walks the tree depth-first,
+  composing world transforms and binding each node's `Material`.
+- **`Entity`** (`entity.hpp`) -- a `Transform` plus an optional
+  `shared_ptr<Model>`; `Application::entities_` is the list `render()`
+  iterates (currently one element), rather than a hardcoded single model
+  member.
+- **`ResourceManager`** (`resource_manager.hpp`/`.cpp`) -- a per-key
+  `shared_ptr` cache for `Shader`/`Texture`/`Model`. Every asset load in the
+  engine -- the scene's shader, the scene's model, every material's diffuse
+  texture including the shared checker-texture fallback -- goes through it,
+  so nothing is loaded from disk or re-uploaded to the GPU more than once.
+
+One frame, in short: `Application::run()` polls GLFW events and an
+`InputState`, feeds it to `camera_`, uploads view/projection/lighting
+uniforms once, then iterates `entities_` calling
+`model->draw(shader, entity.transform.getModelMatrix())`, which recurses
+the model's node tree drawing each mesh with its own material.
 
 ## Directory layout
 
@@ -77,7 +117,14 @@ required beyond the system packages above.
 
 The resulting executable is `build/engine_app`.
 
-## Phase 1: window + main loop
+## Development history
+
+The sections below are kept as design notes from how each phase actually
+got built, in order, including the specific bugs each phase's independent
+bug-review found and fixed -- not a description of what's missing today.
+See "Architecture overview" above for the current, finished-whole picture.
+
+### Phase 1: window + main loop
 
 - **`engine::Window`** (`include/engine/window.hpp`, `src/window.cpp`) --
   RAII wrapper around GLFW window/context creation. The constructor does
