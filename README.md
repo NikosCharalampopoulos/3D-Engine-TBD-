@@ -3,8 +3,9 @@
 A C++/OpenGL 3D engine, building toward a game engine, starting from
 OpenGL bare-metal basics. This repository is developed in phases; this
 document covers **Phase 0 (project scaffolding and a proven build/run
-pipeline), Phase 1 (a real window + main-loop foundation), and Phase 2
-(shaders + a rendered, per-face-colored cube).**
+pipeline), Phase 1 (a real window + main-loop foundation), Phase 2
+(shaders + a rendered, per-face-colored cube), and Phase 3 (a real
+free-fly Camera + Transform, replacing the hardcoded view/projection).**
 
 Phase 0 does *not* contain engine logic -- it exists to prove that the
 toolchain (CMake, dependency fetching, a GL 3.3 core context, and a headless
@@ -19,8 +20,10 @@ render/swap main loop) pair -- see "Phase 1: window + main loop" below.
 
 ```
 CMakeLists.txt        Root build: fetches deps, builds engine_app
-src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp)
-include/engine/        Public engine .h/.hpp headers (window, application, log, gl_debug, version)
+src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
+                       shader.cpp, mesh.cpp, camera.cpp)
+include/engine/        Public engine .h/.hpp headers (window, application, log,
+                       gl_debug, version, shader, mesh, camera, transform)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders, textures, models (shaders/ stubbed for now)
 tools/                 Build/run/screenshot scripts
@@ -210,6 +213,68 @@ is the verified-working method here; fix or reinstall Pillow
   (and a tiny cyan sliver) cube faces -- confirming real, distinguishable 3D
   geometry rendered, not a flat clear.
 
+## Phase 3: Camera + Transform
+
+- **`engine::Transform`** (`include/engine/transform.hpp`, header-only) --
+  a plain position/rotation/scale bundle plus `getModelMatrix()`, built as
+  `translate * rotate * scale` (scale applied first, then rotate, then
+  translate, reading right-to-left against a vertex). Rotation is stored as
+  a `glm::quat` rather than Euler angles specifically to avoid gimbal lock
+  when composing rotations; `rotate(angleDeg, axis)` and `translate(delta)`
+  are the simple mutators. Deliberately not a scene graph node -- no parent/
+  child hierarchy (that's Phase 5's job).
+- **`engine::Camera`** (`include/engine/camera.hpp`, `src/camera.cpp`) -- a
+  standard yaw/pitch free-fly camera. `getViewMatrix()` builds `glm::lookAt`
+  from `position_`/`front_`/`up_`; `getProjectionMatrix(aspectRatio)` builds
+  `glm::perspective` (60 degree FOV, near 0.1, far 100 by default).
+  `front_`/`right_`/`up_` are re-derived from yaw/pitch every time they
+  change; pitch is clamped to +/-89 degrees so `front_` never becomes
+  parallel to world-up, which is what would otherwise degenerate the
+  `right_ = front_ x worldUp_` cross product and flip the view. Movement
+  (`processKeyboard`, WASD + Space/Shift or E/Q for up/down) is scaled by
+  delta-time so it's frame-rate independent; mouse-look
+  (`processMouseInput(xpos, ypos)`) takes the absolute cursor position each
+  frame and derives its own delta internally (discarding the very first
+  reading so there's no first-frame jump).
+- **Mouse input plumbing**: `Window::getCursorPos()` was added (a thin
+  `glfwGetCursorPos` wrapper, mirroring the existing `isKeyPressed()`
+  pattern of reporting raw current state) so `Camera` has something to read
+  its mouse-look delta from.
+- **Wired into `Application`**: `render()`'s previously-hardcoded eye
+  position, `glm::lookAt`, `glm::perspective`, and two-`glm::rotate()`-call
+  model matrix are gone; `Application` now owns a `Camera` and a
+  `Transform` (the cube's fixed 35/45-degree two-axis rotation, unchanged
+  from Phase 2 but expressed as one composed quaternion) and builds
+  `mvp = camera.getProjectionMatrix(aspect) * camera.getViewMatrix() *
+  cubeTransform.getModelMatrix()` fresh every frame. `update()` feeds
+  delta-time and input into the camera every frame.
+- **Headless-safe verification**: Xvfb has no real keyboard/mouse, so
+  `ENGINE_CAMERA_DEMO=1` (an env var, checked only in `Application`'s
+  constructor/`update()`) switches the camera onto a small, deterministic,
+  frame-count-keyed set of waypoints -- all looking at the cube from
+  different sides/heights, including a near-overhead angle that exercises
+  the pitch-clamp path -- instead of reading `Window` input. It's keyed off
+  `frameCount_` (an exact integer) rather than wall-clock time so the
+  waypoint shown at any given frame never depends on this machine's
+  render timing. Without the env var, the camera still starts at a fixed
+  position well off to the side and above the cube (`(2.6, 1.9, 3.4)`,
+  vs. Phase 2's dead-ahead `(0, 0, 3)`), so even a plain run visibly proves
+  the view comes from live `Camera` state.
+- **Verify**: same headless harness, e.g.
+  ```sh
+  ENGINE_CAMERA_DEMO=1 ENGINE_MAX_FRAMES=90 \
+      bash tools/run_headless.sh build/engine_app build/phase3_screenshot.png
+  ```
+  Both the demo path and the plain default-camera path produce a cube
+  clearly framed differently from Phase 2's screenshot: Phase 2 (eye at
+  `(0,0,3)`, dead ahead) shows red/yellow/magenta faces plus a tiny cyan
+  sliver; a Phase 3 run from the default elevated/offset camera instead
+  shows a dominant magenta (top) face with red (front) and a thin blue
+  (right) sliver -- the yellow (left) face has rotated out of view and the
+  blue (right) face, invisible in Phase 2, is now visible -- proving the
+  view matrix is coming from a real, different `Camera`, not a vestigial
+  copy of Phase 2's hardcoded one.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -260,5 +325,8 @@ Phase 1's `src/main.cpp` now just constructs an `engine::Application`
 poll/update/render/swap loop live in `engine::Window` /
 `engine::Application` (see "Phase 1: window + main loop" above). Phase 2
 adds the first real rendering content -- shaders and a colored cube -- on
-top of that loop; see "Phase 2: shaders + a rendered cube" above. A real
-`Camera` is still a later phase's job.
+top of that loop; see "Phase 2: shaders + a rendered cube" above. Phase 3
+replaces the hardcoded view/projection/model matrices with a real
+`engine::Camera` (free-fly, yaw/pitch, WASD + mouse-look) and
+`engine::Transform` (the cube's model matrix); see "Phase 3: Camera +
+Transform" above.

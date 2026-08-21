@@ -46,6 +46,15 @@ public:
     // True if `key` (a GLFW_KEY_* constant) is currently held down.
     bool isKeyPressed(int key) const;
 
+    // Cursor position in screen coordinates, relative to the window's
+    // upper-left corner (whatever GLFW itself reports -- e.g. it never
+    // moves under Xvfb, since there's no real pointer device driving it).
+    // Camera's mouse-look diffs successive calls to this itself; Window
+    // just reports the raw absolute position each time, matching how
+    // isKeyPressed() reports raw current state rather than edge-triggered
+    // events.
+    std::pair<double, double> getCursorPos() const;
+
     GLFWwindow* handle() const { return window_; }
 
 private:

@@ -97,4 +97,11 @@ bool Window::isKeyPressed(int key) const {
     return glfwGetKey(window_, key) == GLFW_PRESS;
 }
 
+std::pair<double, double> Window::getCursorPos() const {
+    double x = 0.0;
+    double y = 0.0;
+    glfwGetCursorPos(window_, &x, &y);
+    return {x, y};
+}
+
 }  // namespace engine
