@@ -87,12 +87,15 @@
 // metallic/roughness Cook-Torrance PBR model (see pbr_material.hpp,
 // assets/shaders/pbr.vert/pbr.frag) -- alongside the existing Blinn-Phong
 // Material/basic.vert/basic.frag path, which stays untouched as the
-// reference/fallback for the table/box/pyramid/ground. A 4x4 grid of
-// spheres (sphereMesh_/sphereInstances_ below), metallic sweeping one axis
-// and roughness the other, is the new PBR-lit content this phase adds: it's
-// the classic "PBR reference chart" made real, proving the BRDF actually
-// produces the right qualitative behavior (sharp vs. broad highlights,
-// colored vs. neutral reflectance) rather than just compiling. render()
+// reference/fallback for the table/box/pyramid/ground. Two rows of spheres
+// (sphereMesh_/sphereInstances_ below) -- one sweeping metallic 0 -> 1 at a
+// fixed low roughness, the other sweeping roughness across its range at
+// fixed metallic = 1, placed low in frame in the open ground area in front
+// of the existing scene rather than overlapping it (see application.cpp's
+// Phase 9 bug-review composition-fix comment) -- is the new PBR-lit content
+// this phase adds: it's the classic "PBR reference chart" made real, proving
+// the BRDF actually produces the right qualitative behavior (sharp vs. broad
+// highlights, colored vs. neutral reflectance) rather than just compiling. render()
 // draws entities_/the ground plane with shader_ (unchanged), then switches
 // to pbrShader_ and draws every sphere with its own PBRMaterial;
 // renderShadowPass() depth-draws the spheres too (through the same
