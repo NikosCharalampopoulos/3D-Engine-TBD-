@@ -202,9 +202,30 @@ struct SpotLightData {
 // crosses 1.0; the tonemapped result instead rolls off gradually as
 // distance from the light increases. kPointLights[1] is left at its
 // original Phase 7a intensity for comparison.
-constexpr std::array<PointLightData, 2> kPointLights = {{
+//
+// kPointLights[2] (Phase 9 review): dedicated to the PBR sphere strip (see
+// kSphereGridDistanceFromCamera/kSphereGridHeight below). The table-area
+// lights above sit ~2.5-4 world units from the sphere strip's own position,
+// and with this same short-range (1.0, 0.7, 1.8) attenuation profile that's
+// enough to attenuate them to a few percent of their nominal intensity by
+// the time they'd reach it -- confirmed by computing the actual distances
+// from each light's fixed position to the sphere strip's own fixed center
+// below. That left the strip lit by little more than the single
+// (unattenuated, distance-independent) directional light's incidental
+// specular reflection, which -- being one direction shared by every sphere
+// in a row -- only happens to land in view on a couple of them rather than
+// giving every sphere a comparable, reliably visible response. This light
+// sits directly above the strip's own fixed center (position computed by
+// hand from kDefaultCameraPosition/kSceneCenter/kSphereGridDistanceFromCamera/
+// kSphereGridHeight the same way the constructor computes gridCenter below,
+// since this table needs to stay a compile-time constant) so it reaches all
+// 8 spheres at comparable range regardless of column, and is kept close to
+// neutral white (not tinted like kPointLights[0]/[1]) so it doesn't bias the
+// metallic row's own white-vs-albedo-tinted highlight comparison.
+constexpr std::array<PointLightData, 3> kPointLights = {{
     {{0.5f, 0.95f, 0.1f}, {6.0f, 2.1f, 0.9f}, 1.0f, 0.7f, 1.8f},
     {{-1.35f, 1.15f, -0.3f}, {0.15f, 0.55f, 1.0f}, 1.0f, 0.7f, 1.8f},
+    {{1.7673f, 1.9f, 2.3108f}, {5.5f, 5.2f, 4.7f}, 1.0f, 0.7f, 1.8f},
 }};
 
 // Slightly longer effective range (0.35, 0.44 -- the ~13-unit-range profile)
@@ -382,11 +403,20 @@ constexpr float kMaxPBRRoughness = 1.0f;
 // keeps the peak below that saturation point, letting the F0 tint actually
 // reach the screen.
 constexpr float kMetallicRowRoughness = 0.45f;
-// Roughness sweep row: held fully metallic so its highlight is a bright,
-// colored reflection of the light itself (no diffuse term to wash it out --
-// see pbr.frag's `kD *= (1.0 - metallic)`), the clearest way to show the
-// highlight literally shrinking as roughness rises.
-constexpr float kRoughnessRowMetallic = 1.0f;
+// Roughness sweep row: NOT fully metallic (see Phase 9 review's second
+// pass) -- a metallic=1 sphere has zero diffuse term (pbr.frag's
+// `kD *= (1.0 - metallic)`), so with no image-based lighting yet (that's
+// Phase 10's job; only a few analytic point/directional lights exist right
+// now) a fully metallic sphere is legitimately near-black everywhere except
+// the couple of pixels where a light's specular reflection happens to land
+// -- physically correct, but unreadable as a demo before IBL exists to give
+// metals their usual reflected-environment brightness. 0.35 keeps this row
+// clearly metal-leaning (still visibly more reflective/tinted than a plain
+// dielectric) while its remaining diffuse term keeps every sphere in the row
+// visibly lit, so the highlight shrinking across roughness reads as a
+// distinct bright patch riding on a visible sphere, not a near-invisible
+// dot on a black one.
+constexpr float kRoughnessRowMetallic = 0.35f;
 constexpr float kSphereAO = 1.0f;
 
 glm::mat4 computeLightSpaceMatrix() {

@@ -292,7 +292,20 @@ void main() {
     // term, per the standard convention that AO approximates occluded
     // ambient/indirect light, not direct light (which shadow mapping already
     // handles separately above).
-    vec3 ambient = uAmbientColor * albedo * uAO;
+    //
+    // Phase 9 review (second pass): this term is scaled by (1.0 - metallic),
+    // the same factor the direct-lighting diffuse term above already applies
+    // (see kD's `* (1.0 - metallic)`). A flat ambient approximates incoming
+    // *diffuse* environment light -- a fully metallic surface has no diffuse
+    // response at all, so without this factor every sphere got the same
+    // albedo-tinted glow regardless of its metallic value, masking the exact
+    // metal-vs-dielectric contrast the sphere grid exists to show. Real
+    // metals should still pick up an ambient *specular* response instead
+    // (their surroundings reflected off them) -- that's precisely what
+    // Phase 10's prefiltered-environment IBL term adds; until then, a
+    // metallic surface here correctly falls back toward the small
+    // Fresnel-only floor that direct lighting can still supply.
+    vec3 ambient = uAmbientColor * albedo * uAO * (1.0 - metallic);
 
     FragColor = vec4(ambient + Lo, 1.0);
 }
