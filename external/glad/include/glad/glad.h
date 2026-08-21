@@ -1,6 +1,27 @@
 #ifndef __glad_h_
 #define __glad_h_
 
+/* Pre-empt the system/legacy GL headers (GL/gl.h uses the include guard
+ * __gl_h_, GL/glext.h uses __glext_h_) so that anything which conditionally
+ * `#include <GL/gl.h>` when it thinks no GL loader/header has been included
+ * yet (e.g. GLFW's glfw3.h) ends up including an empty, already-guarded
+ * file instead of one with declarations that conflict with the function
+ * pointers/macros below. This mirrors the trick real generated GLAD headers
+ * use for the same reason -- see README.md's "GL loader" section.
+ */
+#ifndef __gl_h_
+#define __gl_h_
+#endif
+#ifndef __gl_glext_h_
+#define __gl_glext_h_
+#endif
+#ifndef __glext_h_
+#define __glext_h_
+#endif
+#ifndef __GL_H__
+#define __GL_H__
+#endif
+
 /*
  * Minimal, hand-written OpenGL 3.3 core-profile function loader, exposing
  * the same public API shape as the real GLAD (gladLoadGL / gladLoadGLLoader,
