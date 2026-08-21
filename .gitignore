@@ -32,7 +32,9 @@ Testing/
 *.pdb
 
 # Editor / OS cruft
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
 .idea/
 *.swp
 .DS_Store
