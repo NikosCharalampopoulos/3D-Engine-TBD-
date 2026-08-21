@@ -58,6 +58,10 @@ const std::string kSkyboxVertexShaderPath = resolveAssetPath("assets/shaders/sky
 const std::string kSkyboxFragmentShaderPath = resolveAssetPath("assets/shaders/skybox.frag");
 const std::string kPostProcessVertexShaderPath = resolveAssetPath("assets/shaders/postprocess.vert");
 const std::string kPostProcessFragmentShaderPath = resolveAssetPath("assets/shaders/postprocess.frag");
+// Phase 9: the PBR pass's own program (see application.hpp's Phase 9 note
+// and assets/shaders/pbr.vert/pbr.frag).
+const std::string kPBRVertexShaderPath = resolveAssetPath("assets/shaders/pbr.vert");
+const std::string kPBRFragmentShaderPath = resolveAssetPath("assets/shaders/pbr.frag");
 // Phase 5's hand-authored test scene: three separate objects (a pyramid, a
 // table, and a small box sitting on top of the table) at different
 // positions, proving Model's node hierarchy + transform composition places
@@ -272,6 +276,69 @@ constexpr float kOrthoHalfExtent = 4.0f;
 constexpr float kOrthoNear = 0.5f;
 constexpr float kOrthoFar = 12.0f;
 
+// Phase 9: the PBR sphere test-grid's layout -- the classic "metallic x
+// roughness reference chart" (see e.g. Disney/Unreal's own PBR viewer demos)
+// made real with this engine's actual BRDF. Columns sweep metallic 0 -> 1
+// (left to right); rows sweep roughness across a wide range that
+// deliberately does NOT start at exactly 0 (kMinPBRRoughness, matching
+// PBRMaterial::kMinRoughness's own floor -- see that header's comment on why
+// alpha = roughness^2 == 0 is a singular case for the GGX distribution) up
+// to fully rough at 1.0.
+//
+// Every sphere shares one albedo (a saturated, strongly non-grey
+// red-orange): this is deliberate, not a missed opportunity to show more
+// colors -- holding albedo fixed across the whole grid is exactly what makes
+// the metal/dielectric Fresnel distinction directly comparable column to
+// column (a metallic=1 sphere's highlight should visibly pick up this same
+// red-orange tint via F0 = albedo, while a metallic=0 sphere's highlight
+// should stay neutral/white via F0 = 0.04, regardless of sharing the same
+// base color).
+//
+// The grid is built directly in the *camera's own image plane* (using its
+// right/up basis vectors, computed from kDefaultCameraPosition/kSceneCenter
+// in the constructor below), not laid out along world X/Z: an axis-aligned
+// world-space grid recedes away from the camera along a mostly depth-facing
+// direction from this engine's fixed camera angle, which foreshortens row
+// spacing so hard that adjacent rows visibly overlap on screen even with
+// generous world-space spacing between their centers. A grid built from the
+// camera's own right/up vectors instead faces the camera edge-on like a
+// real reference chart -- every sphere at the same distance from the
+// camera, both axes spaced evenly in *screen* space, not just world space.
+// Placed in front of the existing table/box/pyramid scene (closer to the
+// camera along its view direction) so it reads as a clear, unobstructed
+// foreground subject in the same screenshot that still shows the existing
+// Blinn-Phong-lit content behind it.
+constexpr int kSphereGridCols = 4;  // metallic axis
+constexpr int kSphereGridRows = 4;  // roughness axis
+// Radius/spacing chosen so adjacent spheres' screen-space footprints don't
+// overlap (spacing comfortably exceeds 2x radius).
+constexpr float kSphereRadius = 0.22f;
+constexpr float kSphereSpacing = 0.62f;
+// Distance from kDefaultCameraPosition, measured along the camera's own view
+// direction, at which the grid's plane sits -- comfortably closer to the
+// camera than the scene's own objects (roughly 4.6 units away), so the grid
+// reads as a foreground subject rather than competing with them for the
+// same screen depth.
+constexpr float kSphereGridDistanceFromCamera = 2.1f;
+// Shifts the whole grid down within the camera's image plane (along its own
+// "up" axis) so it's framed comfortably below the horizon/skybox rather
+// than dead-center, and roughly over the ground plane rather than floating
+// above the table. Magnitude is bounded by the vertical frustum half-height
+// at kSphereGridDistanceFromCamera (distance * tan(fovY/2), ~1.21 world
+// units at this distance/FOV): a previous, larger downward shift (-0.55)
+// pushed the grid's bottom row (roughness = 1.0, the row whose broad/soft
+// highlight this phase's screenshot most needs to show clearly) entirely
+// below the bottom of the 800x600 frame -- verified by re-projecting each
+// sphere's world position through the same view/projection matrices
+// Application builds and finding its row-3 y-coordinate landed at pixel
+// y = 666, past the 600px-tall frame. -0.15 keeps all 4 rows comfortably
+// inside the frustum with margin.
+constexpr float kSphereGridVerticalOffset = -0.15f;
+constexpr glm::vec3 kSphereAlbedo{0.85f, 0.12f, 0.08f};
+constexpr float kMinPBRRoughness = 0.05f;
+constexpr float kMaxPBRRoughness = 1.0f;
+constexpr float kSphereAO = 1.0f;
+
 glm::mat4 computeLightSpaceMatrix() {
     const glm::vec3 lightDir = glm::normalize(kLightDirection);
     const glm::vec3 lightEye = kSceneCenter - lightDir * kLightDistance;
@@ -321,6 +388,7 @@ Application::Application(int width, int height, const std::string& title, std::u
       shadowShader_(resources_.getShader(kShadowVertexShaderPath, kShadowFragmentShaderPath)),
       skyboxShader_(resources_.getShader(kSkyboxVertexShaderPath, kSkyboxFragmentShaderPath)),
       postProcessShader_(resources_.getShader(kPostProcessVertexShaderPath, kPostProcessFragmentShaderPath)),
+      pbrShader_(resources_.getShader(kPBRVertexShaderPath, kPBRFragmentShaderPath)),
       shadowMap_(kShadowMapWidth, kShadowMapHeight),
       // Phase 7b: sized from window_'s own real framebuffer size (already
       // constructed at this point -- see this header's declaration-order
@@ -337,6 +405,12 @@ Application::Application(int width, int height, const std::string& title, std::u
       groundMaterial_(*shader_, resources_.getTexture(kGroundDiffuseTexturePath), /*tint=*/glm::vec3(1.0f),
                       /*shininess=*/24.0f, resources_.getTexture(kGroundNormalMapPath)),
       postProcessQuad_(makeFullscreenQuad()),
+      // Phase 9: the PBR sphere grid's shared geometry -- one Mesh, reused
+      // (with a different PBRMaterial + Transform) by every sphere in
+      // sphereInstances_ (built below, in the constructor body, since it
+      // needs *pbrShader_ already constructed -- see this class's Phase 9
+      // header note on declaration order).
+      sphereMesh_(makeUVSphere(32, 32, kSphereRadius)),
       camera_(kDefaultCameraPosition),
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()) {
@@ -361,6 +435,45 @@ Application::Application(int width, int height, const std::string& title, std::u
     Entity sceneEntity("scene", resources_.getModel(kScenePath, *shader_));
     sceneEntity.transform.setRotation(glm::angleAxis(glm::radians(12.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
     entities_.push_back(std::move(sceneEntity));
+
+    // Phase 9: the PBR sphere test-grid -- see kSphereGrid*/kSphereAlbedo's
+    // comment above for the layout rationale. Columns sweep metallic 0 -> 1;
+    // rows sweep roughness kMinPBRRoughness -> kMaxPBRRoughness. Built in the
+    // camera's own image plane (gridRight/gridUp below) rather than world
+    // X/Z, so both axes are evenly spaced in screen space regardless of this
+    // engine's fixed camera angle -- see kSphereGridDistanceFromCamera's
+    // comment above.
+    const glm::vec3 gridForward = glm::normalize(kSceneCenter - kDefaultCameraPosition);
+    const glm::vec3 gridRight = glm::normalize(glm::cross(gridForward, glm::vec3(0.0f, 1.0f, 0.0f)));
+    const glm::vec3 gridUp = glm::normalize(glm::cross(gridRight, gridForward));
+    const glm::vec3 gridCenter = kDefaultCameraPosition + gridForward * kSphereGridDistanceFromCamera +
+                                  gridUp * kSphereGridVerticalOffset;
+
+    sphereInstances_.reserve(static_cast<std::size_t>(kSphereGridCols) * static_cast<std::size_t>(kSphereGridRows));
+    for (int row = 0; row < kSphereGridRows; ++row) {
+        const float roughness = kSphereGridRows > 1
+                                     ? kMinPBRRoughness + (kMaxPBRRoughness - kMinPBRRoughness) *
+                                                              (static_cast<float>(row) /
+                                                               static_cast<float>(kSphereGridRows - 1))
+                                     : kMinPBRRoughness;
+        // Row 0 (smoothest) at the top of the grid, descending to fully
+        // rough at the bottom -- rowOffset counts down as row increases.
+        const float rowOffset =
+            (static_cast<float>(kSphereGridRows - 1) * 0.5f - static_cast<float>(row)) * kSphereSpacing;
+
+        for (int col = 0; col < kSphereGridCols; ++col) {
+            const float metallic = kSphereGridCols > 1
+                                        ? static_cast<float>(col) / static_cast<float>(kSphereGridCols - 1)
+                                        : 0.0f;
+            const float colOffset =
+                (static_cast<float>(col) - static_cast<float>(kSphereGridCols - 1) * 0.5f) * kSphereSpacing;
+
+            SphereInstance instance{Transform{}, PBRMaterial(*pbrShader_, kSphereAlbedo, metallic, roughness,
+                                                               kSphereAO)};
+            instance.transform.setPosition(gridCenter + gridRight * colOffset + gridUp * rowOffset);
+            sphereInstances_.push_back(std::move(instance));
+        }
+    }
 
     if (cameraDemoMode_) {
         LOG_INFO("ENGINE_CAMERA_DEMO set: driving the camera through a scripted orbit instead of live input");
@@ -431,6 +544,18 @@ void Application::renderShadowPass(const glm::mat4& lightSpaceMatrix) {
     shadowShader_->setMat4("uModel", glm::mat4(1.0f));
     groundMesh_.bind();
     groundMesh_.draw();
+
+    // Phase 9: the PBR sphere grid casts/receives shadows through this same
+    // depth-only pass -- shadow.vert reads only aPos (see that file), so it
+    // doesn't matter that these spheres' color pass uses pbrShader_ rather
+    // than shader_. sphereMesh_ is bound once and drawn once per instance,
+    // re-uploading only uModel between draws (each instance shares the same
+    // geometry).
+    sphereMesh_.bind();
+    for (const SphereInstance& instance : sphereInstances_) {
+        shadowShader_->setMat4("uModel", instance.transform.getModelMatrix());
+        sphereMesh_.draw();
+    }
 
     GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
 }
@@ -540,6 +665,52 @@ void Application::render() {
         groundMaterial_.bind();
         groundMesh_.bind();
         groundMesh_.draw();
+    }
+
+    // Phase 9: the PBR sphere test-grid, drawn with its own program
+    // (pbrShader_/pbr.vert/pbr.frag) after the Blinn-Phong entities_/ground
+    // plane above -- see this class's Phase 9 header comment. Scene-level
+    // uniforms (view/projection/light-space matrix, the directional light,
+    // ambient, view position, every point/spot light, and the shadow map)
+    // are the exact same values already uploaded to shader_ above; they're
+    // re-uploaded here onto pbrShader_ because GL uniform state lives on
+    // each program object independently -- switching the active program via
+    // use() does not carry shader_'s uniform values over to pbrShader_.
+    pbrShader_->use();
+    pbrShader_->setMat4("uView", view);
+    pbrShader_->setMat4("uProjection", projection);
+    pbrShader_->setMat4("uLightSpaceMatrix", lightSpaceMatrix);
+    pbrShader_->setVec3("uLightDirection", kLightDirection);
+    pbrShader_->setVec3("uLightColor", kLightColor);
+    pbrShader_->setVec3("uAmbientColor", kAmbientColor);
+    pbrShader_->setVec3("uViewPos", camera_.position());
+
+    pbrShader_->setInt("uNumPointLights", static_cast<int>(kPointLights.size()));
+    for (std::size_t i = 0; i < kPointLights.size(); ++i) {
+        uploadPointLight(*pbrShader_, i, kPointLights[i]);
+    }
+    pbrShader_->setInt("uNumSpotLights", static_cast<int>(kSpotLights.size()));
+    for (std::size_t i = 0; i < kSpotLights.size(); ++i) {
+        uploadSpotLight(*pbrShader_, i, kSpotLights[i]);
+    }
+
+    // shadowMap_ is still bound for reading on kShadowMapTextureUnit from
+    // the upload above (binding a texture unit is global GL state, not
+    // per-program) -- only the sampler uniform needs re-pointing at that
+    // same unit on this different program.
+    pbrShader_->setInt("uShadowMap", static_cast<int>(kShadowMapTextureUnit));
+    pbrShader_->setVec2("uShadowMapTexelSize",
+                         glm::vec2(1.0f / static_cast<float>(shadowMap_.width()),
+                                   1.0f / static_cast<float>(shadowMap_.height())));
+
+    sphereMesh_.bind();
+    for (const SphereInstance& instance : sphereInstances_) {
+        const glm::mat4 sphereModel = instance.transform.getModelMatrix();
+        const glm::mat3 sphereNormalMatrix = glm::inverseTranspose(glm::mat3(sphereModel));
+        pbrShader_->setMat4("uModel", sphereModel);
+        pbrShader_->setMat3("uNormalMatrix", sphereNormalMatrix);
+        instance.material.bind();
+        sphereMesh_.draw();
     }
 
     // Phase 7b: the skybox is drawn LAST, still into hdrFramebuffer_ -- see

@@ -124,6 +124,39 @@ Mesh makeGroundPlane(float halfExtent = 2.5f, float y = 0.0f, float uvTiling = 4
 // .frag read only position and texCoord, never those two.
 Mesh makeFullscreenQuad();
 
+// Phase 9: a standard UV (latitude/longitude) sphere of the given radius,
+// centered at the origin, with `latSegments` bands from pole to pole and
+// `lonSegments` slices around the equator (each clamped up to a minimum of 3
+// so a degenerate 0/1/2-segment request can't produce a broken/empty mesh).
+// Built as a (latSegments+1) x (lonSegments+1) vertex grid -- not the
+// shared-pole-vertex minimum -- so every vertex, including the ones touching
+// the poles, gets its own well-defined (not averaged-together) texCoord: the
+// classic UV sphere seam/pole tradeoff, chosen here the same way most
+// engines do because it keeps texCoords simple and avoids degenerate shared
+// vertices with conflicting UVs.
+//
+// Parameterization (theta = polar angle from the +Y pole in [0, pi], phi =
+// azimuthal angle in [0, 2*pi)):
+//   position = radius * (sin(theta)*cos(phi), cos(theta), sin(theta)*sin(phi))
+// Since this is a sphere centered on the origin, the outward normal at any
+// point is just that point's own direction from the center -- normal =
+// normalize(position), computed directly as the unit-sphere position before
+// scaling by radius (no separate inverse-transpose normal-matrix step is
+// needed at mesh-build time; Application still uploads the model's own
+// normal matrix at draw time like every other mesh here).
+//
+// Tangent (the direction texCoord.u -- i.e. phi/(2*pi) -- increases along the
+// surface) is the analytic partial derivative of position with respect to
+// phi: d(position)/d(phi) = radius * sin(theta) * (-sin(phi), 0, cos(phi)),
+// which normalizes to (-sin(phi), 0, cos(phi)) for any sin(theta) != 0 (i.e.
+// everywhere except exactly at the two poles, where the surface's own u
+// direction is genuinely undefined -- a single point has no tangent plane --
+// so the same formula is used there too purely to avoid a zero/undefined
+// vertex attribute; it is never geometrically meaningful at those two
+// vertices specifically, matching makeCube()'s "hand-derived, not
+// numerically fitted" tangent convention).
+Mesh makeUVSphere(int latSegments = 32, int lonSegments = 32, float radius = 1.0f);
+
 }  // namespace engine
 
 #endif  // ENGINE_MESH_HPP

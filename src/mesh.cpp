@@ -2,7 +2,9 @@
 
 #include <glad/glad.h>
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 
 #include "engine/gl_debug.hpp"
@@ -206,6 +208,64 @@ Mesh makeFullscreenQuad() {
         {{-1.0f, 1.0f, 0.0f}, {0, 0, 1}, {0.0f, 1.0f}},
     };
     const std::vector<unsigned int> indices = {0, 1, 2, 2, 3, 0};
+
+    return Mesh(vertices, indices);
+}
+
+Mesh makeUVSphere(int latSegments, int lonSegments, float radius) {
+    // A 1- or 2-segment sphere isn't a meaningful mesh (it'd have degenerate
+    // or zero-area quads); clamp to the smallest values that still produce a
+    // real closed surface rather than letting a caller silently build a
+    // broken/empty one.
+    latSegments = std::max(latSegments, 3);
+    lonSegments = std::max(lonSegments, 3);
+
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kTwoPi = 2.0f * kPi;
+
+    std::vector<Vertex> vertices;
+    vertices.reserve(static_cast<std::size_t>((latSegments + 1) * (lonSegments + 1)));
+
+    for (int i = 0; i <= latSegments; ++i) {
+        // v (and theta) sweep top pole (i = 0) to bottom pole (i =
+        // latSegments) -- see this function's header comment for the
+        // parameterization.
+        const float v = static_cast<float>(i) / static_cast<float>(latSegments);
+        const float theta = v * kPi;
+        const float sinTheta = std::sin(theta);
+        const float cosTheta = std::cos(theta);
+
+        for (int j = 0; j <= lonSegments; ++j) {
+            const float u = static_cast<float>(j) / static_cast<float>(lonSegments);
+            const float phi = u * kTwoPi;
+            const float sinPhi = std::sin(phi);
+            const float cosPhi = std::cos(phi);
+
+            // Already unit length (sin/cos of the same two angles combine to
+            // exactly 1 up to floating-point rounding), so this doubles as
+            // both the outward normal and the unit-sphere position that
+            // `radius` scales below.
+            const glm::vec3 unitPos(sinTheta * cosPhi, cosTheta, sinTheta * sinPhi);
+            const glm::vec3 tangent(-sinPhi, 0.0f, cosPhi);
+
+            vertices.push_back({unitPos * radius, unitPos, glm::vec2(u, v), tangent});
+        }
+    }
+
+    std::vector<unsigned int> indices;
+    indices.reserve(static_cast<std::size_t>(latSegments) * static_cast<std::size_t>(lonSegments) * 6);
+    for (int i = 0; i < latSegments; ++i) {
+        for (int j = 0; j < lonSegments; ++j) {
+            const unsigned int row1 = static_cast<unsigned int>(i * (lonSegments + 1));
+            const unsigned int row2 = static_cast<unsigned int>((i + 1) * (lonSegments + 1));
+            const unsigned int a = row1 + static_cast<unsigned int>(j);
+            const unsigned int b = row1 + static_cast<unsigned int>(j) + 1;
+            const unsigned int c = row2 + static_cast<unsigned int>(j) + 1;
+            const unsigned int d = row2 + static_cast<unsigned int>(j);
+
+            indices.insert(indices.end(), {a, b, c, c, d, a});
+        }
+    }
 
     return Mesh(vertices, indices);
 }

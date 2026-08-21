@@ -83,6 +83,23 @@
 //     makeGroundPlane()) independent of scene.obj's own (still
 //     normal-map-less) materials.
 //
+// Phase 9 adds a second, independent material/shader pair -- a real
+// metallic/roughness Cook-Torrance PBR model (see pbr_material.hpp,
+// assets/shaders/pbr.vert/pbr.frag) -- alongside the existing Blinn-Phong
+// Material/basic.vert/basic.frag path, which stays untouched as the
+// reference/fallback for the table/box/pyramid/ground. A 4x4 grid of
+// spheres (sphereMesh_/sphereInstances_ below), metallic sweeping one axis
+// and roughness the other, is the new PBR-lit content this phase adds: it's
+// the classic "PBR reference chart" made real, proving the BRDF actually
+// produces the right qualitative behavior (sharp vs. broad highlights,
+// colored vs. neutral reflectance) rather than just compiling. render()
+// draws entities_/the ground plane with shader_ (unchanged), then switches
+// to pbrShader_ and draws every sphere with its own PBRMaterial;
+// renderShadowPass() depth-draws the spheres too (through the same
+// shadowShader_ every other shadow-casting geometry uses -- shadow.vert only
+// reads position, so it doesn't care which lighting model a mesh's *color*
+// pass uses).
+//
 // Phase 7b adds a skybox background and an HDR + tonemapping pipeline,
 // without changing the shape of the loop above:
 //   - render() no longer draws the lit scene straight to the default
@@ -116,10 +133,12 @@
 #include "engine/input.hpp"
 #include "engine/material.hpp"
 #include "engine/mesh.hpp"
+#include "engine/pbr_material.hpp"
 #include "engine/resource_manager.hpp"
 #include "engine/shader.hpp"
 #include "engine/shadow_map.hpp"
 #include "engine/skybox.hpp"
+#include "engine/transform.hpp"
 #include "engine/window.hpp"
 
 namespace engine {
@@ -151,6 +170,19 @@ private:
     // the viewport at the shadow map's own (typically much smaller)
     // resolution.
     void renderShadowPass(const glm::mat4& lightSpaceMatrix);
+
+    // Phase 9: one sphere in the PBR test-grid -- its own placement
+    // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
+    // differ per instance; the mesh geometry itself, sphereMesh_, is shared
+    // by every instance, so this struct deliberately does NOT hold a Mesh of
+    // its own). Analogous to Entity, but PBRMaterial-based instead of
+    // Model-based, and copyable (PBRMaterial holds no exclusive GL handle --
+    // see pbr_material.hpp) so std::vector<SphereInstance> needs no move-only
+    // ceremony.
+    struct SphereInstance {
+        Transform transform;
+        PBRMaterial material;
+    };
 
     // Declaration order matters here: window_ must construct (and create
     // the GL context) before resources_ is used to load anything (Shader/
@@ -187,6 +219,13 @@ private:
     // as shadowShader_ above.
     std::shared_ptr<Shader> skyboxShader_;
     std::shared_ptr<Shader> postProcessShader_;
+    // Phase 9: the PBR pass's own program (assets/shaders/pbr.vert/
+    // pbr.frag), routed through resources_ for the same reason as every
+    // other shader above. Must be constructed before sphereInstances_ below
+    // (each instance's PBRMaterial holds a pointer into *pbrShader_, the same
+    // "shader_ must outlive entities_/groundMaterial_" constraint this
+    // comment block already describes for the Blinn-Phong path).
+    std::shared_ptr<Shader> pbrShader_;
     // Phase 7a: the directional light's depth-only render target. Fixed
     // resolution (see application.cpp's kShadowMapWidth/Height), independent
     // of the window's own framebuffer size.
@@ -215,6 +254,14 @@ private:
     // mesh.hpp's makeFullscreenQuad()) -- built once here, like groundMesh_,
     // rather than re-built every frame.
     Mesh postProcessQuad_;
+    // Phase 9: the PBR sphere test-grid. One shared Mesh (every sphere is
+    // geometrically identical) plus one SphereInstance (transform +
+    // PBRMaterial) per sphere -- see application.cpp's kSphere* constants
+    // for the grid layout (metallic x roughness) and Application's Phase 9
+    // header comment above for why this is a second, PBRMaterial-based list
+    // alongside entities_ rather than a migration of it.
+    Mesh sphereMesh_;
+    std::vector<SphereInstance> sphereInstances_;
     std::vector<Entity> entities_;
     Camera camera_;
     std::uint64_t maxFrames_;

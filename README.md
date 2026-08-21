@@ -5,14 +5,16 @@ free-fly camera, GL 3.3 core shaders/meshes/textures, multi-light (directional
 + point + spot) Blinn-Phong lighting with tangent-space normal mapping and
 directional shadow mapping, Assimp-based multi-object scene loading with a
 real node hierarchy, MSAA anti-aliasing, a thin entity/resource-cache
-layer, a procedural-sky cubemap background, and an HDR + Reinhard-tonemapped
-post-process pipeline -- built up from bare-metal OpenGL, and verified at
-every step by a headless Xvfb+Mesa run/screenshot harness (no GPU or display
-required). See "Architecture overview" right below for what the finished
-whole looks like today, or "Development history" further down for how it got
-built, phase by phase (this repo was built incrementally across 8 phases,
-each independently bug-reviewed), including the specific bugs each phase's
-review found and fixed.
+layer, a procedural-sky cubemap background, an HDR + Reinhard-tonemapped
+post-process pipeline, and (Phase 9) a real metallic/roughness Cook-Torrance
+PBR material/shader alongside the original Blinn-Phong path, proven out on a
+4x4 metallic x roughness sphere reference grid -- built up from bare-metal
+OpenGL, and verified at every step by a headless Xvfb+Mesa run/screenshot
+harness (no GPU or display required). See "Architecture overview" right
+below for what the finished whole looks like today, or "Development history"
+further down for how it got built, phase by phase (this repo was built
+incrementally across 9 phases, each independently bug-reviewed), including
+the specific bugs each phase's review found and fixed.
 
 ## Architecture overview
 
@@ -56,6 +58,14 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   for one directional light + a fixed-size array of point/spot lights (see
   "Phase 7a" below), tangent-space normal mapping, and directional shadow
   mapping, all with a properly computed (transpose-inverse) normal matrix.
+- **`PBRMaterial`** (`pbr_material.hpp`, header-only) -- a second,
+  independent material type (see "Phase 9" below) alongside `Material`
+  above: an albedo tint, metallic, roughness, and ambient-occlusion scalar,
+  bound to `assets/shaders/pbr.vert`/`pbr.frag`'s metallic/roughness
+  Cook-Torrance BRDF instead of `basic.frag`'s Blinn-Phong. `Material`/
+  `basic.vert`/`basic.frag` are unchanged and still drive the rest of the
+  scene (the table/box/pyramid/ground) -- Phase 9 adds a second lighting
+  model rather than replacing the first.
 - **`ShadowMap`** (`shadow_map.hpp`/`.cpp`) -- an RAII depth-only FBO +
   texture used to render the scene from the directional light's point of
   view once per frame; the main pass samples it to shadow that one light's
@@ -110,13 +120,13 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        framebuffer.cpp, skybox.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
-                       texture, material, model, entity, input, resource_manager,
-                       shadow_map, framebuffer, skybox)
+                       texture, material, pbr_material, model, entity, input,
+                       resource_manager, shadow_map, framebuffer, skybox)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
-                       postprocess.vert/.frag), textures (checker.png,
-                       normal_bump.png, skybox/ -- 6 cubemap faces), models
-                       (scene.obj + scene.mtl)
+                       postprocess.vert/.frag, pbr.vert/.frag), textures
+                       (checker.png, normal_bump.png, skybox/ -- 6 cubemap
+                       faces), models (scene.obj + scene.mtl)
 tools/                 Build/run/screenshot scripts
 tests/                 Placeholder for later phases (empty CMakeLists)
 ```
@@ -867,6 +877,121 @@ Phase 7a's multi-light/shadowed/normal-mapped forward renderer.
     (sunlit) to `(52,47,41)` (shadowed) over 10 pixels, and the normal map's
     tiled soft-blotch pattern is still visible across the ground plane in
     the final composited screenshot.
+
+### Phase 9: real metallic/roughness PBR + a sphere reference grid
+
+Phase 9 begins a "full PBR" arc: a second, independent material/shader pair
+implementing the standard Cook-Torrance microfacet BRDF, alongside (not
+replacing) Phase 4/7a's Blinn-Phong `Material`/`basic.vert`/`basic.frag`
+path, which still drives the table/box/pyramid/ground unchanged. Ambient
+lighting here is still a flat placeholder term (`uAmbientColor * albedo *
+ao`), not real image-based lighting -- that's explicitly the next phase's
+job.
+
+- **`PBRMaterial`** (`include/engine/pbr_material.hpp`) -- a value bundle
+  (albedo tint, metallic, roughness, an ambient-occlusion scalar, plus two
+  optional nice-to-have textures not used by this phase's demo content) and
+  a `bind()` that uploads it as uniforms, shaped like `Material` but
+  copyable rather than move-only (no exclusive GL handle of its own).
+  Roughness is clamped away from exactly 0 in `bind()`
+  (`PBRMaterial::kMinRoughness = 0.045`) -- `alpha = roughness^2` is singular
+  at `alpha == 0`.
+- **`assets/shaders/pbr.vert`/`pbr.frag`** -- `pbr.vert` is contract-identical
+  to `basic.vert` (same attributes/uniforms/varyings). `pbr.frag` implements:
+  - **Normal distribution** (GGX/Trowbridge-Reitz): `D = alpha^2 / (pi *
+    ((N.H)^2 * (alpha^2-1) + 1)^2)`, `alpha = roughness^2` (the standard
+    remapping, not roughness used directly).
+  - **Geometry** (Smith, Schlick-GGX, direct-lighting `k`):
+    `k = (roughness+1)^2 / 8` (NOT the IBL `k = roughness^2/2`, a different
+    constant for a later phase), `G = G1(N,V,k) * G1(N,L,k)`.
+  - **Fresnel** (Schlick): `F = F0 + (1-F0) * (1 - (H.V))^5`,
+    `F0 = mix(vec3(0.04), albedo, metallic)` -- the physically-important
+    metal/dielectric split: metals tint their specular by their own albedo,
+    dielectrics reflect a small neutral ~4% at normal incidence regardless of
+    albedo color.
+  - **Combine**: `specular = (D*G*F) / (4 * max(N.V,eps) * max(N.L,eps) +
+    eps)`; **diffuse**: `kD = (1-F) * (1-metallic)`,
+    `diffuse = kD * albedo / pi` -- the `(1-metallic)` factor is what zeroes
+    a metal's diffuse response; forgetting it is a common PBR bug.
+  - Reuses `basic.frag`'s point/spot light uniform arrays, attenuation, and
+    spot-cone logic verbatim (only what happens to each light's radiance
+    once it reaches the fragment changes), and its tangent-space
+    normal-mapping TBN construction + shadow-map PCF sampling (the shadow
+    factor still multiplies only the direct-light terms, never the ambient
+    term).
+  - **Bug found and fixed during this phase's own verification**: the GGX
+    denominator's divide-by-zero guard was originally `max(denom, 1e-7)`.
+    At `N.H == 1` that denominator is exactly `pi * alpha^4`, which is
+    already only `~5.3e-11` at this engine's own minimum roughness
+    (`PBRMaterial::kMinRoughness = 0.045`) -- 27 orders of magnitude above
+    float32's smallest normal value, so no real underflow risk, but *below*
+    the `1e-7` floor. That floor was silently clamping away the entire peak
+    brightness advantage of the smoothest spheres: re-evaluating this exact
+    formula in Python for roughness 0.05 vs. 0.2 at `N.H == 1` found the 0.05
+    case coming out *dimmer* at its own peak than the 0.2 case -- backwards
+    from "lower roughness = sharper, brighter highlight." Fixed by lowering
+    the floor to `1e-12` (safely below every denominator this engine
+    legitimately produces, still far above float32 underflow).
+- **`Mesh::makeUVSphere(latSegments, lonSegments, radius)`** (`mesh.hpp`/
+  `.cpp`) -- a standard UV sphere with analytic per-vertex normals
+  (`normalize(position)`, exact for a sphere centered at the origin) and
+  tangents (`d(position)/d(phi)`, closed-form: `(-sin(phi), 0, cos(phi))`),
+  built as a `(latSegments+1) x (lonSegments+1)` vertex grid so every vertex
+  (including the poles) gets its own well-defined texCoord.
+- **The sphere test-grid** (`Application`'s `sphereMesh_`/`sphereInstances_`)
+  -- a 4x4 grid (metallic 0->1 across columns, roughness 0.05->1.0 across
+  rows), one shared albedo (a saturated red-orange) so the metal/dielectric
+  Fresnel distinction is directly comparable across the grid. Built directly
+  in the camera's own image plane (its right/up basis vectors, derived from
+  `kDefaultCameraPosition`/`kSceneCenter`) rather than laid out along world
+  X/Z: an axis-aligned grid recedes away from the camera along a mostly
+  depth-facing direction at this engine's fixed camera angle, foreshortening
+  row spacing so hard that adjacent rows visibly overlapped on screen even
+  with generous world-space spacing -- confirmed by re-projecting sphere
+  centers through the same view/projection matrices `Application` builds. A
+  camera-facing grid instead faces the camera edge-on like a real reference
+  chart, every sphere equidistant from the camera, both axes evenly spaced
+  in screen space. Placed in front of the existing table/box/pyramid scene
+  (closer to the camera) so both the new PBR content and the existing
+  Blinn-Phong-lit scene remain visible in the same frame. Both
+  `renderShadowPass()` and `render()`'s PBR pass re-upload the same
+  view/projection/light-space/light-array/shadow-map uniforms already
+  uploaded for the Blinn-Phong pass -- GL uniform state lives per-program,
+  so switching the active program does not carry them over.
+- **Verify**: `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh
+  build/engine_app build/phase9_screenshot.png`. Verified three ways:
+  1. *The exact BRDF equations, independent of rendering*: `pbr.frag`'s
+     formulas re-implemented directly in Python (no screenshot/tonemap
+     involved) confirm `D`'s peak strictly decreases and its half-max
+     angular width strictly increases with roughness (`D(N.H=1)`:
+     `50929.6 -> 198.9 -> 5.09 -> 0.318` for roughness `0.05, 0.2, 0.5, 1.0`;
+     half-width `0.57 deg -> 1.52 deg -> 9.58 deg -> flat/uniform`), and that
+     for the same albedo `(0.85, 0.12, 0.08)`, a dielectric's specular color
+     comes out exactly neutral (`(1.0, 1.0, 1.0)` ratio) while its diffuse
+     keeps the full albedo tint, versus a metal's specular color coming out
+     `(1.0, 0.141, 0.094)` -- an exact match to `albedo`'s own
+     `(1.0, 0.141, 0.094)` ratio -- with zero diffuse. Grazing-angle
+     (`N.V`/`N.L` near 0) and roughness-extreme cases all stay finite.
+  2. *The rendered grid, visually*: cropped close-ups show a tiny, sharp,
+     near-white pinpoint highlight on the smoothest dielectric sphere; the
+     same tiny sharp highlight with a warm/orange cast on the smoothest
+     metal sphere; no distinguishable highlight at all (a soft, uniform
+     gradient) on the roughest dielectric sphere; and a broad, soft, reddish
+     sheen (no tight point) on the roughest metal sphere.
+  3. *Pixel data*: re-projecting each sphere's world position through
+     `Application`'s own view/projection matrices and sampling a
+     lit-but-off-specular-axis point (faces both the directional light and
+     the camera, avoiding both the unlit far side and the specular hotspot)
+     on the grid's un-occluded top row gives `(67,12,9)` at metallic 0.0,
+     falling monotonically to `(54,10,7)`, `(44,8,6)`, and `(39,6,5)` at
+     metallic 1.0 -- the metallic=1.0 value matches the ambient-only floor
+     sampled everywhere else on that sphere, confirming its diffuse term is
+     genuinely zero, while the dielectric sphere's diffuse keeps the scene's
+     red albedo visibly brighter than ambient alone.
+  - *No regression*: Phase 7a/7b's shadows, ground normal mapping, skybox,
+    HDR/tonemap, and MSAA (`GL_SAMPLES = 4`, confirmed in the run log) are
+    all still visible/active in the same screenshot -- nothing in the
+    existing Blinn-Phong path or post-process pipeline was touched.
 
 ## Libraries used and why
 
