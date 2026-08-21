@@ -63,8 +63,27 @@
 //     input.hpp) and passes it down to update()/Camera, rather than Camera
 //     calling Window::isKeyPressed() itself the way Phase 3-5's
 //     processKeyboard(const Window&, float) did.
-// Camera movement, lighting, and the rendered scene itself are otherwise
-// unchanged from Phase 5.
+//
+// Phase 7a extends the lighting/rendering pipeline without touching the
+// main-loop shape above:
+//   - Phase 4's single hardcoded directional light is joined by a small
+//     fixed set of point lights and a spot light (kPointLights/kSpotLights
+//     in application.cpp), uploaded to the shader as fixed-size uniform
+//     arrays + a live count each frame -- see basic.frag.
+//   - A second render target, shadowMap_ (see shadow_map.hpp), is rendered
+//     into once per frame *before* the main pass: the whole scene, drawn
+//     depth-only from the directional light's point of view via a second,
+//     minimal shader (shadowShader_). The main pass then samples that depth
+//     texture per-fragment to reduce the directional light's own
+//     contribution for shadowed fragments (see renderShadowPass()/render()
+//     and basic.frag's shadowFactor()).
+//   - A hand-built ground plane (groundMesh_/groundMaterial_, not part of
+//     scene.obj/Model) is drawn alongside entities_ specifically so this
+//     phase has one demo surface with a bound normal map (see mesh.hpp's
+//     makeGroundPlane()) independent of scene.obj's own (still
+//     normal-map-less) materials.
+
+#include <glm/glm.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -74,8 +93,11 @@
 #include "engine/camera.hpp"
 #include "engine/entity.hpp"
 #include "engine/input.hpp"
+#include "engine/material.hpp"
+#include "engine/mesh.hpp"
 #include "engine/resource_manager.hpp"
 #include "engine/shader.hpp"
+#include "engine/shadow_map.hpp"
 #include "engine/window.hpp"
 
 namespace engine {
@@ -99,21 +121,52 @@ private:
     void update(double deltaTime, const InputState& input);
     void render();
 
+    // Phase 7a: renders the whole scene depth-only from the directional
+    // light's point of view into shadowMap_ (see shadow_map.hpp), using
+    // shadowShader_. Called once per frame from render(), before the main
+    // pass, and restores the window's own viewport (and default framebuffer
+    // binding) before returning, since ShadowMap::bindForWriting() points
+    // the viewport at the shadow map's own (typically much smaller)
+    // resolution.
+    void renderShadowPass(const glm::mat4& lightSpaceMatrix);
+
     // Declaration order matters here: window_ must construct (and create
     // the GL context) before resources_ is used to load anything (Shader/
-    // Model construction both do GL calls) -- resources_ itself does no GL
-    // work at construction (its caches start empty), but shader_ is
-    // initialized from it in the constructor's member-initializer list, so
-    // resources_ must still be declared (and thus constructed) before
-    // shader_. shader_ must in turn come before entities_: building the
-    // scene's Entity calls resources_.getModel(path, *shader_), and each
-    // resulting Model's per-mesh Materials hold a pointer into that same
-    // shader_, so shader_ must outlive every entity in entities_. camera_
-    // does no GL work so its position relative to the above is
-    // unconstrained.
+    // Model/ShadowMap/Mesh construction all do GL calls) -- resources_
+    // itself does no GL work at construction (its caches start empty), but
+    // shader_ is initialized from it in the constructor's member-
+    // initializer list, so resources_ must still be declared (and thus
+    // constructed) before shader_. shadowShader_ likewise needs resources_
+    // constructed first. shader_ must in turn come before entities_ and
+    // groundMaterial_: building the scene's Entity calls
+    // resources_.getModel(path, *shader_), and each resulting Model's
+    // per-mesh Materials (plus groundMaterial_, built directly against
+    // shader_ rather than through Model) hold a pointer into that same
+    // shader_, so shader_ must outlive all of them. camera_ does no GL work
+    // so its position relative to the above is unconstrained.
     Window window_;
     ResourceManager resources_;
     std::shared_ptr<Shader> shader_;
+    // Phase 7a: a second, minimal program (assets/shaders/shadow.vert/
+    // shadow.frag) used only to render shadowMap_'s depth pass -- see
+    // renderShadowPass(). Routed through resources_ like shader_, even
+    // though nothing else currently requests the same (vertex, fragment)
+    // pair, for the same reason every other asset load goes through the
+    // cache: one consistent loading path, not because sharing is expected
+    // here.
+    std::shared_ptr<Shader> shadowShader_;
+    // Phase 7a: the directional light's depth-only render target. Fixed
+    // resolution (see application.cpp's kShadowMapWidth/Height), independent
+    // of the window's own framebuffer size.
+    ShadowMap shadowMap_;
+    // Phase 7a: a hand-built ground plane (see mesh.hpp's makeGroundPlane())
+    // with a bound normal map, drawn directly alongside entities_ rather
+    // than through Model/scene.obj -- see this header's Phase 7a comment
+    // above for why. Constructed directly as members (not wrapped in an
+    // Entity) since there's exactly one and Entity only knows how to hold a
+    // Model, not a raw Mesh + Material pair.
+    Mesh groundMesh_;
+    Material groundMaterial_;
     std::vector<Entity> entities_;
     Camera camera_;
     std::uint64_t maxFrames_;

@@ -1,14 +1,15 @@
 # 3D Engine (TBD)
 
 A small C++/OpenGL 3D engine: a real windowing/main-loop foundation, a
-free-fly camera, GL 3.3 core shaders/meshes/textures, Blinn-Phong
-directional lighting, Assimp-based multi-object scene loading with a real
-node hierarchy, MSAA anti-aliasing, and a thin entity/resource-cache layer
--- built up from bare-metal OpenGL, and verified at every step by a
+free-fly camera, GL 3.3 core shaders/meshes/textures, multi-light (directional
++ point + spot) Blinn-Phong lighting with tangent-space normal mapping and
+directional shadow mapping, Assimp-based multi-object scene loading with a
+real node hierarchy, MSAA anti-aliasing, and a thin entity/resource-cache
+layer -- built up from bare-metal OpenGL, and verified at every step by a
 headless Xvfb+Mesa run/screenshot harness (no GPU or display required). See
 "Architecture overview" right below for what the finished whole looks like
 today, or "Development history" further down for how it got built, phase by
-phase (this repo was built incrementally across 6 phases, each
+phase (this repo was built incrementally across 7 phases, each
 independently bug-reviewed), including the specific bugs each phase's
 review found and fixed.
 
@@ -29,10 +30,14 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   Nothing else in the engine (notably `Camera`, and `Application`'s own
   ESC-to-quit check) reads `Window` key/cursor state directly any more.
 - **`Application`** (`application.hpp`/`.cpp`) -- owns the `Window`, a
-  `ResourceManager`, the scene's shared `Shader`, a `std::vector<Entity>`,
-  and a `Camera`; runs the main loop (poll input -> update camera -> render
-  -> swap) until the window closes, ESC is pressed, or `ENGINE_MAX_FRAMES`
-  is reached (headless verification only -- see below).
+  `ResourceManager`, the scene's shared `Shader` (plus a second, depth-only
+  `shadowShader_`), a `ShadowMap`, a hand-built normal-mapped ground plane
+  (`groundMesh_`/`groundMaterial_`), a `std::vector<Entity>`, and a `Camera`;
+  runs the main loop (poll input -> update camera -> render -> swap) until
+  the window closes, ESC is pressed, or `ENGINE_MAX_FRAMES` is reached
+  (headless verification only -- see below). `render()` now does two GL
+  passes per frame: a depth-only shadow pass (`renderShadowPass()`) followed
+  by the normal color pass.
 - **`Camera`** + **`Transform`** (`camera.hpp`/`.cpp`, `transform.hpp`) -- a
   yaw/pitch free-fly camera driven by `InputState` (or a small scripted
   waypoint path under `ENGINE_CAMERA_DEMO`, for headless verification where
@@ -40,11 +45,17 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   bundle used for every object's model matrix.
 - **`Shader`** / **`Mesh`** / **`Texture`** / **`Material`** -- the
   rendering primitives: a linked GL program; an interleaved
-  position/normal/texCoord VAO+VBO+EBO; a 2D GL texture loaded via
-  stb_image; and a `Shader` + `Texture` + tint/shininess bundle bound once
-  per draw call. `assets/shaders/basic.vert`/`basic.frag` implement
-  Blinn-Phong directional lighting with a properly computed (transpose-
-  inverse) normal matrix.
+  position/normal/texCoord/tangent VAO+VBO+EBO; a 2D GL texture loaded via
+  stb_image; and a `Shader` + diffuse `Texture` + optional normal-map
+  `Texture` + tint/shininess bundle bound once per draw call.
+  `assets/shaders/basic.vert`/`basic.frag` implement Blinn-Phong lighting
+  for one directional light + a fixed-size array of point/spot lights (see
+  "Phase 7a" below), tangent-space normal mapping, and directional shadow
+  mapping, all with a properly computed (transpose-inverse) normal matrix.
+- **`ShadowMap`** (`shadow_map.hpp`/`.cpp`) -- an RAII depth-only FBO +
+  texture used to render the scene from the directional light's point of
+  view once per frame; the main pass samples it to shadow that one light's
+  own contribution per fragment.
 - **`Model`** (`model.hpp`/`.cpp`) -- loads a whole scene via Assimp
   (`assets/models/scene.obj`: a table, a box on the table, and a separate
   pyramid) into a tree of `ModelNode`s, each with its own local transform,
@@ -61,10 +72,14 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   so nothing is loaded from disk or re-uploaded to the GPU more than once.
 
 One frame, in short: `Application::run()` polls GLFW events and an
-`InputState`, feeds it to `camera_`, uploads view/projection/lighting
-uniforms once, then iterates `entities_` calling
-`model->draw(shader, entity.transform.getModelMatrix())`, which recurses
-the model's node tree drawing each mesh with its own material.
+`InputState`, feeds it to `camera_`, then `render()` (1) renders the whole
+scene depth-only into `shadowMap_` from the directional light's point of
+view, (2) restores the window's real viewport, uploads
+view/projection/light-space/lighting uniforms once, and (3) iterates
+`entities_` calling `model->draw(shader, entity.transform.getModelMatrix())`
+(which recurses the model's node tree drawing each mesh with its own
+material) plus the hand-built ground plane, each fragment sampling
+`shadowMap_` and any bound normal map as it shades.
 
 ## Directory layout
 
@@ -72,13 +87,15 @@ the model's node tree drawing each mesh with its own material.
 CMakeLists.txt        Root build: fetches deps (incl. Assimp), builds engine_app
 src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
                        shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp,
-                       input.cpp, resource_manager.cpp)
+                       input.cpp, resource_manager.cpp, shadow_map.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
-                       texture, material, model, entity, input, resource_manager)
+                       texture, material, model, entity, input, resource_manager,
+                       shadow_map)
 external/              Vendored small/single-header libs (stb_image, glad)
-assets/                Shaders, textures, models (assets/textures/checker.png,
-                       assets/models/scene.obj + scene.mtl)
+assets/                Shaders (incl. shadow.vert/shadow.frag), textures
+                       (checker.png, normal_bump.png), models (scene.obj +
+                       scene.mtl)
 tools/                 Build/run/screenshot scripts
 tests/                 Placeholder for later phases (empty CMakeLists)
 ```
@@ -613,6 +630,109 @@ plus one genuinely new rendering capability (MSAA).
   1-4px partial-alpha specks along silhouette edges that Phase 5's hard-
   edged render didn't have, itself further evidence of the new antialiased
   edges.
+
+### Phase 7a: multiple lights, normal mapping, directional shadow mapping
+
+Phase 7a is the first purely rendering-feature phase since Phase 6's
+structural work: three additions on top of Phase 4-6's single directional
+light, all forward-rendered (no G-buffer/deferred pass).
+
+- **Multiple lights** (`assets/shaders/basic.frag`, `src/application.cpp`) --
+  the Phase 4 directional light is joined by a fixed-size uniform array of
+  point lights (`uPointLights[8]`/`uNumPointLights`) and spot lights
+  (`uSpotLights[4]`/`uNumSpotLights`), the standard "fixed array + live
+  count" forward-lighting pattern: the fragment shader loops
+  `for (int i = 0; i < uNumPointLights; ++i)` etc., touching only the
+  uniform slots `Application::render()` actually uploaded that frame. Point
+  lights use the standard `1 / (constant + linear*d + quadratic*d^2)`
+  distance attenuation; spot lights add a `smoothstep`-based soft cone
+  (fading between a precomputed `cos(innerAngle)`/`cos(outerAngle)` pair)
+  instead of a hard binary cutoff. `Application` places two point lights
+  (warm, above `BoxOnTable`; cool, above the pyramid's apex) and one spot
+  light (above the table, aimed down) at positions derived from
+  `scene.obj`'s own documented object extents -- see `application.cpp`'s
+  `kPointLights`/`kSpotLights` tables. Only the directional light casts a
+  shadow (see below); point/spot contributions are never reduced by
+  `shadowFactor()`.
+- **Normal mapping** (`mesh.hpp`'s `Vertex::tangent`, `model.cpp`,
+  `material.hpp`, `basic.vert`/`.frag`) -- `Mesh`'s interleaved vertex now
+  carries a `tangent` (attribute location 3) alongside
+  position/normal/texCoord; `Model` gets it from Assimp's own
+  `aiProcess_CalcTangentSpace` post-process step rather than hand-deriving
+  the UV-delta formula, since `Model` already loads through Assimp. The
+  vertex shader transforms the tangent into world space via `mat3(uModel)`
+  (a plain linear transform, deliberately **not** the inverse-transpose
+  normal matrix -- a tangent is an ordinary direction embedded in the
+  surface, unlike a normal). `Material` gained an optional (nullable)
+  normal-map `Texture`; when bound, the fragment shader builds a
+  Gram-Schmidt-orthogonalized TBN matrix and rotates the sampled tangent-
+  space normal (`texture(...).rgb * 2.0 - 1.0`) into world space, the same
+  space the light positions/directions are already expressed in. The
+  bitangent is derived as `cross(normal, tangent)` rather than carried as
+  its own vertex attribute (no separate handedness tracking -- a documented
+  simplification). `scene.obj`'s existing Kd-only materials have no normal
+  map and render exactly as before; a hand-built ground plane
+  (`mesh.hpp`'s `makeGroundPlane()`, drawn directly by `Application`
+  alongside `entities_`, not through `Model`) is this phase's one
+  normal-mapped demo surface, using a procedurally-generated
+  `assets/textures/normal_bump.png` (a mostly-flat `rgb(128,128,255)` tangent-
+  space normal map with a few blurred, tilted-normal blotches, made with
+  ImageMagick).
+- **Directional shadow mapping** (`shadow_map.hpp`/`.cpp`,
+  `assets/shaders/shadow.vert`/`shadow.frag`, `Application::renderShadowPass()`)
+  -- a depth-only FBO + `GL_DEPTH_COMPONENT` texture (`ShadowMap`, RAII,
+  move-only like every other GL-handle-owning class here). Each frame,
+  `Application::render()` first renders the whole scene (every entity via a
+  new `Model::drawDepthOnly()`, plus the ground plane) into `shadowMap_`
+  through a minimal depth-only program (`shadow.vert` computes
+  `uLightSpaceMatrix * uModel * aPos`; `shadow.frag` is an empty `main()`,
+  since the FBO has no color attachment to write), using a fixed
+  orthographic projection + a `lookAt` from a chosen point back along the
+  directional light's own direction (a real "position" a directional light
+  doesn't otherwise have, picked purely to render this one depth pass from).
+  `glDrawBuffer(GL_NONE)`/`glReadBuffer(GL_NONE)` are set on that FBO for
+  driver-completeness. The main pass then re-projects each fragment into the
+  same light-clip-space (`vFragPosLightSpace`, computed once per vertex),
+  perspective-divides, remaps to `[0,1]`, and compares depths with a
+  slope-scaled bias (`max(0.006 * (1 - N.L), 0.0015)` -- bigger for
+  glancing-angle surfaces, where depth-map quantization error is worse,
+  smaller for surfaces facing the light head-on, avoiding both shadow acne
+  and excessive peter-panning) to compute a 0/1 shadow factor that only
+  reduces the directional light's own diffuse+specular terms.
+  - **A deliberate lighting-direction change**: Phase 4-6's directional
+    light (`(-0.5, -1.0, -0.3)`) casts shadows on the side of each object the
+    light continues past -- towards `-x, -z` here -- which is *away* from
+    `kDefaultCameraPosition` (`(2.6, 1.9, 3.4)`, established since Phase 3):
+    from that camera, any shadow so cast falls mostly behind its own caster,
+    invisible. Since this phase's whole point is a shadow the screenshot can
+    actually show, `kLightDirection` was changed to `(0.6, -0.7, 0.35)` --
+    same general "steep sun" character, but shadows now fall towards
+    `+x, +z`, the side the long-established default camera actually views
+    from -- rather than moving that camera instead.
+- **Verify**: `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh
+  build/engine_app build/phase7a_screenshot.png`. Verified by re-rendering
+  with one factor at a time forced off/on (a temporary shader/source edit,
+  reverted after) and diffing against the real screenshot:
+  - *Shadow*: forcing `shadowFactor()` to `0` and diffing against the real
+    render isolates a coherent dark region (not scattered noise) roughly
+    behind the table/box; sampling the same ground material at a shadowed
+    point vs. a nearby unshadowed point in the real screenshot gives
+    `(47, 63, 69)` vs. `(255, 255, 224)` -- clearly, measurably darker.
+  - *Normal mapping*: rendering the ground plane with `normalMap = nullptr`
+    produces smooth, gradient-only shading with zero geometric variation on
+    that flat quad; the real render shows a repeating pattern of soft
+    circular blotches (matching `normal_bump.png`'s tiled bump pattern) laid
+    over that gradient -- e.g. one such blotch samples `(80, 108, 169)`
+    with the normal map vs. `(204, 238, 255)` at the same pixel without it.
+  - *Multiple lights*: forcing `uNumPointLights`/`uNumSpotLights` to `0` and
+    diffing shows a real (if modest -- these lights sit close to their
+    target surfaces) contribution, concentrated near the box and pyramid;
+    e.g. near the box, a table-top pixel goes from `(18, 7, 1)` (directional
+    only) to `(88, 39, 6)` with the warm point light added -- R rising far
+    more than G/B, consistent with that light's `(1.0, 0.35, 0.15)` color;
+    near the pyramid, `(7, 17, 40)` becomes `(12, 36, 94)` with the cool
+    point light added -- B rising far more than R/G, consistent with its
+    `(0.15, 0.55, 1.0)` color.
 
 ## Libraries used and why
 

@@ -103,8 +103,19 @@ public:
     // the file's own node hierarchy rather than replacing it.
     void draw(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
 
+    // Phase 7a: draws every node's mesh geometry with `shader` (expected to
+    // be the depth-only shadow shader, see shadow_map.hpp/assets/shaders/
+    // shadow.vert) uploading only each node's uModel -- no normal matrix, no
+    // Material::bind() (no texture/tint/shininess uniforms are used or even
+    // exist on that shader), since only depth is being written. Kept as a
+    // separate entry point rather than a flag on draw() so the normal draw
+    // path's uniform/material contract doesn't grow a shadow-pass-only
+    // special case.
+    void drawDepthOnly(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
+
 private:
     void drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
+    void drawNodeDepthOnly(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
 
     std::vector<Mesh> meshes_;
     std::vector<Material> materials_;

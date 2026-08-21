@@ -113,7 +113,16 @@ Model::Model(const std::string& path, Shader& shader, ResourceManager& resourceM
     // asset actually authored with top-left-origin UVs (as glTF typically
     // is) would need this flag; it's omitted here because it's wrong for
     // what this phase actually loads, not because it was overlooked.
-    const unsigned int postProcessFlags = aiProcess_Triangulate | aiProcess_GenSmoothNormals;
+    // aiProcess_CalcTangentSpace (Phase 7a): computes per-vertex tangents
+    // (and bitangents, unused -- see mesh.hpp) from each mesh's existing
+    // normals + UV channel, needed for tangent-space normal mapping. Assimp
+    // requires normals and a UV channel to already be present to compute
+    // this, which GenSmoothNormals/the source file's own vt data guarantee
+    // by the time this step runs -- using Assimp's own well-tested
+    // implementation here rather than hand-deriving the UV-delta tangent
+    // formula, since Model already loads through Assimp anyway.
+    const unsigned int postProcessFlags =
+        aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_CalcTangentSpace;
 
     const aiScene* scene = importer.ReadFile(path, postProcessFlags);
     if (scene == nullptr || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0u || scene->mRootNode == nullptr) {
@@ -149,6 +158,17 @@ Model::Model(const std::string& path, Shader& shader, ResourceManager& resourceM
             vertex.texCoord = mesh->mTextureCoords[0] != nullptr
                                    ? glm::vec2(mesh->mTextureCoords[0][v].x, mesh->mTextureCoords[0][v].y)
                                    : glm::vec2(0.0f);
+
+            // aiProcess_CalcTangentSpace above computes both mTangents and
+            // mBitangents together (HasTangentsAndBitangents() reflects
+            // whether that step actually ran/succeeded for this mesh, e.g.
+            // it's skipped for a mesh with no UVs) -- default to a zero
+            // tangent otherwise, same defensive null-guard pattern as
+            // normal/texCoord above rather than indexing a possibly-null
+            // mTangents.
+            vertex.tangent = mesh->HasTangentsAndBitangents()
+                                  ? glm::vec3(mesh->mTangents[v].x, mesh->mTangents[v].y, mesh->mTangents[v].z)
+                                  : glm::vec3(0.0f);
 
             vertices.push_back(vertex);
         }
@@ -298,6 +318,29 @@ void Model::drawNode(Shader& shader, const ModelNode& node, const glm::mat4& par
 
     for (const ModelNode& child : node.children) {
         drawNode(shader, child, worldTransform);
+    }
+}
+
+void Model::drawDepthOnly(Shader& shader, const glm::mat4& rootTransform) const {
+    drawNodeDepthOnly(shader, root_, rootTransform);
+}
+
+void Model::drawNodeDepthOnly(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const {
+    const glm::mat4 worldTransform = parentTransform * node.localTransform;
+
+    if (!node.meshIndices.empty()) {
+        // Only uModel is needed to place geometry in light-clip-space (see
+        // shadow.vert) -- no normal matrix, no Material::bind(), since depth
+        // is all this pass writes.
+        shader.setMat4("uModel", worldTransform);
+        for (const std::size_t meshIndex : node.meshIndices) {
+            meshes_[meshIndex].bind();
+            meshes_[meshIndex].draw();
+        }
+    }
+
+    for (const ModelNode& child : node.children) {
+        drawNodeDepthOnly(shader, child, worldTransform);
     }
 }
 

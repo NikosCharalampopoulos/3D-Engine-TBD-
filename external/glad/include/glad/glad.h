@@ -176,6 +176,12 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_RGBA 0x1908
 #define GL_RGB8 0x8051
 #define GL_RGBA8 0x8058
+// Phase 7a: depth-only texture format (the shadow map's own attachment) and
+// GL_NONE (glDrawBuffer(GL_NONE)/glReadBuffer(GL_NONE), telling the driver a
+// depth-only FBO deliberately has no color attachment to read/write --
+// needed for GL_FRAMEBUFFER_COMPLETE on some drivers, see ShadowMap).
+#define GL_DEPTH_COMPONENT 0x1902
+#define GL_NONE 0
 
 #define GL_ARRAY_BUFFER 0x8892
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
@@ -214,6 +220,11 @@ typedef void (APIENTRY* PFNGLBLENDFUNCPROC)(GLenum, GLenum);
 typedef void (APIENTRY* PFNGLLINEWIDTHPROC)(GLfloat);
 typedef void (APIENTRY* PFNGLPOINTSIZEPROC)(GLfloat);
 typedef void (APIENTRY* PFNGLPIXELSTOREIPROC)(GLenum, GLint);
+// Phase 7a: glDrawBuffer/glReadBuffer, each taking one GLenum -- used with
+// GL_NONE on the shadow map's depth-only FBO (see ShadowMap) since that FBO
+// has no color attachment for either to touch.
+typedef void (APIENTRY* PFNGLDRAWBUFFERPROC)(GLenum);
+typedef void (APIENTRY* PFNGLREADBUFFERPROC)(GLenum);
 typedef GLenum(APIENTRY* PFNGLGETERRORPROC)(void);
 typedef const GLubyte* (APIENTRY* PFNGLGETSTRINGPROC)(GLenum);
 typedef const GLubyte* (APIENTRY* PFNGLGETSTRINGIPROC)(GLenum, GLuint);
@@ -292,6 +303,8 @@ GLAPI PFNGLBLENDFUNCPROC glad_glBlendFunc;
 GLAPI PFNGLLINEWIDTHPROC glad_glLineWidth;
 GLAPI PFNGLPOINTSIZEPROC glad_glPointSize;
 GLAPI PFNGLPIXELSTOREIPROC glad_glPixelStorei;
+GLAPI PFNGLDRAWBUFFERPROC glad_glDrawBuffer;
+GLAPI PFNGLREADBUFFERPROC glad_glReadBuffer;
 GLAPI PFNGLGETERRORPROC glad_glGetError;
 GLAPI PFNGLGETSTRINGPROC glad_glGetString;
 GLAPI PFNGLGETSTRINGIPROC glad_glGetStringi;
@@ -370,6 +383,8 @@ GLAPI PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers;
 #define glLineWidth glad_glLineWidth
 #define glPointSize glad_glPointSize
 #define glPixelStorei glad_glPixelStorei
+#define glDrawBuffer glad_glDrawBuffer
+#define glReadBuffer glad_glReadBuffer
 #define glGetError glad_glGetError
 #define glGetString glad_glGetString
 #define glGetStringi glad_glGetStringi

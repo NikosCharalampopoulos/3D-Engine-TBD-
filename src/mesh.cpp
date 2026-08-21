@@ -46,6 +46,15 @@ Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>&
                                     reinterpret_cast<void*>(offsetof(Vertex, texCoord))));
     GL_CHECK(glEnableVertexAttribArray(2));
 
+    // Attribute 3: tangent (Phase 7a, normal mapping) -- same interleaved
+    // buffer, wired up unconditionally like normal/texCoord above even
+    // though not every mesh's material actually has a normal map; the cost
+    // of one extra always-active vertex attribute is negligible and this
+    // avoids a second Mesh code path.
+    GL_CHECK(glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                                    reinterpret_cast<void*>(offsetof(Vertex, tangent))));
+    GL_CHECK(glEnableVertexAttribArray(3));
+
     // Unbind the VAO first so the EBO binding (which is part of VAO state)
     // stays captured; only then unbind the array buffer, which is global
     // state and safe to release now that attribute 0 has been configured.
@@ -129,27 +138,31 @@ Mesh makeCube(float halfExtent) {
     // Each face lists its 4 corners counter-clockwise as seen from outside
     // the cube (so the default GL front-face winding matches, in case a
     // later phase enables back-face culling) along with that face's outward
-    // normal and a standard 0..1 texCoord quad. Winding correctness has no
-    // visible effect this phase since GL_CULL_FACE is never enabled here.
+    // normal, a standard 0..1 texCoord quad, and (Phase 7a) that face's
+    // tangent -- the direction texCoord.u increases in world space, derived
+    // by hand from each face's own vertex order/UV layout below (e.g. +Z's
+    // u goes 0->1 from vertex 0 to vertex 1, a +X displacement, so its
+    // tangent is (1,0,0)). Winding correctness has no visible effect this
+    // phase since GL_CULL_FACE is never enabled here.
     const std::vector<Vertex> vertices = {
-        // +Z (front)
-        {{-h, -h, h}, {0, 0, 1}, {0, 0}}, {{h, -h, h}, {0, 0, 1}, {1, 0}},
-        {{h, h, h}, {0, 0, 1}, {1, 1}},   {{-h, h, h}, {0, 0, 1}, {0, 1}},
-        // -Z (back)
-        {{h, -h, -h}, {0, 0, -1}, {0, 0}}, {{-h, -h, -h}, {0, 0, -1}, {1, 0}},
-        {{-h, h, -h}, {0, 0, -1}, {1, 1}}, {{h, h, -h}, {0, 0, -1}, {0, 1}},
-        // +X (right)
-        {{h, -h, h}, {1, 0, 0}, {0, 0}},  {{h, -h, -h}, {1, 0, 0}, {1, 0}},
-        {{h, h, -h}, {1, 0, 0}, {1, 1}},  {{h, h, h}, {1, 0, 0}, {0, 1}},
-        // -X (left)
-        {{-h, -h, -h}, {-1, 0, 0}, {0, 0}}, {{-h, -h, h}, {-1, 0, 0}, {1, 0}},
-        {{-h, h, h}, {-1, 0, 0}, {1, 1}},   {{-h, h, -h}, {-1, 0, 0}, {0, 1}},
-        // +Y (top)
-        {{-h, h, h}, {0, 1, 0}, {0, 0}},  {{h, h, h}, {0, 1, 0}, {1, 0}},
-        {{h, h, -h}, {0, 1, 0}, {1, 1}},  {{-h, h, -h}, {0, 1, 0}, {0, 1}},
-        // -Y (bottom)
-        {{-h, -h, -h}, {0, -1, 0}, {0, 0}}, {{h, -h, -h}, {0, -1, 0}, {1, 0}},
-        {{h, -h, h}, {0, -1, 0}, {1, 1}},   {{-h, -h, h}, {0, -1, 0}, {0, 1}},
+        // +Z (front): tangent +X
+        {{-h, -h, h}, {0, 0, 1}, {0, 0}, {1, 0, 0}}, {{h, -h, h}, {0, 0, 1}, {1, 0}, {1, 0, 0}},
+        {{h, h, h}, {0, 0, 1}, {1, 1}, {1, 0, 0}},   {{-h, h, h}, {0, 0, 1}, {0, 1}, {1, 0, 0}},
+        // -Z (back): tangent -X
+        {{h, -h, -h}, {0, 0, -1}, {0, 0}, {-1, 0, 0}}, {{-h, -h, -h}, {0, 0, -1}, {1, 0}, {-1, 0, 0}},
+        {{-h, h, -h}, {0, 0, -1}, {1, 1}, {-1, 0, 0}}, {{h, h, -h}, {0, 0, -1}, {0, 1}, {-1, 0, 0}},
+        // +X (right): tangent -Z
+        {{h, -h, h}, {1, 0, 0}, {0, 0}, {0, 0, -1}},  {{h, -h, -h}, {1, 0, 0}, {1, 0}, {0, 0, -1}},
+        {{h, h, -h}, {1, 0, 0}, {1, 1}, {0, 0, -1}},  {{h, h, h}, {1, 0, 0}, {0, 1}, {0, 0, -1}},
+        // -X (left): tangent +Z
+        {{-h, -h, -h}, {-1, 0, 0}, {0, 0}, {0, 0, 1}}, {{-h, -h, h}, {-1, 0, 0}, {1, 0}, {0, 0, 1}},
+        {{-h, h, h}, {-1, 0, 0}, {1, 1}, {0, 0, 1}},   {{-h, h, -h}, {-1, 0, 0}, {0, 1}, {0, 0, 1}},
+        // +Y (top): tangent +X
+        {{-h, h, h}, {0, 1, 0}, {0, 0}, {1, 0, 0}},  {{h, h, h}, {0, 1, 0}, {1, 0}, {1, 0, 0}},
+        {{h, h, -h}, {0, 1, 0}, {1, 1}, {1, 0, 0}},  {{-h, h, -h}, {0, 1, 0}, {0, 1}, {1, 0, 0}},
+        // -Y (bottom): tangent +X
+        {{-h, -h, -h}, {0, -1, 0}, {0, 0}, {1, 0, 0}}, {{h, -h, -h}, {0, -1, 0}, {1, 0}, {1, 0, 0}},
+        {{h, -h, h}, {0, -1, 0}, {1, 1}, {1, 0, 0}},   {{-h, -h, h}, {0, -1, 0}, {0, 1}, {1, 0, 0}},
     };
 
     std::vector<unsigned int> indices;
@@ -158,6 +171,25 @@ Mesh makeCube(float halfExtent) {
         const unsigned int base = face * 4;
         indices.insert(indices.end(), {base + 0, base + 1, base + 2, base + 2, base + 3, base + 0});
     }
+
+    return Mesh(vertices, indices);
+}
+
+Mesh makeGroundPlane(float halfExtent, float y, float uvTiling) {
+    const float h = halfExtent;
+    const float t = uvTiling;
+
+    // A single upward-facing quad; texCoord.u increases along +X (matching
+    // this face's tangent, (1, 0, 0)) and texCoord.v increases along +Z.
+    // Winding (like makeCube()'s) doesn't matter for visibility since
+    // GL_CULL_FACE is never enabled in this engine.
+    const std::vector<Vertex> vertices = {
+        {{-h, y, -h}, {0, 1, 0}, {0, 0}, {1, 0, 0}},
+        {{h, y, -h}, {0, 1, 0}, {t, 0}, {1, 0, 0}},
+        {{h, y, h}, {0, 1, 0}, {t, t}, {1, 0, 0}},
+        {{-h, y, h}, {0, 1, 0}, {0, t}, {1, 0, 0}},
+    };
+    const std::vector<unsigned int> indices = {0, 1, 2, 2, 3, 0};
 
     return Mesh(vertices, indices);
 }

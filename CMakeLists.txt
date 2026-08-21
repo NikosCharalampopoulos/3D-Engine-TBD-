@@ -125,6 +125,7 @@ add_executable(engine_app
     src/model.cpp
     src/input.cpp
     src/resource_manager.cpp
+    src/shadow_map.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

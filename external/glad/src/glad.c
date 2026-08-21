@@ -15,6 +15,8 @@ PFNGLBLENDFUNCPROC glad_glBlendFunc = NULL;
 PFNGLLINEWIDTHPROC glad_glLineWidth = NULL;
 PFNGLPOINTSIZEPROC glad_glPointSize = NULL;
 PFNGLPIXELSTOREIPROC glad_glPixelStorei = NULL;
+PFNGLDRAWBUFFERPROC glad_glDrawBuffer = NULL;
+PFNGLREADBUFFERPROC glad_glReadBuffer = NULL;
 PFNGLGETERRORPROC glad_glGetError = NULL;
 PFNGLGETSTRINGPROC glad_glGetString = NULL;
 PFNGLGETSTRINGIPROC glad_glGetStringi = NULL;
@@ -107,6 +109,8 @@ int gladLoadGLLoader(GLADloadproc load) {
     LOAD(glad_glLineWidth, "glLineWidth");
     LOAD(glad_glPointSize, "glPointSize");
     LOAD(glad_glPixelStorei, "glPixelStorei");
+    LOAD(glad_glDrawBuffer, "glDrawBuffer");
+    LOAD(glad_glReadBuffer, "glReadBuffer");
     LOAD(glad_glGetError, "glGetError");
     LOAD(glad_glGetString, "glGetString");
     LOAD(glad_glGetStringi, "glGetStringi");
