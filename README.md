@@ -2,20 +2,24 @@
 
 A C++/OpenGL 3D engine, building toward a game engine, starting from
 OpenGL bare-metal basics. This repository is developed in phases; this
-document covers **Phase 0: project scaffolding and a proven build/run
-pipeline.**
+document covers **Phase 0 (project scaffolding and a proven build/run
+pipeline) and Phase 1 (a real window + main-loop foundation).**
 
 Phase 0 does *not* contain engine logic -- it exists to prove that the
 toolchain (CMake, dependency fetching, a GL 3.3 core context, and a headless
 run/screenshot harness) all work end to end, so later phases can focus on
 actual engine code.
 
+Phase 1 replaces Phase 0's 5-hardcoded-frames placeholder with a real
+`Window` (RAII GLFW window + GL context) and `Application` (poll/update/
+render/swap main loop) pair -- see "Phase 1: window + main loop" below.
+
 ## Directory layout
 
 ```
 CMakeLists.txt        Root build: fetches deps, builds engine_app
-src/                   Engine .cpp sources (currently just main.cpp)
-include/engine/        Public engine .h/.hpp headers
+src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp)
+include/engine/        Public engine .h/.hpp headers (window, application, log, gl_debug, version)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders, textures, models (shaders/ stubbed for now)
 tools/                 Build/run/screenshot scripts
@@ -55,6 +59,45 @@ via an archive/tarball download). Subsequent builds reuse the clones under
 required beyond the system packages above.
 
 The resulting executable is `build/engine_app`.
+
+## Phase 1: window + main loop
+
+- **`engine::Window`** (`include/engine/window.hpp`, `src/window.cpp`) --
+  RAII wrapper around GLFW window/context creation. The constructor does
+  `glfwInit`, window + GL 3.3 core context creation, and GLAD function
+  loading, throwing `std::runtime_error` (and cleaning up anything already
+  created) on the first failure; the destructor destroys the window and
+  calls `glfwTerminate()` exactly once, so every exit path (normal, early
+  return, exception) leaves no leaked window/context. Exposes
+  `shouldClose()`, `pollEvents()`, `swapBuffers()`, `getSize()`,
+  `isKeyPressed()`.
+- **`engine::Application`** (`include/engine/application.hpp`,
+  `src/application.cpp`) -- owns a `Window` and runs the main loop (poll ->
+  update -> render -> swap) until the window closes or ESC is pressed.
+  Computes delta-time (`glfwGetTime()`) and a frame counter every iteration;
+  nothing consumes them yet, but the pattern is in place for later phases.
+  Each frame clears to cornflower blue (`(100, 149, 237)` 8-bit sRGB, same
+  as Phase 0) so a screenshot can prove the loop is actually rendering
+  repeatedly, not just once.
+- **Logging** (`include/engine/log.hpp`) -- `LOG_INFO`/`LOG_WARN`/
+  `LOG_ERROR` macros, timestamped, info to stdout and warn/error to stderr.
+  Just enough to see lifecycle events (window created, GL context info,
+  shutdown) and GL errors, not a general logging library.
+- **GL error checking** (`include/engine/gl_debug.hpp`) -- `GL_CHECK(expr)`
+  runs `expr` and, in debug builds only (`NDEBUG` undefined), drains
+  `glGetError()` and logs every error found via `LOG_ERROR` tagged with the
+  call site. Expands to plain `expr` in `NDEBUG`/Release builds. Wired into
+  `Window`'s GL setup (`glViewport`) and `Application::render()`'s
+  `glClearColor`/`glClear`.
+- **Headless termination**: `main.cpp` reads an `ENGINE_MAX_FRAMES`
+  environment variable; if set to a positive integer, `Application::run()`
+  returns on its own after that many frames instead of waiting for ESC/window
+  close. This is used *only* for headless verification (Xvfb has no real
+  window manager or keyboard), e.g.:
+  ```sh
+  ENGINE_MAX_FRAMES=120 bash tools/run_headless.sh build/engine_app build/phase1_screenshot.png
+  ```
+  Left unset, normal interactive runs behave as expected (run until closed).
 
 ## Running headlessly (no GPU / no display required)
 
@@ -158,10 +201,15 @@ entry to `external/glad/include/glad/glad.h` + `external/glad/src/glad.c`
 following the existing pattern, or replace `external/glad/` wholesale with a
 tool-generated GLAD/gl3w if/when the registry endpoints are reachable.
 
-## What Phase 0's `engine_app` actually does
+## What `engine_app` actually does
 
-`src/main.cpp` creates a GLFW window with an OpenGL 3.3 core context, loads
-GL function pointers, clears the framebuffer to cornflower blue for a
-handful of frames, and exits. That's it -- proving build+link+run (headless
-included) is Phase 0's whole job; real windowing/game-loop/input logic
-starts in Phase 1.
+Phase 0's `src/main.cpp` created a GLFW window with a GL 3.3 core context,
+loaded GL function pointers, cleared the framebuffer to cornflower blue for
+a handful of hardcoded frames, and exited -- proving build+link+run
+(headless included) worked end to end.
+
+Phase 1's `src/main.cpp` now just constructs an `engine::Application`
+(800x600, "3D Engine") and calls `run()`; the window, GL context, and the
+poll/update/render/swap loop live in `engine::Window` /
+`engine::Application` (see "Phase 1: window + main loop" above). Real
+rendering content (shaders, geometry, a camera) starts in Phase 2.

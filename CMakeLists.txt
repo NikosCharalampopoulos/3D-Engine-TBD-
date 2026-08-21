@@ -60,7 +60,11 @@ add_library(stb_image INTERFACE)
 target_include_directories(stb_image INTERFACE external/stb)
 
 # --- engine_app ------------------------------------------------------------
-add_executable(engine_app src/main.cpp)
+add_executable(engine_app
+    src/main.cpp
+    src/window.cpp
+    src/application.cpp
+)
 
 target_include_directories(engine_app PRIVATE include)
 
