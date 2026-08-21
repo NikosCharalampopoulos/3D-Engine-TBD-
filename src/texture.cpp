@@ -89,8 +89,22 @@ Texture::Texture(const std::string& path, bool generateMipmaps) {
     GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
                               generateMipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR));
 
+    // GL_UNPACK_ALIGNMENT defaults to 4: glTexImage2D assumes each row of the
+    // source buffer starts on a 4-byte boundary and pads accordingly when
+    // reading it. stbi_load returns pixels tightly packed with no such
+    // padding, so whenever a row isn't already a multiple of 4 bytes (e.g.
+    // any odd-width GL_RED/GL_RGB image -- checker.png's 256*3=768 happens to
+    // be a multiple of 4, which is exactly why this bug class is easy to
+    // miss on this asset) GL misreads row boundaries and every row after the
+    // first is shifted, corrupting the whole image on upload. Setting it to
+    // 1 tells GL the buffer is tightly packed, which is always correct
+    // regardless of width/channel count. Restored to the GL default
+    // afterwards so this call doesn't leak altered global pixel-store state
+    // into unrelated GL calls made elsewhere (e.g. a future glReadPixels).
+    GL_CHECK(glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
     GL_CHECK(glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(format), width_, height_, 0, format,
                            GL_UNSIGNED_BYTE, pixels));
+    GL_CHECK(glPixelStorei(GL_UNPACK_ALIGNMENT, 4));
     if (generateMipmaps) {
         GL_CHECK(glGenerateMipmap(GL_TEXTURE_2D));
     }
