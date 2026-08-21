@@ -4,13 +4,14 @@ A small C++/OpenGL 3D engine: a real windowing/main-loop foundation, a
 free-fly camera, GL 3.3 core shaders/meshes/textures, multi-light (directional
 + point + spot) Blinn-Phong lighting with tangent-space normal mapping and
 directional shadow mapping, Assimp-based multi-object scene loading with a
-real node hierarchy, MSAA anti-aliasing, and a thin entity/resource-cache
-layer -- built up from bare-metal OpenGL, and verified at every step by a
-headless Xvfb+Mesa run/screenshot harness (no GPU or display required). See
-"Architecture overview" right below for what the finished whole looks like
-today, or "Development history" further down for how it got built, phase by
-phase (this repo was built incrementally across 7 phases, each
-independently bug-reviewed), including the specific bugs each phase's
+real node hierarchy, MSAA anti-aliasing, a thin entity/resource-cache
+layer, a procedural-sky cubemap background, and an HDR + Reinhard-tonemapped
+post-process pipeline -- built up from bare-metal OpenGL, and verified at
+every step by a headless Xvfb+Mesa run/screenshot harness (no GPU or display
+required). See "Architecture overview" right below for what the finished
+whole looks like today, or "Development history" further down for how it got
+built, phase by phase (this repo was built incrementally across 8 phases,
+each independently bug-reviewed), including the specific bugs each phase's
 review found and fixed.
 
 ## Architecture overview
@@ -30,14 +31,17 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   Nothing else in the engine (notably `Camera`, and `Application`'s own
   ESC-to-quit check) reads `Window` key/cursor state directly any more.
 - **`Application`** (`application.hpp`/`.cpp`) -- owns the `Window`, a
-  `ResourceManager`, the scene's shared `Shader` (plus a second, depth-only
-  `shadowShader_`), a `ShadowMap`, a hand-built normal-mapped ground plane
-  (`groundMesh_`/`groundMaterial_`), a `std::vector<Entity>`, and a `Camera`;
-  runs the main loop (poll input -> update camera -> render -> swap) until
-  the window closes, ESC is pressed, or `ENGINE_MAX_FRAMES` is reached
-  (headless verification only -- see below). `render()` now does two GL
-  passes per frame: a depth-only shadow pass (`renderShadowPass()`) followed
-  by the normal color pass.
+  `ResourceManager`, the scene's shared `Shader` (plus a depth-only
+  `shadowShader_`, a `skyboxShader_`, and a `postProcessShader_`), a
+  `ShadowMap`, an off-screen HDR `Framebuffer`, a `Skybox`, a hand-built
+  normal-mapped ground plane (`groundMesh_`/`groundMaterial_`), a fullscreen
+  `postProcessQuad_`, a `std::vector<Entity>`, and a `Camera`; runs the main
+  loop (poll input -> update camera -> render -> swap) until the window
+  closes, ESC is pressed, or `ENGINE_MAX_FRAMES` is reached (headless
+  verification only -- see below). `render()` now does three GL passes per
+  frame: a depth-only shadow pass (`renderShadowPass()`), the normal lit
+  color pass (scene + skybox, into the HDR framebuffer), and a fullscreen
+  tonemap/gamma resolve pass to the window (see "Phase 7b" below).
 - **`Camera`** + **`Transform`** (`camera.hpp`/`.cpp`, `transform.hpp`) -- a
   yaw/pitch free-fly camera driven by `InputState` (or a small scripted
   waypoint path under `ENGINE_CAMERA_DEMO`, for headless verification where
@@ -56,6 +60,18 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   texture used to render the scene from the directional light's point of
   view once per frame; the main pass samples it to shadow that one light's
   own contribution per fragment.
+- **`Framebuffer`** (`framebuffer.hpp`/`.cpp`) -- an RAII "render target":
+  an FBO with a floating-point (`GL_RGBA16F`) color attachment plus a depth
+  renderbuffer. `Application` renders the whole lit scene (+ skybox) into
+  one of these (`hdrFramebuffer_`) instead of straight to the window, so a
+  light's real intensity can exceed 1.0 without hard-clipping (see "Phase
+  7b" below) -- a small reusable pattern a future bloom pass could extend,
+  though bloom itself isn't built here.
+- **`Skybox`** (`skybox.hpp`/`.cpp`) -- a 6-face procedural-sky
+  `GL_TEXTURE_CUBE_MAP` (`assets/textures/skybox/`) rendered as the scene's
+  background via its own program (`assets/shaders/skybox.vert`/`.frag`),
+  drawn last each frame with a `GL_LEQUAL` depth trick so it only shows
+  through pixels nothing else drew.
 - **`Model`** (`model.hpp`/`.cpp`) -- loads a whole scene via Assimp
   (`assets/models/scene.obj`: a table, a box on the table, and a separate
   pyramid) into a tree of `ModelNode`s, each with its own local transform,
@@ -74,12 +90,15 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
 One frame, in short: `Application::run()` polls GLFW events and an
 `InputState`, feeds it to `camera_`, then `render()` (1) renders the whole
 scene depth-only into `shadowMap_` from the directional light's point of
-view, (2) restores the window's real viewport, uploads
-view/projection/light-space/lighting uniforms once, and (3) iterates
+view, (2) restores the window's real viewport and binds `hdrFramebuffer_`,
+uploads view/projection/light-space/lighting uniforms once, and iterates
 `entities_` calling `model->draw(shader, entity.transform.getModelMatrix())`
 (which recurses the model's node tree drawing each mesh with its own
 material) plus the hand-built ground plane, each fragment sampling
-`shadowMap_` and any bound normal map as it shades.
+`shadowMap_` and any bound normal map as it shades, (3) draws `skybox_` last
+into that same HDR framebuffer as the background, and (4) resolves
+`hdrFramebuffer_`'s color buffer to the window with one fullscreen
+tonemap/gamma-correct pass (`postProcessShader_` + `postProcessQuad_`).
 
 ## Directory layout
 
@@ -87,15 +106,17 @@ material) plus the hand-built ground plane, each fragment sampling
 CMakeLists.txt        Root build: fetches deps (incl. Assimp), builds engine_app
 src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
                        shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp,
-                       input.cpp, resource_manager.cpp, shadow_map.cpp)
+                       input.cpp, resource_manager.cpp, shadow_map.cpp,
+                       framebuffer.cpp, skybox.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, model, entity, input, resource_manager,
-                       shadow_map)
+                       shadow_map, framebuffer, skybox)
 external/              Vendored small/single-header libs (stb_image, glad)
-assets/                Shaders (incl. shadow.vert/shadow.frag), textures
-                       (checker.png, normal_bump.png), models (scene.obj +
-                       scene.mtl)
+assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
+                       postprocess.vert/.frag), textures (checker.png,
+                       normal_bump.png, skybox/ -- 6 cubemap faces), models
+                       (scene.obj + scene.mtl)
 tools/                 Build/run/screenshot scripts
 tests/                 Placeholder for later phases (empty CMakeLists)
 ```
@@ -734,6 +755,115 @@ light, all forward-rendered (no G-buffer/deferred pass).
     point light added -- B rising far more than R/G, consistent with its
     `(0.15, 0.55, 1.0)` color.
 
+### Phase 7b: skybox, HDR + tonemapping, a small render-target class
+
+Phase 7b is another purely rendering-feature phase: a procedural-sky
+background and a floating-point HDR pipeline with tonemapping, on top of
+Phase 7a's multi-light/shadowed/normal-mapped forward renderer.
+
+- **Skybox** (`skybox.hpp`/`.cpp`, `assets/shaders/skybox.vert`/`.frag`,
+  `assets/textures/skybox/`) -- a 6-face `GL_TEXTURE_CUBE_MAP` rendered as
+  the scene's background. The 6 faces (`right`/`left`/`top`/`bottom`/
+  `front`/`back.png`, 512x512) were generated procedurally with ImageMagick
+  rather than sourced/painted: the 4 side faces are an identical vertical
+  gradient (`gradient:'#8ec9f0-#0b1d3a'`, light sky blue at the top edge to
+  dark navy at the bottom edge); `top.png` is a radial gradient from a
+  bright zenith highlight down to that *same* `#8ec9f0` at every edge/corner
+  (ImageMagick's default radial-gradient radius reaches exactly the corner
+  color at the image boundary -- verified with `identify -format` before
+  committing to the approach); `bottom.png` is a radial gradient down to
+  that same `#0b1d3a` at its edges. The result: every one of the 6 faces'
+  shared edges is colored *identically* by construction (side-to-side
+  because all 4 are the same image; side-to-top/bottom because the radial
+  gradients' outer color was chosen to exactly match the vertical
+  gradient's own top/bottom color) -- not just visually close, but the same
+  sRGB value, so there is no seam to be found at any of the 12 face-boundary
+  edges regardless of viewing angle. Face order/GL target mapping follows
+  the common `right/left/top/bottom/front/back` ->
+  `GL_TEXTURE_CUBE_MAP_POSITIVE_X/NEGATIVE_X/POSITIVE_Y/NEGATIVE_Y/
+  POSITIVE_Z/NEGATIVE_Z` convention (`skybox.cpp`'s `kCubeMapTargets`,
+  zipped 1:1 against `Skybox`'s constructor argument order) -- the classic
+  place this kind of feature silently jumbles itself if the order and the
+  target table ever drift apart. `Skybox::draw()` uploads a
+  translation-stripped view matrix (`mat4(mat3(view))`, so the sky rotates
+  but never translates with the camera) and draws a plain unit cube (reusing
+  `makeCube()` rather than a second hand-rolled VAO) with `gl_Position.z`
+  forced to `gl_Position.w` in `skybox.vert` (pins every skybox fragment's
+  depth to exactly the far plane) plus `glDepthFunc(GL_LEQUAL)` around the
+  draw call (restored to `GL_LESS` after) -- together these mean the skybox
+  only shows through pixels nothing else drew this frame, without ever
+  needing to disable depth testing. Drawn *last*, after every opaque
+  entity/the ground plane.
+- **`Framebuffer`** (`framebuffer.hpp`/`.cpp`) -- a small reusable
+  "off-screen render target" class, deliberately modeled on `ShadowMap`'s
+  existing shape (RAII, move-only, `bindForWriting()`/a bind-for-reading
+  method, throws on `GL_FRAMEBUFFER_COMPLETE` failure): an FBO with one
+  `GL_RGBA16F` (floating-point) color attachment plus a `GL_DEPTH_COMPONENT24`
+  depth *renderbuffer* (not a texture -- nothing needs to sample this
+  target's depth the way the shadow pass samples `ShadowMap`'s). Stops
+  there rather than growing into a general multi-pass render graph: a
+  future bloom pass could reuse this same class for its own downsample/blur
+  targets, but that pass isn't built this phase.
+- **HDR + tonemapping** (`application.cpp`, `assets/shaders/postprocess.vert`/
+  `.frag`) -- `Application::render()` now renders the whole lit scene (+
+  skybox) into `hdrFramebuffer_` (sized from the window's real framebuffer
+  size at construction -- `Window` has no resize callback for this to react
+  to, so, like every other fixed-at-construction GL resource in this
+  engine, it only needs sizing once) instead of straight to the window.
+  A fullscreen quad (`mesh.hpp`'s new `makeFullscreenQuad()`, already
+  authored directly in NDC space -- no model/view/projection needed for a
+  pass that operates purely in screen space) then resolves that HDR color
+  buffer to the default framebuffer: Reinhard tonemapping
+  (`color / (color + 1)`) compresses the unbounded HDR range into `[0,1)`
+  with a smooth rolloff, followed by gamma correction (`pow(x, 1/2.2)`) --
+  this is the one place in the whole per-frame pipeline that gamma-corrects;
+  neither `basic.frag` nor `skybox.frag` does. `kPointLights[0]`'s color
+  (`application.cpp`) was deliberately bumped well above the old `[0,1]`
+  range (`{6.0, 2.1, 0.9}`, up from `{1.0, 0.35, 0.15}`) specifically so
+  this pipeline has real overbright values to tonemap -- HDR's whole point.
+- **Verify**: `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh
+  build/engine_app build/phase7b_screenshot.png`. One flake was found and
+  understood (not a rendering bug) while verifying: on an occasional run,
+  `tools/run_headless.sh`'s screenshot loop -- which stops at its *first*
+  successful capture, without checking that capture's content -- grabbed a
+  frame before the app's first `swapBuffers()` had actually happened,
+  producing an all-black PNG; this phase's heavier per-frame GL work (two
+  new shader programs, an extra FBO bind/clear, a cubemap sample) made that
+  narrow startup window more likely to be hit than in earlier, lighter
+  phases. Re-running the same command a moment later (and confirming via
+  `convert screenshot.png -format "%[fx:standard_deviation]" info:` that the
+  result isn't a uniform/degenerate image) reliably produces a real frame --
+  this is a harness timing race, not anything `Application`/`Skybox`/
+  `Framebuffer` gets wrong.
+  - *Skybox*: the real screenshot's background is a smooth vertical
+    gradient, not flat cornflower blue -- sampling straight down a column
+    behind the scene gives `(136, 154, 165)` near the top of frame fading to
+    `(120, 140, 154)` further down, a gradual change, not a step. Sampling
+    *across* a row at a fixed height (`x = 0, 200, 400, 600, 799` at a fixed
+    `y`) gives `(133,152,164)`, `(134,153,164)`, `(134,153,164)`,
+    `(134,152,164)`, `(133,152,164)` -- effectively identical, confirming no
+    visible seam where the two visible side faces meet in this framing (as
+    expected, since all 4 side faces are pixel-identical by construction).
+  - *HDR/tonemap*: rendered once with the real (Reinhard) `postprocess.frag`
+    and once with a temporary edit removing only the Reinhard line (gamma
+    correction alone, reverted immediately after capturing) to reproduce
+    exactly what Phase 7a's pre-HDR pipeline would have shown for the same
+    bumped light. A horizontal scanline through the brightest pixel near
+    `kPointLights[0]` (found by scanning the real screenshot for the
+    maximum red channel value, at `(434, 366)`): the tonemapped version
+    ranges smoothly from `223` down to `124` red over `x = 434..520` (never
+    reaching `255`, no plateau); the no-Reinhard version *hard-clips* to
+    `255` (actually `(255,255,~195)`, a saturated yellow-white) across
+    `x = 400..470`, then drops sharply once the cubemap/tile pattern takes
+    over -- a flat plateau with a hard edge, exactly the "clipped white
+    disc" the Reinhard version's smooth rolloff avoids.
+  - *No regression*: the same shadow/normal-map checks Phase 7a's review
+    used still hold through the new HDR/post-process pipeline -- a ground
+    pixel right at the pyramid's shadow boundary goes from `(197,188,187)`
+    (sunlit) to `(52,47,41)` (shadowed) over 10 pixels, and the normal map's
+    tiled soft-blotch pattern is still visible across the ground plane in
+    the final composited screenshot.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -772,4 +902,11 @@ If a later phase needs a GL function not in this list, either add another
 entry to `external/glad/include/glad/glad.h` + `external/glad/src/glad.c`
 following the existing pattern, or replace `external/glad/` wholesale with a
 tool-generated GLAD/gl3w if/when the registry endpoints are reachable.
+(Phase 7b needed only new *enum* `#define`s -- `GL_TEXTURE_CUBE_MAP*`,
+`GL_TEXTURE_WRAP_R`, `GL_RGBA16F`, `GL_DEPTH_COMPONENT24` -- every function
+its `Skybox`/`Framebuffer` classes call, e.g. `glGenRenderbuffers`/
+`glRenderbufferStorage`/`glActiveTexture`, was already declared and loaded
+by an earlier phase, since a cubemap/floating-point texture upload goes
+through the exact same `glTexImage2D`/`glTexParameteri`/`glBindTexture`
+entry points as an ordinary 2D texture, just with different enum arguments.)
 

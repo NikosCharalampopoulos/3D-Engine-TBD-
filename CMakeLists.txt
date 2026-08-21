@@ -126,6 +126,8 @@ add_executable(engine_app
     src/input.cpp
     src/resource_manager.cpp
     src/shadow_map.cpp
+    src/framebuffer.cpp
+    src/skybox.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

@@ -49,6 +49,12 @@ constexpr const char* kFragmentShaderPath = "assets/shaders/basic.frag";
 // renderShadowPass()/shadow_map.hpp).
 constexpr const char* kShadowVertexShaderPath = "assets/shaders/shadow.vert";
 constexpr const char* kShadowFragmentShaderPath = "assets/shaders/shadow.frag";
+// Phase 7b: the skybox's own program and the HDR-resolve fullscreen pass's
+// program (see skybox.hpp/framebuffer.hpp and Application::render()).
+constexpr const char* kSkyboxVertexShaderPath = "assets/shaders/skybox.vert";
+constexpr const char* kSkyboxFragmentShaderPath = "assets/shaders/skybox.frag";
+constexpr const char* kPostProcessVertexShaderPath = "assets/shaders/postprocess.vert";
+constexpr const char* kPostProcessFragmentShaderPath = "assets/shaders/postprocess.frag";
 // Phase 5's hand-authored test scene: three separate objects (a pyramid, a
 // table, and a small box sitting on top of the table) at different
 // positions, proving Model's node hierarchy + transform composition places
@@ -64,6 +70,16 @@ constexpr const char* kScenePath = "assets/models/scene.obj";
 // the same PNG.
 constexpr const char* kGroundDiffuseTexturePath = "assets/textures/checker.png";
 constexpr const char* kGroundNormalMapPath = "assets/textures/normal_bump.png";
+
+// Phase 7b: the skybox's 6 procedurally-generated face images (see
+// README.md's Phase 7b notes for how they were made and why their edges
+// line up seam-free) -- order must match skybox.hpp's documented
+// right/left/top/bottom/front/back convention exactly.
+const std::array<std::string, 6> kSkyboxFacePaths = {
+    "assets/textures/skybox/right.png",  "assets/textures/skybox/left.png",
+    "assets/textures/skybox/top.png",    "assets/textures/skybox/bottom.png",
+    "assets/textures/skybox/front.png",  "assets/textures/skybox/back.png",
+};
 
 // Phase 7a: fixed resolution for the directional light's shadow map (see
 // shadow_map.hpp) -- independent of the window's own framebuffer size.
@@ -151,8 +167,20 @@ struct SpotLightData {
 // longer-range (smaller linear/quadratic) profile would barely attenuate at
 // all across this engine's small test scene and wash out the "distinct
 // tint near the light" effect this phase's screenshot needs to show.
+// Phase 7b: kPointLights[0]'s color is deliberately well above the old
+// [0,1] range (6.0 in its red channel) now that render() renders into a
+// floating-point HDR buffer (see hdrFramebuffer_/framebuffer.hpp) instead
+// of straight to the default framebuffer -- this is HDR's whole point:
+// letting a light's real intensity exceed 1.0 and be tonemapped back down
+// smoothly (see assets/shaders/postprocess.frag's Reinhard step) instead of
+// being clamped. Writing a color this bright straight to an 8-bit
+// framebuffer (as Phase 7a's pipeline did) would hard-clip every channel
+// above 1.0 to a flat white with a hard-edged boundary the instant it
+// crosses 1.0; the tonemapped result instead rolls off gradually as
+// distance from the light increases. kPointLights[1] is left at its
+// original Phase 7a intensity for comparison.
 constexpr std::array<PointLightData, 2> kPointLights = {{
-    {{0.5f, 0.95f, 0.1f}, {1.0f, 0.35f, 0.15f}, 1.0f, 0.7f, 1.8f},
+    {{0.5f, 0.95f, 0.1f}, {6.0f, 2.1f, 0.9f}, 1.0f, 0.7f, 1.8f},
     {{-1.35f, 1.15f, -0.3f}, {0.15f, 0.55f, 1.0f}, 1.0f, 0.7f, 1.8f},
 }};
 
@@ -272,7 +300,16 @@ Application::Application(int width, int height, const std::string& title, std::u
     : window_(width, height, title),
       shader_(resources_.getShader(kVertexShaderPath, kFragmentShaderPath)),
       shadowShader_(resources_.getShader(kShadowVertexShaderPath, kShadowFragmentShaderPath)),
+      skyboxShader_(resources_.getShader(kSkyboxVertexShaderPath, kSkyboxFragmentShaderPath)),
+      postProcessShader_(resources_.getShader(kPostProcessVertexShaderPath, kPostProcessFragmentShaderPath)),
       shadowMap_(kShadowMapWidth, kShadowMapHeight),
+      // Phase 7b: sized from window_'s own real framebuffer size (already
+      // constructed at this point -- see this header's declaration-order
+      // comment) rather than the constructor's width/height parameters
+      // directly, so this stays correct even on a HiDPI display where the
+      // framebuffer is larger than the window's requested size.
+      hdrFramebuffer_(window_.getSize().first, window_.getSize().second),
+      skybox_(kSkyboxFacePaths),
       // Phase 7a's demo normal-mapped surface -- see mesh.hpp's
       // makeGroundPlane() and this class's Phase 7a header comment. Shares
       // shader_ (the main lit program) with every entity's Model, unlike
@@ -280,6 +317,7 @@ Application::Application(int width, int height, const std::string& title, std::u
       groundMesh_(makeGroundPlane(kGroundHalfExtent, kGroundY, kGroundUvTiling)),
       groundMaterial_(*shader_, resources_.getTexture(kGroundDiffuseTexturePath), /*tint=*/glm::vec3(1.0f),
                       /*shininess=*/24.0f, resources_.getTexture(kGroundNormalMapPath)),
+      postProcessQuad_(makeFullscreenQuad()),
       camera_(kDefaultCameraPosition),
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()) {
@@ -390,6 +428,18 @@ void Application::render() {
     renderShadowPass(lightSpaceMatrix);
     GL_CHECK(glViewport(0, 0, fbWidth, fbHeight));
 
+    // Phase 7b: the whole lit scene (+ skybox) renders into hdrFramebuffer_
+    // -- a floating-point off-screen target -- instead of straight to the
+    // default framebuffer; see render()'s tail below for the fullscreen
+    // tonemap/gamma pass that resolves it to the window afterward.
+    hdrFramebuffer_.bindForWriting();
+
+    // Cornflower blue is still cleared first as a cheap safety fallback
+    // (same rationale as every earlier phase -- see kClearR/G/B's comment),
+    // even though skybox_.draw() below is expected to fully overwrite every
+    // background pixel every frame; if that draw were ever skipped/failed,
+    // this is what a screenshot would show instead of undefined/garbage
+    // color.
     GL_CHECK(glClearColor(kClearR, kClearG, kClearB, kClearA));
     GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
 
@@ -460,6 +510,35 @@ void Application::render() {
         groundMesh_.bind();
         groundMesh_.draw();
     }
+
+    // Phase 7b: the skybox is drawn LAST, still into hdrFramebuffer_ -- see
+    // skybox.hpp's Skybox::draw() for the GL_LEQUAL depth trick that makes
+    // it only paint over pixels nothing above just drew, i.e. the actual
+    // background. Drawing it after (rather than before) every opaque
+    // entity/the ground plane, instead of disabling depth testing/writes,
+    // means the depth test itself does the "don't overwrite real geometry"
+    // work for free -- no extra bookkeeping needed to keep the sky from
+    // painting over the table/box/pyramid/ground.
+    skybox_.draw(*skyboxShader_, view, projection);
+
+    // Phase 7b: resolve hdrFramebuffer_'s HDR color buffer to the window's
+    // real (default) framebuffer via one fullscreen tonemap + gamma-correct
+    // pass -- see assets/shaders/postprocess.vert/.frag. Both buffers are
+    // cleared first (color: nothing else draws here so any prior frame's
+    // leftover pixels must go; depth: this pass's own fullscreen quad is
+    // depth-tested against whatever the default framebuffer's depth buffer
+    // last held, which is otherwise stale/unrelated to this frame) so this
+    // draw can't be silently rejected by a leftover depth value from a
+    // previous frame.
+    GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    GL_CHECK(glViewport(0, 0, fbWidth, fbHeight));
+    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+
+    postProcessShader_->use();
+    hdrFramebuffer_.bindColorTexture(0);
+    postProcessShader_->setInt("uHdrBuffer", 0);
+    postProcessQuad_.bind();
+    postProcessQuad_.draw();
 }
 
 void Application::run() {

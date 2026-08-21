@@ -160,6 +160,9 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_TEXTURE_MIN_FILTER 0x2801
 #define GL_TEXTURE_WRAP_S 0x2802
 #define GL_TEXTURE_WRAP_T 0x2803
+// Phase 7b: a cubemap's third wrap axis (S/T are the only two a plain 2D
+// texture has) -- see Skybox.
+#define GL_TEXTURE_WRAP_R 0x8072
 #define GL_REPEAT 0x2901
 #define GL_CLAMP_TO_EDGE 0x812F
 
@@ -169,6 +172,18 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_TEXTURE3 0x84C3
 
 #define GL_TEXTURE_2D 0x0DE1
+// Phase 7b: cubemap texture target + its 6 individual face targets (see
+// Skybox) -- glTexImage2D/glTexParameteri/glBindTexture all already loaded
+// above accept these as their target/pname enum regardless, since a
+// cubemap face upload uses the exact same functions as a plain 2D texture,
+// just a different target enum.
+#define GL_TEXTURE_CUBE_MAP 0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_X 0x8516
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_Y 0x8517
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Y 0x8518
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_Z 0x8519
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Z 0x851A
 #define GL_UNPACK_ALIGNMENT 0x0CF5
 #define GL_RED 0x1903
 #define GL_RG 0x8227
@@ -176,11 +191,18 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_RGBA 0x1908
 #define GL_RGB8 0x8051
 #define GL_RGBA8 0x8058
+// Phase 7b: a 16-bit-per-channel floating-point color format wide enough to
+// hold pre-tonemap HDR values above 1.0 without clipping -- see Framebuffer.
+#define GL_RGBA16F 0x881A
 // Phase 7a: depth-only texture format (the shadow map's own attachment) and
 // GL_NONE (glDrawBuffer(GL_NONE)/glReadBuffer(GL_NONE), telling the driver a
 // depth-only FBO deliberately has no color attachment to read/write --
 // needed for GL_FRAMEBUFFER_COMPLETE on some drivers, see ShadowMap).
 #define GL_DEPTH_COMPONENT 0x1902
+// Phase 7b: a 24-bit depth renderbuffer format (Framebuffer's own depth
+// attachment -- a renderbuffer, not a texture, since nothing needs to
+// sample it the way the shadow pass samples ShadowMap's depth texture).
+#define GL_DEPTH_COMPONENT24 0x81A6
 #define GL_NONE 0
 
 #define GL_ARRAY_BUFFER 0x8892

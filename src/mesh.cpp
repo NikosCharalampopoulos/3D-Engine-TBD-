@@ -194,4 +194,20 @@ Mesh makeGroundPlane(float halfExtent, float y, float uvTiling) {
     return Mesh(vertices, indices);
 }
 
+Mesh makeFullscreenQuad() {
+    // Authored directly in NDC (not model/world space, unlike every other
+    // mesh this file builds) -- see this function's header comment.
+    // normal/tangent are unused placeholders (postprocess.vert/.frag never
+    // read attributes 1/3).
+    const std::vector<Vertex> vertices = {
+        {{-1.0f, -1.0f, 0.0f}, {0, 0, 1}, {0.0f, 0.0f}},
+        {{1.0f, -1.0f, 0.0f}, {0, 0, 1}, {1.0f, 0.0f}},
+        {{1.0f, 1.0f, 0.0f}, {0, 0, 1}, {1.0f, 1.0f}},
+        {{-1.0f, 1.0f, 0.0f}, {0, 0, 1}, {0.0f, 1.0f}},
+    };
+    const std::vector<unsigned int> indices = {0, 1, 2, 2, 3, 0};
+
+    return Mesh(vertices, indices);
+}
+
 }  // namespace engine

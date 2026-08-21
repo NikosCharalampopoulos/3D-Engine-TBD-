@@ -82,6 +82,26 @@
 //     phase has one demo surface with a bound normal map (see mesh.hpp's
 //     makeGroundPlane()) independent of scene.obj's own (still
 //     normal-map-less) materials.
+//
+// Phase 7b adds a skybox background and an HDR + tonemapping pipeline,
+// without changing the shape of the loop above:
+//   - render() no longer draws the lit scene straight to the default
+//     framebuffer: it renders into hdrFramebuffer_ (see framebuffer.hpp), a
+//     floating-point (GL_RGBA16F) off-screen target, then resolves that to
+//     the window with one fullscreen post-process pass
+//     (postProcessShader_ + postProcessQuad_, assets/shaders/
+//     postprocess.vert/.frag) that Reinhard-tonemaps and gamma-corrects.
+//     This is what lets kPointLights[0] (application.cpp) carry an
+//     intensity above 1.0 and still roll off smoothly near the light
+//     instead of hard-clipping to a flat white disc the way writing
+//     straight to the (8-bit, clamped) default framebuffer would.
+//   - skybox_ (see skybox.hpp) is drawn as the scene's background: a
+//     6-face procedural-sky cubemap, rendered LAST into hdrFramebuffer_
+//     (after entities_/the ground plane) via a GL_LEQUAL depth trick so it
+//     only shows through pixels nothing else was drawn to, replacing the
+//     old flat kClearR/G/B glClearColor as what's actually visible behind
+//     the scene (that glClearColor call still runs first, as a safety
+//     fallback in case the skybox draw is ever skipped/fails).
 
 #include <glm/glm.hpp>
 
@@ -92,12 +112,14 @@
 
 #include "engine/camera.hpp"
 #include "engine/entity.hpp"
+#include "engine/framebuffer.hpp"
 #include "engine/input.hpp"
 #include "engine/material.hpp"
 #include "engine/mesh.hpp"
 #include "engine/resource_manager.hpp"
 #include "engine/shader.hpp"
 #include "engine/shadow_map.hpp"
+#include "engine/skybox.hpp"
 #include "engine/window.hpp"
 
 namespace engine {
@@ -136,14 +158,17 @@ private:
     // itself does no GL work at construction (its caches start empty), but
     // shader_ is initialized from it in the constructor's member-
     // initializer list, so resources_ must still be declared (and thus
-    // constructed) before shader_. shadowShader_ likewise needs resources_
-    // constructed first. shader_ must in turn come before entities_ and
-    // groundMaterial_: building the scene's Entity calls
-    // resources_.getModel(path, *shader_), and each resulting Model's
-    // per-mesh Materials (plus groundMaterial_, built directly against
-    // shader_ rather than through Model) hold a pointer into that same
-    // shader_, so shader_ must outlive all of them. camera_ does no GL work
-    // so its position relative to the above is unconstrained.
+    // constructed) before shader_. shadowShader_/skyboxShader_/
+    // postProcessShader_ likewise need resources_ constructed first.
+    // shader_ must in turn come before entities_ and groundMaterial_:
+    // building the scene's Entity calls resources_.getModel(path,
+    // *shader_), and each resulting Model's per-mesh Materials (plus
+    // groundMaterial_, built directly against shader_ rather than through
+    // Model) hold a pointer into that same shader_, so shader_ must
+    // outlive all of them. hdrFramebuffer_ is sized from window_.getSize()
+    // in its own initializer, so it too must come after window_ (anywhere
+    // after is fine -- it has no other dependency). camera_ does no GL
+    // work so its position relative to the above is unconstrained.
     Window window_;
     ResourceManager resources_;
     std::shared_ptr<Shader> shader_;
@@ -155,10 +180,29 @@ private:
     // cache: one consistent loading path, not because sharing is expected
     // here.
     std::shared_ptr<Shader> shadowShader_;
+    // Phase 7b: the skybox's own program (assets/shaders/skybox.vert/
+    // skybox.frag) and the HDR-resolve fullscreen pass's program
+    // (assets/shaders/postprocess.vert/postprocess.frag) -- both routed
+    // through resources_ for the same "one consistent loading path" reason
+    // as shadowShader_ above.
+    std::shared_ptr<Shader> skyboxShader_;
+    std::shared_ptr<Shader> postProcessShader_;
     // Phase 7a: the directional light's depth-only render target. Fixed
     // resolution (see application.cpp's kShadowMapWidth/Height), independent
     // of the window's own framebuffer size.
     ShadowMap shadowMap_;
+    // Phase 7b: the off-screen floating-point target render() draws the
+    // whole lit scene (+ skybox) into, before postProcessShader_ resolves
+    // it to the window -- see framebuffer.hpp. Sized once, from the
+    // window's real framebuffer size at construction time; Window has no
+    // resize callback/event of its own for this to react to (see
+    // window.hpp), so -- like every other fixed-at-construction GL
+    // resource in this engine -- this only ever needs to be sized once.
+    Framebuffer hdrFramebuffer_;
+    // Phase 7b: the procedural-sky cubemap background -- see skybox.hpp.
+    // Loads its own 6 face images directly (not through resources_/Texture,
+    // see skybox.hpp's class comment on why it's a separate small class).
+    Skybox skybox_;
     // Phase 7a: a hand-built ground plane (see mesh.hpp's makeGroundPlane())
     // with a bound normal map, drawn directly alongside entities_ rather
     // than through Model/scene.obj -- see this header's Phase 7a comment
@@ -167,6 +211,10 @@ private:
     // Model, not a raw Mesh + Material pair.
     Mesh groundMesh_;
     Material groundMaterial_;
+    // Phase 7b: the fullscreen quad the HDR-resolve pass draws (see
+    // mesh.hpp's makeFullscreenQuad()) -- built once here, like groundMesh_,
+    // rather than re-built every frame.
+    Mesh postProcessQuad_;
     std::vector<Entity> entities_;
     Camera camera_;
     std::uint64_t maxFrames_;

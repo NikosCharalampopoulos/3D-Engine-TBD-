@@ -112,6 +112,18 @@ Mesh makeCube(float halfExtent = 0.5f);
 // stays a sensible visual size regardless of how big halfExtent is.
 Mesh makeGroundPlane(float halfExtent = 2.5f, float y = 0.0f, float uvTiling = 4.0f);
 
+// Phase 7b: a quad already authored directly in NDC space (2 triangles
+// covering [-1,1]x[-1,1] at z = 0), used by the HDR-resolve post-process
+// pass (see engine::Framebuffer/Application::render() and
+// assets/shaders/postprocess.vert) -- that pass's vertex shader just passes
+// aPos.xy straight through as gl_Position.xy with no model/view/projection
+// at all, since it operates purely in screen space over an already-rendered
+// image, unlike every other mesh/shader pair in this engine. `normal` is
+// set to an arbitrary placeholder and `tangent` left at its default zero
+// value (see Vertex's own comment on that default) -- postprocess.vert/
+// .frag read only position and texCoord, never those two.
+Mesh makeFullscreenQuad();
+
 }  // namespace engine
 
 #endif  // ENGINE_MESH_HPP
