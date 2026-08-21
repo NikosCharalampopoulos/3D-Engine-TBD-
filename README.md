@@ -163,7 +163,7 @@ See "Architecture overview" above for the current, finished-whole picture.
   ```
   Left unset, normal interactive runs behave as expected (run until closed).
 
-## Running headlessly (no GPU / no display required)
+### Running headlessly (no GPU / no display required)
 
 This container has no physical GPU, but Mesa's software rasterizer
 (`swrast_dri.so`, providing the `llvmpipe` driver) supports real OpenGL 3.3
@@ -227,7 +227,7 @@ installed via `pip3 list` -- a dist-packages/pip conflict. `convert` above
 is the verified-working method here; fix or reinstall Pillow
 (`pip3 install --force-reinstall pillow`) if you need the Python path.
 
-## Phase 2: shaders + a rendered cube
+### Phase 2: shaders + a rendered cube
 
 - **`engine::Shader`** (`include/engine/shader.hpp`, `src/shader.cpp`) --
   RAII wrapper around a linked GL program (one vertex + one fragment
@@ -273,7 +273,7 @@ is the verified-working method here; fix or reinstall Pillow
   (and a tiny cyan sliver) cube faces -- confirming real, distinguishable 3D
   geometry rendered, not a flat clear.
 
-## Phase 3: Camera + Transform
+### Phase 3: Camera + Transform
 
 - **`engine::Transform`** (`include/engine/transform.hpp`, header-only) --
   a plain position/rotation/scale bundle plus `getModelMatrix()`, built as
@@ -335,7 +335,7 @@ is the verified-working method here; fix or reinstall Pillow
   view matrix is coming from a real, different `Camera`, not a vestigial
   copy of Phase 2's hardcoded one.
 
-## Phase 4: Texture + Material + Phong lighting
+### Phase 4: Texture + Material + Phong lighting
 
 - **`engine::Texture`** (`include/engine/texture.hpp`, `src/texture.cpp`) --
   RAII wrapper around a GL 2D texture object. Loads an image file via
@@ -406,7 +406,7 @@ is the verified-working method here; fix or reinstall Pillow
   lit top face vs. the shadowed side face (e.g. `(226,133,40)` vs.
   `(57,34,12)`) confirms the directional-light shading gradient.
 
-## Phase 5: Assimp model loading + a node hierarchy
+### Phase 5: Assimp model loading + a node hierarchy
 
 - **Assimp integration** (`CMakeLists.txt`) -- fetched via `FetchContent`
   pinned to release tag `v5.4.3`. Every relevant Assimp cache variable is
@@ -502,7 +502,7 @@ is the verified-working method here; fix or reinstall Pillow
   same unchanged camera position -- confirming the scene's actual extent
   (~2.7 world units wide) rather than a single ~1-unit cube.
 
-## Phase 6: engine foundations (MSAA, Entity, ResourceManager, InputState)
+### Phase 6: engine foundations (MSAA, Entity, ResourceManager, InputState)
 
 Phase 6 is the final planned phase. It's deliberately a structural/
 foundations phase, not a new rendering feature on top of the scene: nothing
@@ -653,37 +653,3 @@ entry to `external/glad/include/glad/glad.h` + `external/glad/src/glad.c`
 following the existing pattern, or replace `external/glad/` wholesale with a
 tool-generated GLAD/gl3w if/when the registry endpoints are reachable.
 
-## What `engine_app` actually does
-
-Phase 0's `src/main.cpp` created a GLFW window with a GL 3.3 core context,
-loaded GL function pointers, cleared the framebuffer to cornflower blue for
-a handful of hardcoded frames, and exited -- proving build+link+run
-(headless included) worked end to end.
-
-Phase 1's `src/main.cpp` now just constructs an `engine::Application`
-(800x600, "3D Engine") and calls `run()`; the window, GL context, and the
-poll/update/render/swap loop live in `engine::Window` /
-`engine::Application` (see "Phase 1: window + main loop" above). Phase 2
-adds the first real rendering content -- shaders and a colored cube -- on
-top of that loop; see "Phase 2: shaders + a rendered cube" above. Phase 3
-replaces the hardcoded view/projection/model matrices with a real
-`engine::Camera` (free-fly, yaw/pitch, WASD + mouse-look) and
-`engine::Transform` (the cube's model matrix); see "Phase 3: Camera +
-Transform" above. Phase 4 replaces the flat per-face-colored cube with a
-textured, Blinn-Phong-lit one -- `engine::Texture` loads
-`assets/textures/checker.png`, `engine::Material` bundles it with the
-shader and simple tint/shininess properties, and `basic.vert`/`basic.frag`
-implement ambient+diffuse+specular directional lighting with a proper
-normal matrix; see "Phase 4: Texture + Material + Phong lighting" above.
-Phase 5 replaces that single hardcoded cube with `engine::Model`, which
-loads a whole multi-object scene (`assets/models/scene.obj`) via Assimp and
-recursively draws its node hierarchy, each node's mesh(es) placed by its own
-composed world transform; see "Phase 5: Assimp model loading + a node
-hierarchy" above. Phase 6 renders the identical scene with real MSAA
-anti-aliasing and restructures ownership around it: the scene is now an
-`engine::Entity` in `Application::entities_` rather than a bare `model_`
-member, `Shader`/`Texture`/`Model` all load through a shared
-`engine::ResourceManager` cache instead of ad-hoc construction, and
-`engine::Camera` receives per-frame input through an `engine::InputState`
-snapshot instead of reading `Window` directly; see "Phase 6: engine
-foundations" above.
