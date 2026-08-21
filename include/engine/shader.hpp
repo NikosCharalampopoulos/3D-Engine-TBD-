@@ -56,6 +56,11 @@ public:
     // first thing that needs one.
     void setMat3(const std::string& name, const glm::mat3& value) const;
     void setVec3(const std::string& name, const glm::vec3& value) const;
+    // Phase 7b: for basic.frag's uShadowMapTexelSize (PCF's per-texel sample
+    // offset) -- added alongside setVec3 rather than folding into it since
+    // GLSL's vec2/vec3 are distinct uniform types with distinct
+    // glUniform{2,3}f entry points.
+    void setVec2(const std::string& name, const glm::vec2& value) const;
     void setFloat(const std::string& name, float value) const;
     void setInt(const std::string& name, int value) const;
 

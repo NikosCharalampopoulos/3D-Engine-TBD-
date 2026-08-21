@@ -52,6 +52,11 @@ uniform vec3 uViewPos;
 // that placed vFragPosLightSpace into that light's clip space (computed
 // per-vertex in basic.vert, not recomputed here).
 uniform sampler2D uShadowMap;
+// Phase 7b bug-review fix: the shadow map's per-texel size in [0,1]
+// shadow-space units (1.0 / resolution, uploaded from Application -- see
+// ShadowMap's real width/height), used by shadowFactor()'s PCF kernel below
+// to offset its neighboring samples by exactly one texel each step.
+uniform vec2 uShadowMapTexelSize;
 
 #define MAX_POINT_LIGHTS 8
 #define MAX_SPOT_LIGHTS 4
@@ -112,6 +117,16 @@ float attenuationFor(float constant, float linear, float quadratic, float distan
 // be needlessly large (and start visibly detaching shadows from their
 // casters, "peter-panning") for surfaces facing the light head-on, where
 // depth-map quantization error is much smaller.
+//
+// Phase 7b bug-review fix: PCF (percentage-closer filtering). A single
+// shadow-map sample gives a binary 0/1 result per fragment, which is exactly
+// what produces a hard, aliased/jagged shadow boundary -- two fragments a
+// sub-pixel apart can land in different shadow-map texels and jump straight
+// from fully lit to fully shadowed. Sampling a small 3x3 grid of texels
+// around the fragment's own lookup position (offset by uShadowMapTexelSize
+// per step) and averaging each one's binary in/out result instead produces
+// intermediate values (e.g. 3/9, 6/9) exactly along that boundary, which
+// reads as a soft, anti-aliased edge instead of a jagged one.
 float shadowFactor(vec3 normal, vec3 lightDir) {
     vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
@@ -124,10 +139,18 @@ float shadowFactor(vec3 normal, vec3 lightDir) {
         return 0.0;
     }
 
-    float closestDepth = texture(uShadowMap, projCoords.xy).r;
     float currentDepth = projCoords.z;
     float bias = max(0.006 * (1.0 - dot(normal, lightDir)), 0.0015);
-    return (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
+
+    float shadowSum = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            vec2 offset = vec2(float(x), float(y)) * uShadowMapTexelSize;
+            float closestDepth = texture(uShadowMap, projCoords.xy + offset).r;
+            shadowSum += (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
+        }
+    }
+    return shadowSum / 9.0;
 }
 
 void main() {

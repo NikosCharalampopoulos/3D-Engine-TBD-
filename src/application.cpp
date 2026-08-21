@@ -88,6 +88,19 @@ const std::array<std::string, 6> kSkyboxFacePaths = {
 // maps, out of scope here).
 constexpr int kShadowMapWidth = 1024;
 constexpr int kShadowMapHeight = 1024;
+
+// Phase 7b bug-review fix: postprocess.frag's brightness knob, applied
+// before the Reinhard tonemap curve (see that shader's header comment for
+// why the gamma-encode step it used to also apply was removed rather than
+// kept). Reinhard's own compression still pulls every value down somewhat
+// (e.g. reinhard(0.8) = 0.44), so a modest >1.0 exposure restores the
+// overall brightness/punch Phase 7a's uncorrected direct-to-framebuffer
+// render had, without reintroducing the gamma-curve's channel-ratio
+// (saturation) collapse. 1.4 was chosen by comparing sampled pixel values
+// against Phase 7a's screenshot until overall brightness matched closely;
+// exposed as one named constant (not a magic literal at the call site) so
+// it's easy to re-tune if art direction changes later.
+constexpr float kPostProcessExposure = 1.4f;
 // The shadow map's depth texture is sampled on this fixed texture unit
 // every frame (see render()) -- unit 0 is always the current Material's
 // diffuse texture and unit 1 its optional normal map (see
@@ -482,6 +495,18 @@ void Application::render() {
     // subsequent draw call this frame.
     shadowMap_.bindForReading(kShadowMapTextureUnit);
     shader_->setInt("uShadowMap", static_cast<int>(kShadowMapTextureUnit));
+    // Phase 7b bug-review fix: PCF (percentage-closer filtering) in
+    // basic.frag's shadowFactor() samples a small 3x3 grid of texels around
+    // each fragment's shadow-map lookup rather than just the one nearest
+    // texel, so shadow edges soften into a gradient of partially-shadowed
+    // values instead of a single hard-aliased 0/1 step. It needs the shadow
+    // map's own per-texel size (in [0,1] shadow-space units) to offset those
+    // samples by the right amount -- derived here from shadowMap_'s real
+    // resolution rather than hardcoded in the shader, so it stays correct
+    // if kShadowMapWidth/Height above ever changes.
+    shader_->setVec2("uShadowMapTexelSize",
+                       glm::vec2(1.0f / static_cast<float>(shadowMap_.width()),
+                                 1.0f / static_cast<float>(shadowMap_.height())));
 
     // Each entity's transform matrix is the "rootTransform" Model::draw()
     // composes above the file's own node hierarchy: draw() recurses through
@@ -537,6 +562,7 @@ void Application::render() {
     postProcessShader_->use();
     hdrFramebuffer_.bindColorTexture(0);
     postProcessShader_->setInt("uHdrBuffer", 0);
+    postProcessShader_->setFloat("uExposure", kPostProcessExposure);
     postProcessQuad_.bind();
     postProcessQuad_.draw();
 }

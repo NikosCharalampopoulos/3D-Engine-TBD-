@@ -133,6 +133,11 @@ void Shader::setVec3(const std::string& name, const glm::vec3& value) const {
     GL_CHECK(glUniform3f(location, value.x, value.y, value.z));
 }
 
+void Shader::setVec2(const std::string& name, const glm::vec2& value) const {
+    const GLint location = glGetUniformLocation(programId_, name.c_str());
+    GL_CHECK(glUniform2f(location, value.x, value.y));
+}
+
 void Shader::setFloat(const std::string& name, float value) const {
     const GLint location = glGetUniformLocation(programId_, name.c_str());
     GL_CHECK(glUniform1f(location, value));
