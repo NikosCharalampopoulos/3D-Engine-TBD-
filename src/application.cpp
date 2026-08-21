@@ -203,10 +203,6 @@ void Application::run() {
     double lastTime = glfwGetTime();
 
     while (!window_.shouldClose()) {
-        if (window_.isKeyPressed(GLFW_KEY_ESCAPE)) {
-            LOG_INFO("ESC pressed, exiting main loop");
-            break;
-        }
         if (maxFrames_ != 0 && frameCount_ >= maxFrames_) {
             LOG_INFO("Reached max frame count, exiting main loop");
             break;
@@ -221,8 +217,17 @@ void Application::run() {
         // Polled once per frame, right after pollEvents() (same timing
         // real keyboard/mouse reads always had) and threaded down through
         // update() to whatever needs it (currently just Camera) -- see
-        // input.hpp.
+        // input.hpp. ESC is read from this same snapshot (input.escapePressed)
+        // rather than Application calling window_.isKeyPressed() directly, so
+        // Application -- like Camera since Phase 6 -- never reaches into
+        // Window/GLFW key constants itself; InputState is the one place that
+        // does.
         const InputState input = pollInputState(window_);
+        if (input.escapePressed) {
+            LOG_INFO("ESC pressed, exiting main loop");
+            break;
+        }
+
         update(deltaTime, input);
         render();
         window_.swapBuffers();
