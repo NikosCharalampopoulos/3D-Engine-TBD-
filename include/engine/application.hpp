@@ -335,6 +335,52 @@
 //     buffer's own noise/halo/banding characteristics can be checked in
 //     isolation from its (deliberately subtle) blended contribution to the
 //     final lit image.
+//
+// Phase 13g adds Screen-Space Reflections (SSR), refining pbr.frag's
+// existing IBL-only specular term (the prefiltered-environment-cubemap
+// reflection, Phase 10) for the PBR sphere grid's smoothest/most metallic
+// spheres with a real screen-space ray-marched reflection of the actual
+// nearby scene, falling back to that same IBL term wherever SSR has no
+// data (screen edges, grazing view angles, or high-roughness surfaces) --
+// see pbr.frag's own Phase 13g comment for the ray-march/fade math itself.
+//   - SSR reuses SSAO's own geometry pre-pass (ssaoGBuffer_'s view-space
+//     normal + real depth texture, see this class's own Phase 13f comment)
+//     as the "what does the visible scene actually look like" input the
+//     ray march tests against, rather than building a second, redundant
+//     G-buffer -- the same view/projection this frame's SSAO pass already
+//     rendered it with is exactly what SSR's own ray march needs too.
+//   - The classic ordering problem this technique always has to solve: a
+//     ray march needs to sample the scene's own already-rendered color to
+//     know what a reflection ray "hits", but this engine's PBR shading
+//     (pbr.frag) computes a fragment's *entire* final lit color -- direct
+//     lighting, IBL ambient, all of it -- in one single forward pass, so
+//     there's no separate "the scene's shaded color, minus this one
+//     surface's own reflection" buffer to read mid-pass. render() solves
+//     this with a second, short compositing pass (renderSSRComposite())
+//     rather than restructuring the whole engine into a deferred renderer:
+//     the ordinary per-frame draw of entities_/ground/the PBR sphere grid
+//     runs exactly as before (pbrShader_'s uSSREnabled uniform explicitly
+//     off, so every pixel's IBL-only specular term is computed exactly as
+//     Phase 10 left it); once the whole opaque scene + skybox is drawn and
+//     resolved into hdrResolveFramebuffer_ (a real, finished, sampler2D-
+//     readable color buffer), renderSSRComposite() redraws ONLY the PBR
+//     sphere grid a second time, into the same hdrFramebuffer_ (GL_LEQUAL
+//     depth test lets its fragments pass against the depth values the first
+//     draw already wrote for the exact same geometry), this time with
+//     uSSREnabled on -- pbr.frag ray-marches against ssaoGBuffer_'s depth
+//     and, where it finds a hit, blends hdrResolveFramebuffer_'s already-
+//     rendered color into that fragment's specular term in place of (or
+//     blended with, via the fade factors) the plain IBL term. render() then
+//     re-resolves hdrFramebuffer_ into hdrResolveFramebuffer_ a second time
+//     so bloom/the final tonemap pass -- unchanged themselves -- read this
+//     pass's own blended result. Only the PBR sphere grid is ever redrawn
+//     this way (matching Phase 9's own "PBR path gets the new features,
+//     Blinn-Phong stays as reference" precedent) -- entities_/the ground
+//     plane are drawn exactly once per frame, same as every prior phase.
+//   - ENGINE_SSR_DISABLE (ssrDisabled_) skips renderSSRComposite() and the
+//     second resolveTo() entirely, leaving hdrResolveFramebuffer_ exactly as
+//     the first (IBL-only) pass alone produced it -- same getenv-gated
+//     before/after-comparison pattern as ssaoDisabled_/ENGINE_SSAO_DISABLE.
 
 #include <glm/glm.hpp>
 
@@ -415,6 +461,21 @@ private:
     // nothing itself; render() rebinds the default framebuffer/window
     // viewport immediately afterward via hdrFramebuffer_.bindForWriting().
     void renderSSAO(const glm::mat4& view, const glm::mat4& projection);
+
+    // Phase 13g: the SSR compositing pass -- redraws ONLY the PBR sphere
+    // grid (sphereInstances_), a second time this frame, into
+    // hdrFramebuffer_ (GL_LEQUAL depth test, no clear -- see this class's
+    // own Phase 13g header comment for why this needs to be a second draw
+    // rather than folded into the ordinary one). Called from render() after
+    // the whole scene + skybox has been drawn and resolved into
+    // hdrResolveFramebuffer_ once already -- that resolved buffer is what
+    // pbr.frag's screen-space ray march (uSSREnabled, set to 1 only for
+    // this call) samples as "the already-rendered scene". Builds its own
+    // Frustum from `view`/`projection` (identical construction to render()'s
+    // own, just re-derived here rather than threaded through as a parameter,
+    // matching renderShadowPass()/renderSSAO()'s own "just the matrices it
+    // needs" shape) so a sphere the first pass culled is skipped here too.
+    void renderSSRComposite(const glm::mat4& view, const glm::mat4& projection);
 
     // Phase 9: one sphere in the PBR test-grid -- its own placement
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
@@ -699,6 +760,15 @@ private:
     // comment. Same getenv-gated pattern as cameraDemoMode_/
     // clusterDebugMode_ above.
     bool ssaoDebugMode_ = false;
+
+    // Phase 13g: set from ENGINE_SSR_DISABLE -- true skips
+    // renderSSRComposite() and its follow-up resolveTo() entirely, leaving
+    // hdrResolveFramebuffer_ exactly as the ordinary (IBL-only-reflections)
+    // first pass alone produced it, so a headless run can compare an
+    // SSR-on and SSR-off screenshot pair from the same build to isolate
+    // SSR's own exact contribution -- same getenv-gated pattern as
+    // ssaoDisabled_/ENGINE_SSAO_DISABLE. Default false (SSR on).
+    bool ssrDisabled_ = false;
 };
 
 }  // namespace engine

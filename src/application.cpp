@@ -260,6 +260,18 @@ constexpr unsigned int kBrdfLutTextureUnit = 8;
 // after the three IBL maps above and the (up to) three shadow-cascade units
 // (kShadowMapTextureUnitBase..+2, i.e. 3/4/5).
 constexpr unsigned int kSSAOMapTextureUnit = 9;
+// Phase 13g: SSR's own two fixed texture units -- the next free ones after
+// SSAO's blurred map above. Both are only ever bound while pbrShader_
+// redraws the sphere grid a second time in the SSR compositing pass (see
+// Application::renderSSRComposite()); uSSRColorBuffer samples
+// hdrResolveFramebuffer_ (this frame's already fully-shaded opaque scene,
+// resolved once already before this pass runs) and uSSRDepthMap reuses
+// SSAO's own ssaoGBuffer_ depth texture (see that pass's comment above and
+// pbr.frag's own Phase 13g comment for why SSAO's existing G-buffer is
+// exactly the input SSR needs too, with no second redundant geometry
+// pre-pass).
+constexpr unsigned int kSSRColorBufferTextureUnit = 10;
+constexpr unsigned int kSSRDepthMapTextureUnit = 11;
 
 // Phase 13f: SSAO tuning constants (see ssao.hpp/ssao.cpp and
 // assets/shaders/ssao.frag/ssao_blur.frag).
@@ -833,6 +845,13 @@ bool ssaoDebugModeFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 13g: same getenv-gated-behavior pattern as every env var above --
+// see ssrDisabled_'s own application.hpp comment for what this flag does.
+bool ssrDisabledFromEnv() {
+    const char* value = std::getenv("ENGINE_SSR_DISABLE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 bool proceduralSkyboxFromEnv() {
     const char* value = std::getenv("ENGINE_USE_PROCEDURAL_SKYBOX");
     return value != nullptr && *value != '\0' && std::string(value) != "0";
@@ -994,7 +1013,8 @@ Application::Application(int width, int height, const std::string& title, std::u
       frustumCullDemoMode_(frustumCullDemoModeFromEnv()),
       clusterDebugMode_(clusterDebugModeFromEnv()),
       ssaoDisabled_(ssaoDisabledFromEnv()),
-      ssaoDebugMode_(ssaoDebugModeFromEnv()) {
+      ssaoDebugMode_(ssaoDebugModeFromEnv()),
+      ssrDisabled_(ssrDisabledFromEnv()) {
     // No depth buffer testing existed in Phase 1 (nothing but a flat clear
     // needed it); real 3D geometry does, so faces occlude each other
     // correctly instead of painting in draw-call order.
@@ -1388,6 +1408,83 @@ void Application::renderSSAO(const glm::mat4& view, const glm::mat4& projection)
     postProcessQuad_.draw();
 }
 
+void Application::renderSSRComposite(const glm::mat4& view, const glm::mat4& projection) {
+    // Redraws the PBR sphere grid a second time, into hdrFramebuffer_ --
+    // the SAME target render()'s ordinary per-frame draw loop just finished
+    // writing -- WITHOUT clearing it first, so every pixel this pass
+    // doesn't touch (entities_, the ground plane, the skybox, and any
+    // sphere pixel a later fade factor leaves unchanged) keeps exactly the
+    // color the first pass already gave it. See this class's own Phase 13g
+    // header comment for why a second pass is needed at all: pbr.frag's
+    // screen-space ray march needs to sample a fully-rendered scene color
+    // buffer, and hdrResolveFramebuffer_ now is one, having just been
+    // resolved from the first pass by render()'s own call site right before
+    // this method runs.
+    //
+    // GL_LEQUAL (not this engine's usual GL_LESS default) lets this pass's
+    // fragments pass the depth test against the exact depth values the
+    // first pass already wrote for this same geometry (identical vertices,
+    // identical uModel/uView/uProjection, so identical gl_Position.z) --
+    // the same "needs LEQUAL to redraw over what's already there" reason
+    // skybox_.draw() uses it too (see skybox.cpp), for an unrelated reason
+    // (there, matching a freshly-cleared 1.0 depth buffer). Restored to
+    // GL_LESS immediately after, so it doesn't leak into next frame's
+    // shadow/main passes, both of which rely on GL_LESS's ordinary
+    // nearer-wins behavior.
+    hdrFramebuffer_.bindForWriting();
+    GL_CHECK(glDepthFunc(GL_LEQUAL));
+
+    pbrShader_->use();
+    // Every other scene-level uniform this program needs (projection,
+    // lighting, shadow maps, IBL maps, screen size/cluster params) is still
+    // live on pbrShader_ from render()'s own first-pass upload just above --
+    // GL uniform state lives on the program object and isn't disturbed by
+    // anything in between (see render()'s own comment on this same fact for
+    // shader_/pbrShader_). Only this pass's own new inputs need uploading:
+    // the view matrix (pbr.frag had no reason to work in view space before
+    // this phase), the two SSR-specific textures, and the toggle itself.
+    pbrShader_->setMat4("uView", view);
+    hdrResolveFramebuffer_.bindColorTexture(kSSRColorBufferTextureUnit);
+    pbrShader_->setInt("uSSRColorBuffer", static_cast<int>(kSSRColorBufferTextureUnit));
+    ssaoGBuffer_.bindDepthTexture(kSSRDepthMapTextureUnit);
+    pbrShader_->setInt("uSSRDepthMap", static_cast<int>(kSSRDepthMapTextureUnit));
+    pbrShader_->setMat4("uSSRInvProjection", glm::inverse(projection));
+    pbrShader_->setInt("uSSREnabled", 1);
+
+    // Rebuilt here rather than threaded through as a parameter -- see this
+    // method's own application.hpp comment for why (matches
+    // renderShadowPass()/renderSSAO()'s "just the matrices it needs" shape).
+    // Deterministically identical to render()'s own frustum this same
+    // frame, so a sphere the first pass culled is culled here too.
+    const glm::mat4 viewProjection = projection * view;
+    const Frustum frustum(viewProjection);
+
+    sphereMesh_.bind();
+    for (const SphereInstance& instance : sphereInstances_) {
+        const glm::mat4 sphereModel = instance.transform.getModelMatrix();
+        const BoundingSphere sphereWorldSphere = sphereMesh_.boundingSphere().transformed(sphereModel);
+        if (!frustum.intersects(sphereWorldSphere.center, sphereWorldSphere.radius)) {
+            continue;
+        }
+
+        const glm::mat3 sphereNormalMatrix = glm::inverseTranspose(glm::mat3(sphereModel));
+        pbrShader_->setMat4("uModel", sphereModel);
+        pbrShader_->setMat3("uNormalMatrix", sphereNormalMatrix);
+        instance.material.bind();
+        sphereMesh_.draw();
+    }
+
+    // Defensive only -- render()'s own per-frame upload above already sets
+    // uSSREnabled to 0 unconditionally at the top of every frame's first PBR
+    // draw, before this method ever runs again next frame. Left explicitly
+    // off here too so nothing could observe it still set to 1 if a later
+    // phase ever adds another pbrShader_ draw call after this one within the
+    // same frame.
+    pbrShader_->setInt("uSSREnabled", 0);
+
+    GL_CHECK(glDepthFunc(GL_LESS));
+}
+
 void Application::render() {
     const auto [fbWidth, fbHeight] = window_.getSize();
     const float aspect = fbHeight != 0 ? static_cast<float>(fbWidth) / static_cast<float>(fbHeight) : 1.0f;
@@ -1635,6 +1732,13 @@ void Application::render() {
     pbrShader_->setInt("uSSAOMap", static_cast<int>(kSSAOMapTextureUnit));
     pbrShader_->setInt("uSSAOEnabled", ssaoDisabled_ ? 0 : 1);
 
+    // Phase 13g: off during this, the ordinary once-per-frame PBR draw --
+    // pbr.frag's IBL-only specular term is computed exactly as Phase 10 left
+    // it here. Only renderSSRComposite()'s own second draw of the sphere
+    // grid (later in render(), after the whole scene is resolved) turns
+    // this on -- see that method and pbr.frag's own uSSREnabled comment.
+    pbrShader_->setInt("uSSREnabled", 0);
+
     pbrShader_->setInt("uNumPointLights", static_cast<int>(kPointLights.size()));
     for (std::size_t i = 0; i < kPointLights.size(); ++i) {
         uploadPointLight(*pbrShader_, i, kPointLights[i]);
@@ -1719,6 +1823,26 @@ void Application::render() {
     // this frame's HDR color. Everything from here on reads
     // hdrResolveFramebuffer_ instead of hdrFramebuffer_ directly.
     hdrFramebuffer_.resolveTo(hdrResolveFramebuffer_);
+
+    // Phase 13g: Screen-Space Reflections -- see this class's own Phase 13g
+    // header comment. Must run after the resolveTo() just above (needs a
+    // real, sampler2D-compatible single-sample color buffer to ray-march
+    // against -- a still-multisample hdrFramebuffer_ isn't one, see
+    // framebuffer.hpp) and after skybox_.draw() (so that buffer holds the
+    // whole opaque scene, background included). Re-resolves hdrFramebuffer_
+    // a SECOND time afterward so hdrResolveFramebuffer_ -- what bloom/the
+    // final tonemap pass read below -- reflects this pass's own blended
+    // output, not just the first pass's pre-SSR one.
+    //
+    // ENGINE_SSR_DISABLE (ssrDisabled_) skips this entirely, leaving
+    // hdrResolveFramebuffer_ exactly as the first pass alone produced it
+    // (pbr.frag's IBL-only specular term, unchanged) -- see that env var's
+    // own comment for why this exists (isolating SSR's own contribution for
+    // headless before/after verification).
+    if (!ssrDisabled_) {
+        renderSSRComposite(view, projection);
+        hdrFramebuffer_.resolveTo(hdrResolveFramebuffer_);
+    }
 
     // Phase 11: bloom -- entirely screen-space passes against
     // hdrResolveFramebuffer_'s now-finished (and now-resolved) HDR color

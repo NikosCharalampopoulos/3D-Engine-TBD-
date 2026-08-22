@@ -97,6 +97,42 @@ uniform sampler2D uBrdfLUT;
 // contribution isolated versus forced off, without needing a second build.
 uniform sampler2D uSSAOMap;
 uniform int uSSAOEnabled;
+
+// Phase 13g: Screen-Space Reflections -- refines the IBL-only specular term
+// below (specularIBL, Phase 10's prefiltered-environment-cubemap reflection)
+// for smooth/mirror-like surfaces by ray-marching this frame's already-fully-
+// rendered opaque scene color (uSSRColorBuffer -- Application's
+// hdrResolveFramebuffer_, resolved once already before this shader's SSR
+// compositing draw runs) against SSAO's own view-space normal + depth
+// pre-pass (uSSRDepthMap -- Application's ssaoGBuffer_ depth texture; see
+// that pass's own comment in application.cpp/gbuffer.vert for why this
+// engine's existing SSAO G-buffer is exactly the input SSR needs too, with
+// no second redundant geometry pre-pass). uSSREnabled is 0 during this
+// shader's ordinary once-per-frame draw of the sphere grid (Application's
+// first PBR draw call, alongside every other entity) -- pbr.frag's own
+// IBL-only ambient term is computed exactly as Phase 10 left it there -- and
+// only set to 1 when Application redraws the sphere grid a SECOND time,
+// immediately after resolving the first pass's color, into the same
+// off-screen target (see Application::renderSSRComposite()). SSR
+// fundamentally needs to sample a color buffer that's already finished
+// rendering, which this shader's own single forward pass's output obviously
+// isn't while it's mid-flight producing that exact buffer -- hence the
+// two-pass split rather than trying to fold this into one pass (see
+// application.hpp's own Phase 13g header comment for the full rationale).
+// uView/uProjection are new this phase (every previous computation in this
+// shader worked entirely in world space, or -- for uProjection -- had no
+// reason to reproject a view-space position back to screen space at all);
+// they're only needed to bring this fragment's position/normal into the
+// same view space the ray march (and SSAO's own depth reconstruction)
+// already operates in, and to re-project each marched step back to screen
+// space to sample uSSRDepthMap/uSSRColorBuffer.
+uniform mat4 uView;
+uniform mat4 uProjection;
+uniform sampler2D uSSRColorBuffer;
+uniform sampler2D uSSRDepthMap;
+uniform mat4 uSSRInvProjection;
+uniform int uSSREnabled;
+
 // kPrefilterMipLevels - 1 (see IBLProbe::kPrefilterMipLevels) -- the highest
 // valid mip index of uPrefilterMap, i.e. the roughness-1.0 mip. Kept in sync
 // with that constant by hand (no shared GLSL/C++ constant crosses this
@@ -359,6 +395,136 @@ vec3 shadeDirectLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float 
     return (diffuse + specular) * radiance * NdotL;
 }
 
+// --- Phase 13g: screen-space reflection ray march ---
+
+// Fixed ray-march tuning for this small, roughly-1-world-unit-scale scene
+// (see application.cpp's kSSAORadius comment on this engine's scale) -- not
+// exposed as uniforms/env-tunable, since nothing in this phase's brief asks
+// for runtime tuning, just a "good enough, functionally correct" fixed
+// march. kSSRMaxDistance (3 view-space units) comfortably covers the PBR
+// sphere grid's own footprint (two rows of four spheres, application.cpp's
+// kSphereColSpacing = 0.6 apart) plus the ground plane behind it;
+// kSSRMaxSteps (28) at that distance gives a ~0.107-unit step -- coarser
+// than this scene's own kSphereRadius (0.14), but the kSSRRefineSteps
+// binary search right after each coarse hit narrows that back down well
+// past sub-object precision (see its own comment), and this project's
+// software rasterizer (llvmpipe) makes every dependent-texture-fetch loop
+// iteration here costly enough (this pass's own early-out gate above this
+// function's call site trims *which* fragments run it at all, but not how
+// long the ones that do take) that a smaller step count than this
+// technique's usual 48-64-step reference range is the right tradeoff for
+// this small hand-authored scene, the same "good enough, not a AAA
+// production title" reasoning kSSAOKernelSize's own comment already makes.
+// kSSRRefineSteps (4) is a small binary-search refinement once the coarse
+// march below finds a bracketing pair of steps, halving the initial
+// ~0.107-unit uncertainty down under 0.007 units in 4 halvings -- the
+// standard fix for a coarse march's own banding (a hit only known to within
+// one whole step otherwise, which visibly quantizes the reflection into
+// stair-stepped bands). kSSRThickness gates how far behind the sampled
+// surface a hit is still accepted as *that* surface, rather than the ray
+// having sailed past a thin occluder into unrelated, much deeper geometry
+// (the classic SSR self-intersection/false-hit failure mode) -- scaled to
+// the march's own per-step distance (2 steps' worth) rather than a fixed
+// absolute, so it stays proportionate if kSSRMaxDistance/kSSRMaxSteps above
+// are ever retuned.
+const int kSSRMaxSteps = 28;
+const float kSSRMaxDistance = 3.0;
+const int kSSRRefineSteps = 4;
+const float kSSRThickness = 2.0 * (kSSRMaxDistance / float(kSSRMaxSteps));
+
+// Reconstructs a view-space position from a screen UV + raw device depth --
+// identical math to ssao.frag's own reconstructViewPos() (necessarily
+// duplicated, not shared -- this engine's Shader class links each program
+// from exactly one vertex + one fragment file with no #include support, the
+// same reason every other reused block in this file is copied rather than
+// shared, see this file's own header comment).
+vec3 ssrReconstructViewPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 viewPos = uSSRInvProjection * clipPos;
+    return viewPos.xyz / viewPos.w;
+}
+
+// Marches `viewReflectDir` from `viewPos` through view space, looking for
+// the first step whose device depth (projected back to screen space) falls
+// behind uSSRDepthMap's own stored depth -- i.e. real geometry now occupies
+// that screen pixel nearer the camera than the ray itself, meaning the ray
+// has struck it. Returns false (no hit) if the ray leaves the screen, goes
+// behind the camera, or reaches kSSRMaxDistance with nothing struck -- the
+// classic "SSR simply has no data here" cases (a reflection whose true
+// source lies off-screen, or one that never meets anything within this
+// scene's own small scale) -- callers fall back to the existing IBL term in
+// every one of those cases (see main()'s own fade logic below).
+bool traceSSR(vec3 viewPos, vec3 viewReflectDir, out vec2 hitUV) {
+    vec3 rayStep = viewReflectDir * (kSSRMaxDistance / float(kSSRMaxSteps));
+    vec3 prevPos = viewPos;
+    vec3 currPos = viewPos;
+    bool found = false;
+
+    for (int i = 1; i <= kSSRMaxSteps; ++i) {
+        prevPos = currPos;
+        currPos = viewPos + rayStep * float(i);
+
+        vec4 clip = uProjection * vec4(currPos, 1.0);
+        if (clip.w <= 0.0) {
+            return false;  // behind the camera -- nothing meaningful to project
+        }
+        vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            return false;  // ray exited the visible frame
+        }
+
+        float sceneDepth = texture(uSSRDepthMap, uv).r;
+        // The far plane / background -- nothing for the ray to strike at
+        // this screen position, keep marching rather than reconstructing a
+        // meaningless far-plane position (mirrors ssao.frag's own
+        // background check).
+        if (sceneDepth >= 1.0) {
+            continue;
+        }
+
+        float sceneViewZ = ssrReconstructViewPos(uv, sceneDepth).z;
+        // View-space Z is negative in front of the camera and grows more
+        // negative with distance (this engine's usual convention, see
+        // pbr.vert's vViewSpaceDepth comment) -- the ray has intersected
+        // real geometry once it goes behind (a more-negative Z than) the
+        // actual surface stored there.
+        if (currPos.z <= sceneViewZ) {
+            if (sceneViewZ - currPos.z < kSSRThickness) {
+                hitUV = uv;
+                found = true;
+            }
+            break;
+        }
+    }
+
+    if (!found) {
+        return false;
+    }
+
+    // Binary-search refinement between prevPos (the last step still in
+    // front of the surface) and currPos (the first step behind it) -- see
+    // kSSRRefineSteps' own comment above for why.
+    vec3 lo = prevPos;
+    vec3 hi = currPos;
+    for (int i = 0; i < kSSRRefineSteps; ++i) {
+        vec3 mid = 0.5 * (lo + hi);
+        vec4 clip = uProjection * vec4(mid, 1.0);
+        vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+        float sceneDepth = texture(uSSRDepthMap, uv).r;
+        // An off-screen/background midpoint reads as "still in front of the
+        // surface" (a very distant, very-negative Z) rather than
+        // reconstructing a meaningless position for it.
+        float sceneViewZ = sceneDepth >= 1.0 ? -1.0e6 : ssrReconstructViewPos(uv, sceneDepth).z;
+        if (mid.z <= sceneViewZ) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        hitUV = uv;
+    }
+    return true;
+}
+
 void main() {
     vec3 normal = normalize(vNormal);
 
@@ -493,6 +659,77 @@ void main() {
     vec3 prefilteredColor = textureLod(uPrefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
     vec2 envBRDF = texture(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg;
     vec3 specularIBL = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+
+    // Phase 13g: refine the IBL-only specular term above with a real
+    // screen-space ray-marched reflection where one is available -- see
+    // this file's own Phase 13g comment (uSSREnabled) and traceSSR() above.
+    // Only evaluated during Application's second, SSR-compositing draw of
+    // the sphere grid.
+    //
+    // Roughness/grazing-angle fades are computed FIRST, before ever calling
+    // traceSSR() -- both are known from data this fragment already has
+    // (roughness; N/V), independent of whether a ray march would even find a
+    // hit. Bailing out here when either is already ~0 (a rough surface, or a
+    // grazing/edge-on view angle -- see each fade's own comment below) skips
+    // traceSSR()'s dependent-texture-fetch loop entirely for exactly the
+    // fragments whose SSR contribution would be faded back to ~0 anyway,
+    // rather than paying for a multi-step ray march whose result is then
+    // thrown away -- meaningfully cheaper on this project's software-
+    // rasterizer (llvmpipe) headless verification target, where this
+    // engine's other screen-space passes (SSAO) already downsample/shrink
+    // their own kernel specifically to stay affordable there (see
+    // application.cpp's kSSAODownsampleFactor/kSSAOKernelSize comments).
+    if (uSSREnabled != 0) {
+        // Grazing/edge-on view angle fade: SSR's screen-space march itself
+        // (not the reflected geometry) becomes unreliable at near-90-degree
+        // view angles -- the classic SSR artifact zone, where the marched
+        // ray runs nearly parallel to the screen, so a small screen-space
+        // step covers a large, imprecise view-space distance. NdotV is
+        // already computed just below for the IBL Fresnel term; computed
+        // here too since it's needed before that point in the code.
+        float ndotV = max(dot(N, V), 0.0);
+        float grazingFade = smoothstep(0.02, 0.25, ndotV);
+
+        // Roughness fade: SSR is only meaningful for fairly smooth,
+        // mirror-like surfaces (a single sharp ray-marched hit standing in
+        // for what should, at higher roughness, be a broad blur a
+        // one-sample-per-fragment ray march can't produce) -- this fades
+        // fully back to the existing prefiltered-IBL term (already
+        // correctly blurred by roughness via uPrefilterMap's own mip
+        // selection above) past a modest roughness.
+        float roughnessFade = 1.0 - smoothstep(0.35, 0.6, roughness);
+
+        if (grazingFade > 0.001 && roughnessFade > 0.001) {
+            vec3 viewPos = vec3(uView * vec4(vFragPos, 1.0));
+            vec3 viewNormal = normalize(mat3(uView) * N);
+            vec3 viewReflectDir = reflect(normalize(viewPos), viewNormal);
+
+            vec2 hitUV;
+            if (traceSSR(viewPos, viewReflectDir, hitUV)) {
+                // Screen-edge fade: the classic SSR blind spot -- a
+                // reflection whose hit point lies near the frame's own edge
+                // is one whose true reflected geometry may extend just
+                // off-screen, where this technique (unlike real ray
+                // tracing) has no data at all; fading over the outer 20% of
+                // the screen avoids a hard, visible pop as such a hit's UV
+                // slides past the edge from frame to frame.
+                vec2 edgeDist = min(hitUV, vec2(1.0) - hitUV);
+                float screenEdgeFade = smoothstep(0.0, 0.2, min(edgeDist.x, edgeDist.y));
+
+                float ssrFade = clamp(screenEdgeFade * grazingFade * roughnessFade, 0.0, 1.0);
+
+                vec3 ssrColor = texture(uSSRColorBuffer, hitUV).rgb;
+                // Weighted by the same split-sum specular term specularIBL
+                // itself uses (F0 * envBRDF.x + envBRDF.y) -- SSR only
+                // replaces *where the reflected radiance comes from* (the
+                // actual nearby scene instead of the distant prefiltered
+                // environment), not how strongly this surface reflects it
+                // at all.
+                vec3 ssrSpecular = ssrColor * (F0 * envBRDF.x + envBRDF.y);
+                specularIBL = mix(specularIBL, ssrSpecular, ssrFade);
+            }
+        }
+    }
 
     // Phase 13f: screen-space AO, sampled at this fragment's own screen
     // position (the same gl_FragCoord/uScreenSize UV computeClusterIndex()
