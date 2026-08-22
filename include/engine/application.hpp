@@ -143,6 +143,32 @@
 //     instead of flat scalar values -- no new Application-level rendering
 //     step, just different PBRMaterial construction arguments (see
 //     application.cpp's sphere-instance construction).
+// Phase 13b adds frustum culling on top of every phase above, without
+// changing what a normally-positioned camera actually sees:
+//   - Every Mesh now carries its own local-space bounding sphere (see
+//     mesh.hpp's BoundingSphere/Mesh::boundingSphere()), computed once at
+//     construction time from its vertex positions.
+//   - A small Frustum class (frustum.hpp) extracts the 6 view-frustum planes
+//     from the combined view-projection matrix once per frame (the standard
+//     Gribb/Hartmann method) and tests a world-space bounding sphere against
+//     them.
+//   - render() builds one Frustum per frame from camera_'s current view/
+//     projection, then tests every drawable's own bounding sphere (each
+//     Model node's mesh, via Model::draw()'s new frustum/cullStats
+//     parameters; the ground plane; each PBR sphere instance) against it,
+//     skipping the draw call for anything provably entirely outside --
+//     never the *shadow* pass (renderShadowPass() draws everything
+//     depth-only, unconditionally, exactly as before -- camera-frustum
+//     culling only applies to what the camera itself would rasterize).
+//     A running CullStats total/culled count is logged periodically so a
+//     headless run can confirm culling is actually skipping draw calls, not
+//     a no-op -- see kCullLogFrameInterval in application.cpp.
+//   - frustumCullDemoMode_ (ENGINE_FRUSTUM_CULL_DEMO env var, same
+//     getenv-gated pattern as cameraDemoMode_) parks the camera at its usual
+//     default position but pointed *away* from the scene instead of at it,
+//     purely so headless verification has a deterministic way to prove
+//     culling drops the draw count instead of only ever exercising the
+//     "everything stays in view" path a normal run takes.
 //   - Bloom: after the existing lit-scene-+-skybox render into
 //     hdrFramebuffer_, a bright-pass extraction (bloomExtractShader_, into
 //     brightFramebuffer_) isolates pixels above a luminance threshold, a
@@ -361,6 +387,17 @@ private:
     // purely so headless verification can prove the free-fly/lookAt math
     // actually moves the camera, not just that it compiles.
     bool cameraDemoMode_ = false;
+
+    // Phase 13b: set from ENGINE_FRUSTUM_CULL_DEMO -- true parks the camera
+    // at kDefaultCameraPosition but looking away from the scene instead of
+    // at it (see the constructor and update()), so a headless run can
+    // demonstrate frustum culling actually dropping the draw count instead
+    // of only ever exercising the "everything stays in view" default path.
+    // Independent of cameraDemoMode_ above (checked first in update(), see
+    // that function) -- the two are not expected to be combined, but nothing
+    // stops a caller from setting both env vars, so update() picks one
+    // deterministically rather than letting them race each frame.
+    bool frustumCullDemoMode_ = false;
 };
 
 }  // namespace engine

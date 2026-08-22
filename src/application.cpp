@@ -16,6 +16,7 @@
 #include <thread>
 #include <utility>
 
+#include "engine/frustum.hpp"
 #include "engine/gl_debug.hpp"
 #include "engine/log.hpp"
 #include "engine/model.hpp"
@@ -555,6 +556,21 @@ bool cameraDemoModeFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 13b: same getenv-gated-behavior pattern as cameraDemoModeFromEnv()
+// above -- see frustumCullDemoMode_'s own comment in application.hpp for
+// what this flag does.
+bool frustumCullDemoModeFromEnv() {
+    const char* value = std::getenv("ENGINE_FRUSTUM_CULL_DEMO");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+// Phase 13b: render() logs one combined "N/M culled" line every this-many
+// frames (not every frame) -- frequent enough to see the count actually
+// change as ENGINE_CAMERA_DEMO's waypoints step (every 20 frames, see
+// update()'s kFramesPerStep) or across an ENGINE_FRUSTUM_CULL_DEMO run,
+// without flooding the log with a near-identical line every single frame.
+constexpr std::uint64_t kCullLogFrameInterval = 15;
+
 }  // namespace
 
 Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames)
@@ -612,13 +628,28 @@ Application::Application(int width, int height, const std::string& title, std::u
       sphereMesh_(makeUVSphere(32, 32, kSphereRadius)),
       camera_(kDefaultCameraPosition),
       maxFrames_(maxFrames),
-      cameraDemoMode_(cameraDemoModeFromEnv()) {
+      cameraDemoMode_(cameraDemoModeFromEnv()),
+      frustumCullDemoMode_(frustumCullDemoModeFromEnv()) {
     // No depth buffer testing existed in Phase 1 (nothing but a flat clear
     // needed it); real 3D geometry does, so faces occlude each other
     // correctly instead of painting in draw-call order.
     GL_CHECK(glEnable(GL_DEPTH_TEST));
 
-    camera_.setPositionLookingAt(kDefaultCameraPosition, kSceneCenter);
+    if (frustumCullDemoMode_) {
+        // Phase 13b: same position as the normal default camera, but aimed
+        // at the point directly behind it (mirrored through
+        // kDefaultCameraPosition) instead of at kSceneCenter -- i.e. facing
+        // 180 degrees away from the whole scene, so every entity/the ground
+        // plane/every PBR sphere should end up outside the frustum and get
+        // culled. update() leaves this pose alone every frame (see its own
+        // frustumCullDemoMode_ branch) rather than re-deriving it, since a
+        // fixed demo pose needs no per-frame recomputation.
+        const glm::vec3 awayTarget = kDefaultCameraPosition + (kDefaultCameraPosition - kSceneCenter);
+        camera_.setPositionLookingAt(kDefaultCameraPosition, awayTarget);
+        LOG_INFO("ENGINE_FRUSTUM_CULL_DEMO set: camera faces away from the scene to prove culling drops the draw count");
+    } else {
+        camera_.setPositionLookingAt(kDefaultCameraPosition, kSceneCenter);
+    }
 
     // The scene is one Entity wrapping the same Phase 5 model
     // (assets/models/scene.obj), loaded through resources_ instead of
@@ -745,7 +776,14 @@ Application::Application(int width, int height, const std::string& title, std::u
 void Application::update(double deltaTime, const InputState& input) {
     totalTime_ += deltaTime;
 
-    if (cameraDemoMode_) {
+    if (frustumCullDemoMode_) {
+        // Phase 13b: the camera's fixed "facing away from the scene" pose
+        // was already set once in the constructor -- nothing to do here
+        // every frame (no waypoints to step through, no real input to
+        // read), and reading real InputState/mouse position would let a
+        // stray Xvfb event nudge the camera back towards the scene, which
+        // this demo mode specifically needs to not happen.
+    } else if (cameraDemoMode_) {
         // Headless-safe stand-in for real input: Xvfb has no real keyboard/
         // mouse, so there's nothing for processMovement()/processMouseInput()
         // to read under the verification harness. Instead, step through a
@@ -851,6 +889,18 @@ void Application::render() {
     const glm::mat4 view = camera_.getViewMatrix();
     const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
 
+    // Phase 13b: the frustum is derived fresh from this frame's own view/
+    // projection (never cached across frames -- matching Camera's own "no
+    // premature caching" style, see camera.hpp) and shared by every
+    // drawable tested below (entities_/Model's per-mesh nodes, the ground
+    // plane, every PBR sphere instance) -- one extraction per frame, not
+    // one per object. cullStats accumulates a running total/culled count
+    // across all of them so it can be logged once, below, after every
+    // drawable this frame has been considered.
+    const glm::mat4 viewProjection = projection * view;
+    const Frustum frustum(viewProjection);
+    CullStats cullStats;
+
     // View/projection and lighting are scene-level state, constant across
     // every node/mesh Model::draw() below is about to issue -- set once per
     // frame on the (one, shared) shader program rather than re-set inside
@@ -910,22 +960,33 @@ void Application::render() {
     // establishes the pattern for however many later phases add.
     for (const Entity& entity : entities_) {
         if (entity.model()) {
-            entity.model()->draw(*shader_, entity.transform.getModelMatrix());
+            entity.model()->draw(*shader_, entity.transform.getModelMatrix(), &frustum, &cullStats);
         }
     }
 
     // Phase 7a's ground plane: drawn directly (not through Entity/Model,
     // see this class's header comment) with an identity model matrix, since
     // makeGroundPlane() already bakes its position into world-space vertex
-    // data.
+    // data. Phase 13b: tested against the frustum like every other
+    // drawable, even though in this engine's small fixed scene it's about
+    // as likely to be culled as anything else looking away from the scene
+    // would be -- there's nothing architecturally special about the ground
+    // plane that should exempt it from the same culling every other
+    // drawable gets.
     {
         const glm::mat4 groundModel(1.0f);
-        const glm::mat3 groundNormalMatrix = glm::inverseTranspose(glm::mat3(groundModel));
-        shader_->setMat4("uModel", groundModel);
-        shader_->setMat3("uNormalMatrix", groundNormalMatrix);
-        groundMaterial_.bind();
-        groundMesh_.bind();
-        groundMesh_.draw();
+        ++cullStats.totalDrawables;
+        const BoundingSphere groundWorldSphere = groundMesh_.boundingSphere().transformed(groundModel);
+        if (frustum.intersects(groundWorldSphere.center, groundWorldSphere.radius)) {
+            const glm::mat3 groundNormalMatrix = glm::inverseTranspose(glm::mat3(groundModel));
+            shader_->setMat4("uModel", groundModel);
+            shader_->setMat3("uNormalMatrix", groundNormalMatrix);
+            groundMaterial_.bind();
+            groundMesh_.bind();
+            groundMesh_.draw();
+        } else {
+            ++cullStats.culledDrawables;
+        }
     }
 
     // Phase 9: the PBR sphere test-grid, drawn with its own program
@@ -975,11 +1036,35 @@ void Application::render() {
     sphereMesh_.bind();
     for (const SphereInstance& instance : sphereInstances_) {
         const glm::mat4 sphereModel = instance.transform.getModelMatrix();
+
+        // Phase 13b: every instance shares sphereMesh_'s own local bounding
+        // sphere, transformed by this instance's own model matrix -- see
+        // BoundingSphere::transformed(). ++cullStats bookkeeping mirrors the
+        // ground plane's above.
+        ++cullStats.totalDrawables;
+        const BoundingSphere sphereWorldSphere = sphereMesh_.boundingSphere().transformed(sphereModel);
+        if (!frustum.intersects(sphereWorldSphere.center, sphereWorldSphere.radius)) {
+            ++cullStats.culledDrawables;
+            continue;
+        }
+
         const glm::mat3 sphereNormalMatrix = glm::inverseTranspose(glm::mat3(sphereModel));
         pbrShader_->setMat4("uModel", sphereModel);
         pbrShader_->setMat3("uNormalMatrix", sphereNormalMatrix);
         instance.material.bind();
         sphereMesh_.draw();
+    }
+
+    // Phase 13b: one combined "N/M culled" line, logged periodically (not
+    // every frame -- see kCullLogFrameInterval) across every drawable tested
+    // above (entities_'s Model nodes, the ground plane, every PBR sphere
+    // instance), so a headless run can confirm culling is actually skipping
+    // draw calls -- e.g. ENGINE_FRUSTUM_CULL_DEMO should show most/all
+    // drawables culled every logged frame, while a normal run (the whole
+    // small test scene fits in view) should show zero or close to it.
+    if (frameCount_ % kCullLogFrameInterval == 0) {
+        LOG_INFO("Frustum culling: " + std::to_string(cullStats.culledDrawables) + "/" +
+                  std::to_string(cullStats.totalDrawables) + " drawables culled this frame");
     }
 
     // Phase 7b: the skybox is drawn LAST, still into hdrFramebuffer_ -- see

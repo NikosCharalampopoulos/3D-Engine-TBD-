@@ -285,11 +285,13 @@ Model::Model(const std::string& path, Shader& shader, ResourceManager& resourceM
               std::to_string(materials_.size()) + " material(s))");
 }
 
-void Model::draw(Shader& shader, const glm::mat4& rootTransform) const {
-    drawNode(shader, root_, rootTransform);
+void Model::draw(Shader& shader, const glm::mat4& rootTransform, const Frustum* frustum,
+                  CullStats* cullStats) const {
+    drawNode(shader, root_, rootTransform, frustum, cullStats);
 }
 
-void Model::drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const {
+void Model::drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform,
+                      const Frustum* frustum, CullStats* cullStats) const {
     const glm::mat4 worldTransform = parentTransform * node.localTransform;
 
     if (!node.meshIndices.empty()) {
@@ -302,6 +304,29 @@ void Model::drawNode(Shader& shader, const ModelNode& node, const glm::mat4& par
         shader.setMat3("uNormalMatrix", normalMatrix);
 
         for (const std::size_t meshIndex : node.meshIndices) {
+            // Phase 13b: skip this one mesh's draw call if it's entirely
+            // outside the frustum -- tested per-mesh (not once for the whole
+            // node/model), each against its own bounding sphere transformed
+            // by this node's own worldTransform (see BoundingSphere::
+            // transformed()), so a model with parts scattered across a large
+            // area still draws only the parts actually in view.
+            // uModel/uNormalMatrix above are uploaded regardless of whether
+            // any mesh in this node ends up culled -- that cost is shared
+            // across the whole node and negligible either way, and keeping
+            // it unconditional keeps this function's control flow simple.
+            if (cullStats != nullptr) {
+                ++cullStats->totalDrawables;
+            }
+            if (frustum != nullptr) {
+                const BoundingSphere worldSphere = meshes_[meshIndex].boundingSphere().transformed(worldTransform);
+                if (!frustum->intersects(worldSphere.center, worldSphere.radius)) {
+                    if (cullStats != nullptr) {
+                        ++cullStats->culledDrawables;
+                    }
+                    continue;
+                }
+            }
+
             const int materialIndex = meshMaterialIndex_[meshIndex];
             const Material& material =
                 (materialIndex >= 0) ? materials_[static_cast<std::size_t>(materialIndex)] : defaultMaterial_;
@@ -320,7 +345,7 @@ void Model::drawNode(Shader& shader, const ModelNode& node, const glm::mat4& par
     }
 
     for (const ModelNode& child : node.children) {
-        drawNode(shader, child, worldTransform);
+        drawNode(shader, child, worldTransform, frustum, cullStats);
     }
 }
 

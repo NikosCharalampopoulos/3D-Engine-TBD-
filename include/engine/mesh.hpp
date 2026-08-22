@@ -30,10 +30,50 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <vector>
 
 namespace engine {
+
+// Phase 13b: a mesh's own bounding volume, computed once from its local-
+// space vertex positions at construction time (see Mesh's constructor) and
+// stored rather than recomputed every frame -- frustum culling (see
+// frustum.hpp) needs this test against a bounding volume for every drawable
+// every frame, and a mesh's own vertex data never changes after it's
+// uploaded, so there's nothing to invalidate. A sphere (center + radius)
+// rather than an AABB: simpler to transform by an arbitrary world matrix
+// (see transformed() below) and cheaper to test against a frustum plane,
+// and this engine's meshes (boxes, a plane, UV spheres, hand-authored
+// scene geometry) don't have such extreme aspect ratios that a sphere's
+// extra slack over a tight-fitting AABB would meaningfully hurt culling
+// precision.
+struct BoundingSphere {
+    glm::vec3 center{0.0f};
+    float radius = 0.0f;
+
+    // Returns this bounding sphere re-expressed in whatever space
+    // `worldTransform` maps local space into -- e.g. an entity's model
+    // matrix, or a Model node's accumulated world transform. The center is
+    // transformed directly (so translation, rotation, and scale all move it
+    // correctly); the radius is scaled by the *largest* of the transform's
+    // three axis scale factors (each axis's world-space length), not e.g.
+    // their average -- under non-uniform scale that keeps the result a
+    // conservative superset of the mesh's real transformed extent along
+    // every axis, so frustum culling never discards something that should
+    // still be visible (see frustum.hpp's Frustum::intersects()) in
+    // exchange for occasionally not culling something it safely could have.
+    BoundingSphere transformed(const glm::mat4& worldTransform) const {
+        const glm::vec3 axisX(worldTransform[0]);
+        const glm::vec3 axisY(worldTransform[1]);
+        const glm::vec3 axisZ(worldTransform[2]);
+        const float maxScaleSq =
+            std::max({glm::dot(axisX, axisX), glm::dot(axisY, axisY), glm::dot(axisZ, axisZ)});
+        const glm::vec3 worldCenter = glm::vec3(worldTransform * glm::vec4(center, 1.0f));
+        return BoundingSphere{worldCenter, radius * std::sqrt(maxScaleSq)};
+    }
+};
 
 struct Vertex {
     glm::vec3 position;
@@ -79,12 +119,19 @@ public:
     std::size_t indexCount() const { return indexCount_; }
     bool isIndexed() const { return ebo_ != 0; }
 
+    // Phase 13b: this mesh's local-space bounding sphere, computed once at
+    // construction time from `vertices` (see mesh.cpp) -- callers (see
+    // Application::render()/Model::drawNode()) transform() it by whatever
+    // world matrix applies before testing it against a Frustum.
+    const BoundingSphere& boundingSphere() const { return boundingSphere_; }
+
 private:
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;
     unsigned int ebo_ = 0;
     std::size_t vertexCount_ = 0;
     std::size_t indexCount_ = 0;
+    BoundingSphere boundingSphere_;
 };
 
 // Builds an axis-aligned unit cube (side length 2 * halfExtent, centered on

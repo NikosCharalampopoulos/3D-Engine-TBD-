@@ -1233,6 +1233,77 @@ exactly the version the next phase's known requirements call for, not more.
   Blinn-Phong table/box/pyramid) renders pixel-for-pixel identically before
   and after this version bump.
 
+### Phase 13b: frustum culling
+
+Phase 13b adds one performance-architecture feature -- skipping draw calls
+for geometry entirely outside the camera's view frustum -- without changing
+what a normally-positioned camera renders. This engine's own test scene is
+small enough that culling has no dramatic FPS impact today; the point is
+building the mechanism correctly and generally (per-mesh bounding volumes +
+a reusable frustum test) so it scales to a larger scene later, not a
+special-cased hack for this one.
+
+- **`Mesh::boundingSphere()`** (`mesh.hpp`/`mesh.cpp`) -- every `Mesh` now
+  computes its own local-space bounding sphere once, at construction time,
+  from its vertex positions: center is the axis-aligned bounding box's
+  center (not a centroid, which would skew towards denser vertex clusters
+  rather than the shape's actual middle), radius is the farthest any vertex
+  actually sits from that center -- a correct (every vertex provably inside),
+  if not minimal, enclosing sphere. `BoundingSphere::transformed(worldMatrix)`
+  re-expresses it in world space: the center is transformed directly, and
+  the radius is scaled by the *largest* of the transform's three axis scale
+  factors (not an average) so a non-uniformly-scaled instance still gets a
+  conservative, safe superset of its real extent -- under-culling (culling
+  something that should be visible) is a correctness bug, over-culling
+  slack (an occasional unculled-but-invisible object) merely costs one
+  wasted draw call.
+- **`engine::Frustum`** (`frustum.hpp`, header-only) -- extracts the 6
+  view-frustum planes from a combined view-projection matrix via the
+  standard Gribb/Hartmann method (each plane is a fixed row-sum/difference
+  of the matrix's own rows -- see that header's `update()` comment for the
+  derivation and the column-major-vs-row indexing pitfall it calls out by
+  name). `intersects(center, radius)` is the conservative sphere-frustum
+  test: true unless the sphere is provably entirely outside at least one
+  plane. Verified against a standalone set of synthetic cases (a plain
+  `lookAt`/`perspective` camera; a dead-center point, points off to each
+  side/above/behind/beyond-far, and a large sphere whose edge alone reaches
+  back into frustum) -- all behaved as expected, including left/right
+  symmetry for a symmetric FOV.
+- **Wired into `Application::render()`** -- one `Frustum` is built per frame
+  from `camera_`'s current view/projection (never cached across frames,
+  matching `Camera`'s own "no premature caching" style), then tested
+  against every drawable this frame: each `Model` node's own mesh(es) (via
+  new optional `frustum`/`cullStats` parameters on `Model::draw()`/
+  `drawNode()` -- default `nullptr`, so every other call site, notably the
+  shadow-depth pass, is unaffected), the hand-built ground plane, and every
+  PBR sphere instance. Only the camera color pass is culled this way --
+  `renderShadowPass()` still depth-draws everything unconditionally every
+  frame, exactly as before (culling the shadow pass against the *light's*
+  own frustum instead is a reasonable future refinement, not required for
+  this phase's scope). A running `CullStats` total/culled count is logged
+  every `kCullLogFrameInterval` (15) frames.
+- **Proving it isn't a no-op**: `ENGINE_FRUSTUM_CULL_DEMO=1` (same
+  getenv-gated pattern as `ENGINE_CAMERA_DEMO`) parks the camera at its
+  usual default position but aimed 180 degrees away from the scene instead
+  of at it. `ENGINE_MAX_FRAMES=90 ENGINE_FRUSTUM_CULL_DEMO=1 bash
+  tools/run_headless.sh build/engine_app <out.png>` logs `Frustum culling:
+  12/12 drawables culled this frame` on every logged frame (all 12 --
+  the scene model's mesh, the ground plane, and the 8 PBR spheres -- fully
+  outside the frustum), and the resulting screenshot shows nothing but the
+  procedural-sky background, no scene geometry at all. A normal run (no env
+  var) logs `Frustum culling: 0/12 drawables culled this frame` throughout,
+  since this engine's whole small test scene fits inside the default
+  camera's view.
+- **No visual regression at the normal default camera pose**:
+  `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh build/engine_app <out.png>`
+  was run once against the pre-Phase-13b build and once against this
+  phase's build; `compare -metric AE` between the two PNGs reports `0` --
+  zero differing pixels, confirming the entire existing scene (shadows,
+  PBR direct lighting + IBL reflections, bloom, MSAA-smoothed silhouettes,
+  anisotropic-filtered textures, skybox, HDR/tonemap, and the Blinn-Phong
+  table/box/pyramid/ground) still renders pixel-for-pixel identically --
+  nothing visible is incorrectly culled at this camera's default framing.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

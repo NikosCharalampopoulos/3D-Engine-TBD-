@@ -11,8 +11,46 @@
 
 namespace engine {
 
+namespace {
+
+// Phase 13b: computes a mesh's local-space bounding sphere from its own
+// vertex positions -- center is the axis-aligned bounding box's center (not
+// a centroid, which would be pulled towards wherever vertices happen to be
+// denser rather than towards the shape's actual middle), and radius is the
+// farthest any vertex actually sits from that center, so every vertex is
+// guaranteed to lie within the resulting sphere. This is a correct (if not
+// minimal -- finding the smallest enclosing sphere is a harder problem this
+// engine doesn't need) bounding sphere: for frustum culling, "definitely
+// contains the whole mesh" matters far more than "as tight as possible".
+BoundingSphere computeBoundingSphere(const std::vector<Vertex>& vertices) {
+    if (vertices.empty()) {
+        // No vertices means nothing to bound; a zero-radius sphere at the
+        // origin is a harmless placeholder (this mesh has no geometry to
+        // draw anyway) rather than reading vertices.front() below.
+        return BoundingSphere{};
+    }
+
+    glm::vec3 minExtent = vertices.front().position;
+    glm::vec3 maxExtent = vertices.front().position;
+    for (const Vertex& vertex : vertices) {
+        minExtent = glm::min(minExtent, vertex.position);
+        maxExtent = glm::max(maxExtent, vertex.position);
+    }
+    const glm::vec3 center = (minExtent + maxExtent) * 0.5f;
+
+    float radius = 0.0f;
+    for (const Vertex& vertex : vertices) {
+        radius = std::max(radius, glm::length(vertex.position - center));
+    }
+    return BoundingSphere{center, radius};
+}
+
+}  // namespace
+
 Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices)
-    : vertexCount_(vertices.size()), indexCount_(indices.size()) {
+    : vertexCount_(vertices.size()),
+      indexCount_(indices.size()),
+      boundingSphere_(computeBoundingSphere(vertices)) {
     GL_CHECK(glGenVertexArrays(1, &vao_));
     GL_CHECK(glGenBuffers(1, &vbo_));
     GL_CHECK(glBindVertexArray(vao_));

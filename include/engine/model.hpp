@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/frustum.hpp"
 #include "engine/material.hpp"
 #include "engine/mesh.hpp"
 #include "engine/shader.hpp"
@@ -101,7 +102,22 @@ public:
     // own local transform) -- so a caller-supplied outer transform (e.g.
     // Application's placement of the whole model in the scene) sits above
     // the file's own node hierarchy rather than replacing it.
-    void draw(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
+    //
+    // Phase 13b: `frustum`, if non-null, is tested against each individual
+    // mesh's own bounding sphere (see mesh.hpp's BoundingSphere), transformed
+    // by that mesh's own accumulated world transform -- not one bounding
+    // volume for the whole model -- so a multi-node model with parts
+    // scattered across a large area still only draws the parts actually in
+    // view, not all-or-nothing. A mesh entirely outside `frustum` has its
+    // draw call skipped (its uModel/uNormalMatrix are still uploaded once
+    // per node exactly as before -- see drawNode() -- since that cost is
+    // shared across every mesh in the node and is negligible either way).
+    // `cullStats`, if non-null, is incremented once per mesh considered
+    // (whether culled or drawn) so a caller can log/verify culling actually
+    // happened -- see Application::render(). Passing frustum == nullptr
+    // (the default) draws unconditionally, exactly as before this phase.
+    void draw(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f), const Frustum* frustum = nullptr,
+              CullStats* cullStats = nullptr) const;
 
     // Phase 7a: draws every node's mesh geometry with `shader` (expected to
     // be the depth-only shadow shader, see shadow_map.hpp/assets/shaders/
@@ -114,7 +130,8 @@ public:
     void drawDepthOnly(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
 
 private:
-    void drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
+    void drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform, const Frustum* frustum,
+                  CullStats* cullStats) const;
     void drawNodeDepthOnly(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
 
     std::vector<Mesh> meshes_;
