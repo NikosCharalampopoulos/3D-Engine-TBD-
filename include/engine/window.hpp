@@ -47,21 +47,23 @@ namespace engine {
 // and framebuffer.hpp) -- one shared source of truth for "how much MSAA
 // this engine asks for" rather than two independently-maintained constants
 // that could drift apart. Bumped from 4x to 16x at the project owner's
-// request for smoother edges (an intermediate 8x request was tried first,
-// still didn't clear this environment's own cap -- see below). Still just a
-// hint (see the class comment and the GL_SAMPLES verification below) --
-// this environment's own EGL config probe (see the EGL-context-creation
-// note below) previously found configs with up to 4 samples on this
-// specific Mesa/llvmpipe stack, so a 16x request here is expected to still
-// only be granted at 4x on this particular software renderer; a real GPU
-// (e.g. the project owner's own machine) is expected to grant a much higher
-// count (commonly up to 8x or 16x depending on the driver) without issue.
-// The actual granted value is always logged from the real GL_SAMPLES query
-// (for the window's own default framebuffer) or Framebuffer's own
-// GL_MAX_SAMPLES/GL_MAX_COLOR_TEXTURE_SAMPLES-clamped query (for
-// Application's multisample HDR framebuffer), never assumed from this
-// request.
-inline constexpr int kRequestedMsaaSamples = 16;
+// request for smoother edges (8x, then 16x were tried first, neither
+// cleared this environment's own cap -- see below). Still just a hint (see
+// the class comment and the GL_SAMPLES verification below) -- this
+// environment's own EGL config probe (see the EGL-context-creation note
+// below) previously found configs with up to 4 samples on this specific
+// Mesa/llvmpipe stack, so a 32x request here is expected to still only be
+// granted at 4x on this particular software renderer; a real GPU (e.g. the
+// project owner's own machine) is expected to grant a much higher count
+// (32x is above what most consumer GPU drivers actually expose for
+// GL_MAX_SAMPLES, commonly capped at 8x or 16x -- so this request may still
+// get clamped down on real hardware too, just to a higher value than this
+// sandbox's 4x). The actual granted value is always logged from the real
+// GL_SAMPLES query (for the window's own default framebuffer) or
+// Framebuffer's own GL_MAX_SAMPLES/GL_MAX_COLOR_TEXTURE_SAMPLES-clamped
+// query (for Application's multisample HDR framebuffer), never assumed
+// from this request.
+inline constexpr int kRequestedMsaaSamples = 32;
 
 class Window {
 public:
