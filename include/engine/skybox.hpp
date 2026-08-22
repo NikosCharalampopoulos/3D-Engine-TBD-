@@ -40,6 +40,27 @@ public:
     //
     // Throws std::runtime_error if any face image can't be loaded/decoded.
     explicit Skybox(const std::array<std::string, 6>& facePaths);
+
+    // Phase 13e: takes ownership of an already-created, already-uploaded
+    // GL_TEXTURE_CUBE_MAP (e.g. the return value of
+    // engine::loadHdrEquirectangularAsCubemap(), see hdri_loader.hpp) rather
+    // than loading 6 separate face images itself. This is what lets a real
+    // HDRI environment feed both this class's own background draw() and,
+    // through textureId() below, engine::IBLProbe's convolution -- the exact
+    // same role the 6-PNG constructor above has always played, just fed by
+    // a GPU-converted cubemap instead of 6 files on disk. Distinguishable
+    // from the constructor above by parameter type (unsigned int vs.
+    // std::array<std::string, 6>), so both stay available as two ways to
+    // build the same class rather than one replacing the other -- see
+    // application.cpp's buildSkybox() for how ENGINE_USE_PROCEDURAL_SKYBOX
+    // picks between them, keeping the Phase 7b/10 procedural path available
+    // as a fallback/reference rather than deleting it.
+    //
+    // Unlike the 6-PNG constructor, this one does no GL uploads or
+    // parameter-setting of its own (the texture handed in is already fully
+    // configured by whichever conversion pass built it) -- it simply takes
+    // over ownership, so its destructor deletes it like any other.
+    explicit Skybox(unsigned int existingCubemapTextureId);
     ~Skybox();
 
     Skybox(const Skybox&) = delete;

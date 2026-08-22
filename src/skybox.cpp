@@ -128,6 +128,11 @@ Skybox::Skybox(const std::array<std::string, 6>& facePaths) : cubeMesh_(makeCube
     LOG_INFO("Skybox created (6-face cubemap)");
 }
 
+Skybox::Skybox(unsigned int existingCubemapTextureId)
+    : textureId_(existingCubemapTextureId), cubeMesh_(makeCube(1.0f)) {
+    LOG_INFO("Skybox created (HDRI-converted cubemap, texture id " + std::to_string(textureId_) + ")");
+}
+
 Skybox::~Skybox() {
     if (textureId_ != 0) {
         glDeleteTextures(1, &textureId_);

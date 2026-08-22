@@ -21,6 +21,7 @@
 
 #include "engine/frustum.hpp"
 #include "engine/gl_debug.hpp"
+#include "engine/hdri_loader.hpp"
 #include "engine/log.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
@@ -82,6 +83,20 @@ const std::string kIrradianceFragmentShaderPath =
     resolveAssetPath("assets/shaders/irradiance_convolution.frag");
 const std::string kPrefilterFragmentShaderPath = resolveAssetPath("assets/shaders/prefilter.frag");
 const std::string kBrdfLutFragmentShaderPath = resolveAssetPath("assets/shaders/brdf_lut.frag");
+// Phase 13e: the equirectangular-HDRI-to-cubemap conversion pass -- reuses
+// cubemap_capture.vert (same fixed-per-face-view vertex stage Phase 10's own
+// irradiance/prefilter passes share) paired with a new fragment shader.
+const std::string kEquirectToCubemapFragmentShaderPath =
+    resolveAssetPath("assets/shaders/equirect_to_cubemap.frag");
+// Phase 13e: the real HDRI environment map (see tools/generate_hdri.py for
+// how it was generated) that replaces the old 6-PNG procedural skybox as
+// skybox_'s own source by default -- see buildSkybox() below.
+const std::string kHdriPath = resolveAssetPath("assets/textures/hdri/sky.hdr");
+// Per-face resolution of the HDRI-converted cubemap (see
+// loadHdrEquirectangularAsCubemap()'s own header comment for why 512 is
+// enough) -- a background/IBL source, never a surface the camera gets close
+// enough to see individual texels of.
+constexpr int kHdriCubemapFaceSize = 512;
 // Phase 13d: clustered lighting's two compute passes (see
 // cluster_light_culler.hpp/ClusterLightCuller).
 const std::string kClusterAABBComputeShaderPath = resolveAssetPath("assets/shaders/cluster_aabb.comp");
@@ -724,6 +739,36 @@ bool clusterDebugModeFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 13e: same getenv-gated-behavior pattern as every env var above --
+// true keeps the Phase 7b/10 procedural 6-face skybox instead of the new
+// HDRI, so that path stays reachable/verifiable rather than only living on
+// in git history (see this project's established "keep the old path as
+// reference" convention, e.g. Material/basic.frag alongside
+// PBRMaterial/pbr.frag since Phase 9).
+bool proceduralSkyboxFromEnv() {
+    const char* value = std::getenv("ENGINE_USE_PROCEDURAL_SKYBOX");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+// Phase 13e: builds skybox_ from either the new HDRI (default) or the old
+// 6-PNG procedural cubemap (ENGINE_USE_PROCEDURAL_SKYBOX), returning it by
+// value (Skybox is move-only, not copyable -- see skybox.hpp) so this can
+// live in Application's member-initializer list as a single expression,
+// same "factory function returns the value a move-only member is
+// initialized from" shape ClusterLightCuller/IBLProbe's own constructors
+// don't need but a *conditional* construction like this one does.
+Skybox buildSkybox(Shader& equirectToCubemapShader) {
+    if (proceduralSkyboxFromEnv()) {
+        LOG_INFO(
+            "ENGINE_USE_PROCEDURAL_SKYBOX set: using the Phase 7b/10 procedural 6-face cubemap instead of "
+            "the Phase 13e HDRI");
+        return Skybox(kSkyboxFacePaths);
+    }
+    unsigned int hdrCubemap =
+        loadHdrEquirectangularAsCubemap(kHdriPath, equirectToCubemapShader, kHdriCubemapFaceSize);
+    return Skybox(hdrCubemap);
+}
+
 // Phase 13d: converts this file's own kPointLights/kSpotLights tables (see
 // their own comment above) into the plain world-position/color/attenuation
 // form ClusterLightCuller::cullLights() needs -- it doesn't care about a
@@ -761,6 +806,11 @@ Application::Application(int width, int height, const std::string& title, std::u
       irradianceShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kIrradianceFragmentShaderPath)),
       prefilterShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kPrefilterFragmentShaderPath)),
       brdfShader_(resources_.getShader(kPostProcessVertexShaderPath, kBrdfLutFragmentShaderPath)),
+      // Phase 13e: pairs the existing cubemap_capture.vert with the new
+      // equirect_to_cubemap.frag -- see buildSkybox()'s use of this just
+      // below (via skybox_'s own initializer).
+      equirectToCubemapShader_(
+          resources_.getShader(kCubemapCaptureVertexShaderPath, kEquirectToCubemapFragmentShaderPath)),
       // Phase 13d: constructed directly from its two compute shader source
       // paths (not through resources_ -- see this member's own
       // application.hpp comment); only needs window_'s GL context to
@@ -806,7 +856,11 @@ Application::Application(int width, int height, const std::string& title, std::u
                              window_.getSize().second / kBloomDownsampleFactor),
       pingpongFramebuffer1_(window_.getSize().first / kBloomDownsampleFactor,
                              window_.getSize().second / kBloomDownsampleFactor),
-      skybox_(kSkyboxFacePaths),
+      // Phase 13e: built from the new HDRI by default, or the old 6-PNG
+      // procedural cubemap under ENGINE_USE_PROCEDURAL_SKYBOX -- see
+      // buildSkybox() above. Must come after equirectToCubemapShader_
+      // (declared earlier in application.hpp), which buildSkybox() may use.
+      skybox_(buildSkybox(*equirectToCubemapShader_)),
       // Phase 10: convolves skybox_'s own just-constructed cubemap (see
       // ibl_probe.hpp) -- must come after skybox_ (and after
       // irradianceShader_/prefilterShader_/brdfShader_ above), matching this

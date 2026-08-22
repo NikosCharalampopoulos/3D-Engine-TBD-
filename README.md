@@ -15,12 +15,17 @@ a split-sum BRDF LUT, all convolved once at startup from the existing skybox
 -- replacing that PBR path's flat placeholder ambient term with a real,
 direction- and roughness-aware one --, (Phase 11) textured PBR materials plus
 tonemap-aware bloom, (Phase 12) a GL 4.3 core foundation bump laying the
-groundwork for compute-shader clustered lighting, and (Phase 13d) GPU
+groundwork for compute-shader clustered lighting, (Phase 13d) GPU
 compute-shader clustered forward light culling -- replacing the old
 brute-force per-fragment light loop with a 3D grid of view-frustum
 "clusters", each with its own GPU-built list of which lights actually
-reach it -- built up from bare-metal OpenGL, and verified at every step by
-a headless Xvfb+Mesa run/screenshot harness (no GPU or display required).
+reach it --, and (Phase 13e) a real HDRI (equirectangular Radiance .hdr)
+environment map -- generated procedurally offline, GPU-converted into a
+floating-point cubemap, and fed into both the sky background and the
+existing IBL pipeline in place of the old flat procedural skybox (which
+stays available as a fallback/reference) -- built up from bare-metal
+OpenGL, and verified at every step by a headless Xvfb+Mesa run/screenshot
+harness (no GPU or display required).
 See "Architecture
 overview" right below for what the finished whole looks like today, or
 "Development history" further down for how it got built, phase by phase
@@ -90,11 +95,16 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   light's real intensity can exceed 1.0 without hard-clipping (see "Phase
   7b" below) -- a small reusable pattern a future bloom pass could extend,
   though bloom itself isn't built here.
-- **`Skybox`** (`skybox.hpp`/`.cpp`) -- a 6-face procedural-sky
-  `GL_TEXTURE_CUBE_MAP` (`assets/textures/skybox/`) rendered as the scene's
-  background via its own program (`assets/shaders/skybox.vert`/`.frag`),
-  drawn last each frame with a `GL_LEQUAL` depth trick so it only shows
-  through pixels nothing else drew.
+- **`Skybox`** (`skybox.hpp`/`.cpp`) -- a `GL_TEXTURE_CUBE_MAP` rendered as
+  the scene's background via its own program
+  (`assets/shaders/skybox.vert`/`.frag`), drawn last each frame with a
+  `GL_LEQUAL` depth trick so it only shows through pixels nothing else drew.
+  By default (Phase 13e) built from a real HDRI (`assets/textures/hdri/`),
+  GPU-converted from equirectangular to cubemap via
+  `engine::loadHdrEquirectangularAsCubemap()` (`hdri_loader.hpp`/`.cpp`);
+  `ENGINE_USE_PROCEDURAL_SKYBOX=1` switches back to the original Phase 7b
+  6-face procedural-sky cubemap (`assets/textures/skybox/`), kept as a
+  fallback/reference.
 - **`IBLProbe`** (`ibl_probe.hpp`/`.cpp`, see "Phase 10" below) -- real-time
   image-based lighting built from `Skybox`'s own cubemap: a diffuse
   irradiance cubemap, a mipmapped GGX-prefiltered specular cubemap, and a 2D
@@ -140,7 +150,9 @@ uniforms once, and iterates `entities_` calling
 the model's node tree drawing each mesh with its own material) plus the
 hand-built ground plane, each fragment sampling `shadowMap_`, any bound
 normal map, and its own cluster's culled light list as it shades, (4) draws
-`skybox_` last into that same HDR framebuffer as the background, and
+`skybox_` (by default the Phase 13e HDRI-derived cubemap; the Phase 7b
+procedural one under `ENGINE_USE_PROCEDURAL_SKYBOX=1`) last into that same
+HDR framebuffer as the background, and
 (5) resolves `hdrFramebuffer_`'s color buffer to the window with one
 fullscreen tonemap/gamma-correct pass (`postProcessShader_` +
 `postProcessQuad_`).
@@ -153,21 +165,24 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp,
                        input.cpp, resource_manager.cpp, shadow_map.cpp,
                        framebuffer.cpp, skybox.cpp, ibl_probe.cpp,
-                       compute_shader.cpp, cluster_light_culler.cpp)
+                       hdri_loader.cpp, compute_shader.cpp,
+                       cluster_light_culler.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, entity, input,
                        resource_manager, shadow_map, framebuffer, skybox,
-                       ibl_probe, compute_shader, cluster_light_culler)
+                       ibl_probe, hdri_loader, compute_shader,
+                       cluster_light_culler)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
                        cubemap_capture.vert, irradiance_convolution.frag,
-                       prefilter.frag, brdf_lut.frag, cluster_aabb.comp,
-                       cluster_cull.comp), textures (checker.png,
-                       normal_bump.png, skybox/ -- 6 cubemap faces),
-                       models (scene.obj + scene.mtl)
-tools/                 Build/run/screenshot scripts
+                       prefilter.frag, brdf_lut.frag, equirect_to_cubemap.frag,
+                       cluster_aabb.comp, cluster_cull.comp), textures
+                       (checker.png, normal_bump.png, skybox/ -- 6 cubemap
+                       faces, hdri/sky.hdr -- Phase 13e's real HDRI), models
+                       (scene.obj + scene.mtl)
+tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
 tests/                 Placeholder for later phases (empty CMakeLists)
 ```
 
@@ -1419,6 +1434,127 @@ scene's current handful of lights.
   every call, including the new compute dispatch/SSBO/barrier calls) --
   zero GL errors across a normal run, `ENGINE_CLUSTER_DEBUG=1`,
   `ENGINE_CAMERA_DEMO=1`, and `ENGINE_FRUSTUM_CULL_DEMO=1`.
+
+### Phase 13e: a real HDRI environment map
+
+Phase 13e replaces Phase 7b/10's flat, procedurally-gradient-only skybox
+with a real HDRI (High Dynamic Range Image) environment -- an
+equirectangular Radiance `.hdr` file carrying genuine floating-point
+radiance values well above 1.0 (a small, extremely bright sun disk), which
+now feeds both the visible sky background and the existing Phase 10 IBL
+convolution pipeline unchanged. No network fetch is used anywhere in this
+phase (this project's sandbox has no general internet access, and the
+existing convention for every other texture -- `checker.png`,
+`normal_bump.png`, the old skybox faces, the Phase 11 rusted-metal/
+scuffed-plastic materials -- is to procedurally generate assets offline
+rather than source them) -- the HDRI is generated entirely by
+`tools/generate_hdri.py` (numpy), and written out as a real, valid Radiance
+RGBE file by a from-scratch Python port of `stb_image_write.h`'s own
+`stbi_write_hdr_core()` encoder (traced by reading that vendored-by-GLFW
+header directly, then verified by round-tripping the written file back
+through this project's own vendored `external/stb/stb_image.h`
+(`stbi_loadf()`) in a small standalone test program -- confirming
+byte-for-byte-format compatibility before ever wiring it into the engine).
+
+- **`tools/generate_hdri.py`** builds a 1024x512 (2:1) equirectangular sky:
+  a color-temperature gradient (deep blue at the zenith, warm/bright at the
+  horizon, dim at the "ground" below it -- `smoothstep`-blended, not a hard
+  cutoff) plus a small sun disk (a sharp ~1.1-degree-radius core at
+  radiance ~200+, `sun_core_intensity = 220.0` before blending -- far above
+  1.0, the whole reason HDR exists, since an 8-bit image can't represent it
+  at all) with a softer ~14-degree glow/corona around it. The sun's
+  (elevation, azimuth) is deliberately chosen (4 degrees, 230 degrees) so it
+  actually falls inside the engine's default camera's visible frustum
+  (computed from `kDefaultCameraPosition`/`kSceneCenter` in
+  `application.cpp`) rather than passing overhead or behind the camera,
+  unverifiable by a screenshot. The script asserts the left/right image
+  seam (azimuth wraps at u=0/1) matches to within floating-point precision
+  before ever writing the file, and logs the sun's resolved world direction
+  plus zenith/horizon sample colors for independent review.
+- **Direction <-> equirectangular UV convention** (`equirect_to_cubemap.frag`,
+  matched exactly by the generation script's own row/column -> direction
+  derivation -- see both files' header comments for the full derivation):
+  `u = atan2(dir.z, dir.x) / (2*pi) + 0.5` (azimuth, wraps), `v = asin(dir.y)
+  / pi + 0.5` (elevation; `v=1` at straight up). This is the standard
+  LearnOpenGL/Karis "spherical environment map" formula, chosen (over the
+  equally common `v = acos(dir.y)/pi` form) specifically because it composes
+  directly with `engine::Texture`'s existing
+  `stbi_set_flip_vertically_on_load(true)` convention that
+  `loadHdrEquirectangularAsCubemap()` reuses rather than inventing a second
+  image-loading convention for one asset -- a wrong sign/axis choice here
+  would silently render a rotated/mirrored/pole-swapped sky, not fail to
+  compile, which is why this was verified by direct calculation (see below),
+  not just visual eyeballing.
+- **`engine::loadHdrEquirectangularAsCubemap()`** (`hdri_loader.hpp`/`.cpp`)
+  -- loads the equirectangular source via `stbi_loadf()` (this project's
+  vendored `stb_image.h` already supports HDR loading, see its own "HDR
+  image support" section -- no new vendored dependency needed) into a
+  floating-point `GL_TEXTURE_2D` (`GL_RGBA16F`, same "no `GL_RGB16F` token in
+  this project's hand-pruned glad build" reason `ibl_probe.cpp` already
+  documents), then GPU-renders it into a 512x512-per-face floating-point
+  `GL_TEXTURE_CUBE_MAP` via a new one-time pass pairing the existing
+  `cubemap_capture.vert` (reused as-is from Phase 10) with the new
+  `equirect_to_cubemap.frag` -- the same "temporary FBO, built and torn down
+  within one function" shape `IBLProbe`'s own constructor already uses for
+  its convolution passes. A free function, not a class: unlike
+  `Skybox`/`IBLProbe`, nothing here needs to persist past the conversion --
+  only the finished cubemap texture name escapes.
+- **`Skybox` gained a second constructor** (`explicit Skybox(unsigned int
+  existingCubemapTextureId)`) that takes ownership of an already-built GL
+  cubemap instead of loading 6 PNG faces itself -- distinguishable from the
+  original constructor by parameter type, so both stay available. Nothing
+  else about `Skybox` changes: `draw()`, `textureId()`, and move semantics
+  are identical regardless of which constructor built the texture it holds.
+- **`Application::buildSkybox()`** (`application.cpp`) picks between the two
+  based on `ENGINE_USE_PROCEDURAL_SKYBOX` (same getenv-gated pattern as
+  `ENGINE_CAMERA_DEMO`/`ENGINE_FRUSTUM_CULL_DEMO`/`ENGINE_CLUSTER_DEBUG`) --
+  unset (the default) builds from the new HDRI; set, non-zero uses the
+  Phase 7b/10 procedural 6-face cubemap, kept as a fallback/reference rather
+  than deleted (this project's established convention -- e.g.
+  `Material`/`basic.frag` stayed untouched alongside `PBRMaterial`/`pbr.frag`
+  since Phase 9). `IBLProbe`'s own constructor and `basic.frag`/`pbr.frag`'s
+  own IBL sampling are completely unmodified -- both already only ever
+  consumed `skybox_.textureId()`, so a different (and, unlike the old
+  procedural cubemap, genuinely floating-point/HDR) source feeding that same
+  handle is the entire change. The background draw's HDR values flow into
+  `hdrFramebuffer_` exactly like the old procedural skybox's always did, so
+  they pass through the same Reinhard tonemap in the final postprocess pass
+  -- no separate/second tonemap step was ever needed or added.
+- **Verifying the direction/UV convention, not just eyeballing it**: the
+  sun's exact expected screen position was independently computed (Python,
+  replicating `glm::lookAt`/`glm::perspective` by hand from
+  `kDefaultCameraPosition`/`kSceneCenter`/the camera's 60-degree vertical
+  FOV) as pixel (373, 24) in the 800x600 headless screenshot; the actual
+  rendered sun disk appears there. A deliberately oversized "debug" sun
+  (20/60-degree core/glow radii) was rendered first to unambiguously confirm
+  the whole pipeline (generation -> RGBE round-trip -> GPU conversion ->
+  skybox draw) placed the sun in the geometrically-predicted region before
+  dialing the size back down to the final, realistic value -- isolating "is
+  the math right" from "is the feature simply too small to see casually" as
+  two separately-answered questions.
+- **No seam/pole artifacts**: (1) the generation script's own left/right
+  azimuth-wrap seam is verified to match exactly (`max abs diff: 0.0`)
+  before the file is ever written; (2) both pole rows (zenith, `dir.y=+1`,
+  and nadir, `dir.y=-1`) were independently decoded from the written `.hdr`
+  file (a from-scratch Python RGBE reader, separate code from the writer
+  above) and confirmed to hold the exact same color across every column --
+  every azimuth converging on the same physical point, as it must; (3) the
+  actual rendered headless screenshot's background gradient was scanned for
+  any abrupt per-pixel jump (several scanlines' adjacent-pixel differences
+  all stayed under ~10/765 combined-channel units, consistent with a smooth
+  gradient/glow falloff, not a hard seam) -- with a real HDRI sun/gradient in
+  frame, `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh build/engine_app
+  <out.png>` shows no visible cube-face boundary anywhere the camera can see.
+- **No regressions**: with `ENGINE_USE_PROCEDURAL_SKYBOX=1`, this phase's
+  build was compared against a byte-for-byte-identical build of the
+  pre-Phase-13e commit (via a separate `git worktree`) using the same
+  headless harness/camera pose -- `compare -metric AE` reports `0` and the
+  two PNGs' MD5 sums match exactly, confirming every other system (CSM
+  shadow cascades, PBR/IBL direct-lighting math, clustered lighting, bloom,
+  MSAA, anisotropic filtering, frustum culling, the Blinn-Phong scene) is
+  completely unaffected by this phase's changes when the old procedural path
+  is selected. Clean `rm -rf build && cmake -B build -S . && cmake --build
+  build` succeeds with zero warnings under `-Wall -Wextra`.
 
 ## Libraries used and why
 

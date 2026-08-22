@@ -138,6 +138,7 @@ add_executable(engine_app
     src/framebuffer.cpp
     src/skybox.cpp
     src/ibl_probe.cpp
+    src/hdri_loader.cpp
     src/paths.cpp
     src/compute_shader.cpp
     src/cluster_light_culler.cpp

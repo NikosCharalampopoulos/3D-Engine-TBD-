@@ -262,6 +262,41 @@
 //     cameraDemoMode_/frustumCullDemoMode_) tints each fragment by its own
 //     cluster's light count, proving the per-cluster lists actually vary
 //     rather than only compiling.
+//
+// Phase 13e replaces the Phase 7b/10 procedural 6-face skybox with a real
+// HDRI (equirectangular Radiance .hdr) environment as skybox_'s own source,
+// without changing render()'s shape or IBLProbe's own convolution logic at
+// all:
+//   - assets/textures/hdri/sky.hdr is a real, valid equirectangular HDR
+//     image -- generated entirely offline (tools/generate_hdri.py, numpy),
+//     matching this project's established "procedurally generate every
+//     texture, no network fetch" convention (see README's Phase 4/7b/11
+//     notes) -- carrying a small, extremely bright sun disk (intensity far
+//     above 1.0, HDR's whole reason to exist) plus a color-temperature sky
+//     gradient, unlike the old procedural skybox's flat 8-bit gradient.
+//   - engine::loadHdrEquirectangularAsCubemap() (hdri_loader.hpp) GPU-
+//     converts that equirectangular image into a floating-point
+//     (GL_RGBA16F) GL_TEXTURE_CUBE_MAP via a new one-time render pass
+//     (equirectToCubemapShader_ below, pairing the existing
+//     cubemap_capture.vert with a new equirect_to_cubemap.frag) -- the same
+//     "temporary FBO, built and torn down within one function" shape
+//     IBLProbe's own constructor already uses for its convolution passes.
+//   - skybox_ gained a second constructor (see skybox.hpp) that takes
+//     ownership of an already-built cubemap instead of loading 6 PNG faces
+//     -- application.cpp's buildSkybox() picks between the two based on
+//     ENGINE_USE_PROCEDURAL_SKYBOX (same getenv-gated pattern as every other
+//     env-var toggle in this class), so the Phase 7b/10 procedural path
+//     stays available as a fallback/reference rather than being deleted.
+//   - Nothing downstream of skybox_.textureId() changes: render()'s
+//     skybox_.draw() call, and iblProbe_'s convolution of skybox_'s own
+//     cubemap, are exactly the code that already existed -- an HDRI is just
+//     a different (and, unlike the old procedural cubemap, genuinely
+//     floating-point/HDR) source for the same texture handle both already
+//     consumed. The background draw's values flow into hdrFramebuffer_
+//     exactly like the old procedural skybox's did, so they pass through
+//     the same Reinhard tonemap in the final postprocess pass -- no separate
+//     tonemap step was ever needed for the sky background, and none is
+//     needed now.
 
 #include <glm/glm.hpp>
 
@@ -409,6 +444,14 @@ private:
     std::shared_ptr<Shader> irradianceShader_;
     std::shared_ptr<Shader> prefilterShader_;
     std::shared_ptr<Shader> brdfShader_;
+    // Phase 13e: the equirectangular-HDRI-to-cubemap conversion pass (see
+    // hdri_loader.hpp) -- pairs cubemap_capture.vert (reused from Phase 10)
+    // with a new equirect_to_cubemap.frag. Routed through resources_ like
+    // every other one-time precompute shader above; must be constructed
+    // before skybox_ below, which (via buildSkybox() in application.cpp)
+    // uses it once, in the constructor, to build the HDR cubemap skybox_
+    // then takes ownership of.
+    std::shared_ptr<Shader> equirectToCubemapShader_;
     // Phase 13d: clustered light culling's two compute passes + the two
     // SSBOs they build (see cluster_light_culler.hpp) -- constructed
     // directly (not through resources_) since exactly one instance ever
@@ -471,9 +514,15 @@ private:
     Framebuffer brightFramebuffer_;
     Framebuffer pingpongFramebuffer0_;
     Framebuffer pingpongFramebuffer1_;
-    // Phase 7b: the procedural-sky cubemap background -- see skybox.hpp.
-    // Loads its own 6 face images directly (not through resources_/Texture,
-    // see skybox.hpp's class comment on why it's a separate small class).
+    // Phase 7b: the sky cubemap background -- see skybox.hpp. Loads its own
+    // texture data directly (not through resources_/Texture, see skybox.hpp's
+    // class comment on why it's a separate small class).
+    //
+    // Phase 13e: now built by buildSkybox() (application.cpp) from a real
+    // HDRI by default -- a floating-point cubemap GPU-converted from
+    // assets/textures/hdri/sky.hdr, see hdri_loader.hpp -- rather than always
+    // the old 6-PNG procedural cubemap; ENGINE_USE_PROCEDURAL_SKYBOX switches
+    // back to the latter, kept as a fallback/reference rather than deleted.
     Skybox skybox_;
     // Phase 10: the precomputed diffuse-irradiance + prefiltered-specular
     // cubemaps and BRDF LUT that drive pbr.frag's real image-based-lighting
