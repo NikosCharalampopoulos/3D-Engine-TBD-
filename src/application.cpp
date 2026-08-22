@@ -1076,20 +1076,27 @@ Application::Application(int width, int height, const std::string& title, std::u
         }
     }
 
-    // The scene is one Entity wrapping the same Phase 5 model
+    // The scene is one registry_ entity wrapping the same Phase 5 model
     // (assets/models/scene.obj), loaded through resources_ instead of
     // constructed directly. A small fixed rotation is applied to its
-    // Transform (rather than identity), for the same reason Phase 2-4 fixed
-    // cubeTransform_'s rotation: proving the composition (entity transform *
-    // accumulated parent node transform * node's own local transform, see
-    // Model::drawNode()) is actually being applied, not just compiling,
-    // regardless of which frame a headless screenshot lands on. 12 degrees
-    // is small enough that scene.obj's three objects (deliberately laid out
-    // to fit within Phase 3/4's unchanged camera framing) stay comfortably
-    // in frame after the rotation.
-    Entity sceneEntity("scene", resources_.getModel(kScenePath, *shader_));
-    sceneEntity.transform.setRotation(glm::angleAxis(glm::radians(12.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
-    entities_.push_back(std::move(sceneEntity));
+    // Transform component (rather than identity), for the same reason
+    // Phase 2-4 fixed cubeTransform_'s rotation: proving the composition
+    // (entity transform * accumulated parent node transform * node's own
+    // local transform, see Model::drawNode()) is actually being applied, not
+    // just compiling, regardless of which frame a headless screenshot lands
+    // on. 12 degrees is small enough that scene.obj's three objects
+    // (deliberately laid out to fit within Phase 3/4's unchanged camera
+    // framing) stay comfortably in frame after the rotation.
+    //
+    // Phase 8a: this used to be `Entity sceneEntity(...); entities_.push_back(...)`
+    // (see this class's Phase 6 header comment); now it's registry_.create()
+    // plus two addComponent<T> calls -- a Transform component and a
+    // ModelComponent -- registered separately rather than bundled as one
+    // Entity's two fixed fields. See ecs.hpp for why.
+    const EntityId sceneEntity = registry_.create();
+    Transform& sceneTransform = registry_.addComponent<Transform>(sceneEntity);
+    sceneTransform.setRotation(glm::angleAxis(glm::radians(12.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
+    registry_.addComponent<ModelComponent>(sceneEntity, ModelComponent{resources_.getModel(kScenePath, *shader_)});
 
     // Phase 9 bug-review composition fix: two single-axis rows instead of a
     // packed 4x4 matrix -- see kSphereRowLength/kSphereGridDistanceFromCamera's
@@ -1288,11 +1295,13 @@ void Application::renderShadowPass(const std::array<glm::mat4, kCascadeCount>& l
         shadowShader_->use();
         shadowShader_->setMat4("uLightSpaceMatrix", lightSpaceMatrices[static_cast<std::size_t>(cascade)]);
 
-        for (const Entity& entity : entities_) {
-            if (entity.model()) {
-                entity.model()->drawDepthOnly(*shadowShader_, entity.transform.getModelMatrix());
+        registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) {
+            if (mc.model) {
+                const Transform* transform = registry_.getComponent<Transform>(id);
+                const glm::mat4 modelMatrix = transform != nullptr ? transform->getModelMatrix() : glm::mat4(1.0f);
+                mc.model->drawDepthOnly(*shadowShader_, modelMatrix);
             }
-        }
+        });
 
         // The ground plane too, for the same "depth pass renders everything
         // the main pass renders" reason -- its own geometry is already
@@ -1351,11 +1360,13 @@ void Application::renderSSAO(const glm::mat4& view, const glm::mat4& projection)
     gbufferShader_->setMat4("uView", view);
     gbufferShader_->setMat4("uProjection", projection);
 
-    for (const Entity& entity : entities_) {
-        if (entity.model()) {
-            entity.model()->drawNormalDepth(*gbufferShader_, entity.transform.getModelMatrix());
+    registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) {
+        if (mc.model) {
+            const Transform* transform = registry_.getComponent<Transform>(id);
+            const glm::mat4 modelMatrix = transform != nullptr ? transform->getModelMatrix() : glm::mat4(1.0f);
+            mc.model->drawNormalDepth(*gbufferShader_, modelMatrix);
         }
-    }
+    });
 
     {
         // The ground plane: identity model matrix, same as its main-pass
@@ -1677,16 +1688,20 @@ void Application::render() {
     // Each entity's transform matrix is the "rootTransform" Model::draw()
     // composes above the file's own node hierarchy: draw() recurses through
     // the model's node tree, uploading uModel/uNormalMatrix per node as
-    // entity.transform * (accumulated parent node transform) * (node's own
-    // local transform), and binding + drawing each node's mesh(es) with
-    // their own Material. This phase's scene is exactly one Entity, but
-    // iterating entities_ (rather than drawing one hardcoded model_)
-    // establishes the pattern for however many later phases add.
-    for (const Entity& entity : entities_) {
-        if (entity.model()) {
-            entity.model()->draw(*shader_, entity.transform.getModelMatrix(), &frustum, &cullStats);
+    // entity's Transform component * (accumulated parent node transform) *
+    // (node's own local transform), and binding + drawing each node's
+    // mesh(es) with their own Material. This phase's scene is exactly one
+    // entity, but iterating registry_'s ModelComponent pool (rather than
+    // drawing one hardcoded model_) establishes the pattern for however many
+    // later phases add -- Phase 8a: previously `for (const Entity& entity :
+    // entities_)`, see this class's own Phase 8a header comment and ecs.hpp.
+    registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) {
+        if (mc.model) {
+            const Transform* transform = registry_.getComponent<Transform>(id);
+            const glm::mat4 modelMatrix = transform != nullptr ? transform->getModelMatrix() : glm::mat4(1.0f);
+            mc.model->draw(*shader_, modelMatrix, &frustum, &cullStats);
         }
-    }
+    });
 
     // Phase 7a's ground plane: drawn directly (not through Entity/Model,
     // see this class's header comment) with an identity model matrix, since

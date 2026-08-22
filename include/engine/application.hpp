@@ -381,6 +381,24 @@
 //     second resolveTo() entirely, leaving hdrResolveFramebuffer_ exactly as
 //     the first (IBL-only) pass alone produced it -- same getenv-gated
 //     before/after-comparison pattern as ssaoDisabled_/ENGINE_SSAO_DISABLE.
+//
+// Phase 8a promotes Phase 6's Entity/entities_ into a real (if deliberately
+// small) ECS -- see ecs.hpp for the full design writeup. entities_ (a
+// std::vector<Entity>, each hardcoding a Transform + optional Model as two
+// fixed fields) becomes registry_ (an EntityRegistry): entities are now
+// opaque EntityIds, and their Transform/Model data lives in
+// ComponentPool<Transform>/ComponentPool<ModelComponent> pools keyed by
+// entity id instead. This is a structural refactor, not a behavior change --
+// the constructor still creates exactly one entity (the Phase 5 scene.obj
+// model) and render()/renderShadowPass()/renderSSAO() still draw it exactly
+// once per frame, in the same place in the frame; they just do it via
+// registry_.each<ModelComponent>(...) (looking up each entity's Transform
+// component alongside its ModelComponent) instead of `for (const Entity&
+// entity : entities_)`. Every other system this file's earlier phase
+// comments describe entities_/the ground plane/the PBR sphere grid
+// participating in (shadows, SSAO's g-buffer, frustum culling) is
+// unaffected -- only what stores the Transform+Model pair changed, not how
+// many times or in what order it's drawn.
 
 #include <glm/glm.hpp>
 
@@ -392,7 +410,7 @@
 
 #include "engine/camera.hpp"
 #include "engine/cluster_light_culler.hpp"
-#include "engine/entity.hpp"
+#include "engine/ecs.hpp"
 #include "engine/framebuffer.hpp"
 #include "engine/ibl_probe.hpp"
 #include "engine/input.hpp"
@@ -481,8 +499,9 @@ private:
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
     // differ per instance; the mesh geometry itself, sphereMesh_, is shared
     // by every instance, so this struct deliberately does NOT hold a Mesh of
-    // its own). Analogous to Entity, but PBRMaterial-based instead of
-    // Model-based, and copyable (PBRMaterial holds no exclusive GL handle --
+    // its own). Analogous to a registry_ entity's (Transform, ModelComponent)
+    // pair (see ecs.hpp), but PBRMaterial-based instead of Model-based, and
+    // copyable (PBRMaterial holds no exclusive GL handle --
     // see pbr_material.hpp) so std::vector<SphereInstance> needs no move-only
     // ceremony.
     struct SphereInstance {
@@ -498,8 +517,8 @@ private:
     // initializer list, so resources_ must still be declared (and thus
     // constructed) before shader_. shadowShader_/skyboxShader_/
     // postProcessShader_ likewise need resources_ constructed first.
-    // shader_ must in turn come before entities_ and groundMaterial_:
-    // building the scene's Entity calls resources_.getModel(path,
+    // shader_ must in turn come before registry_ and groundMaterial_:
+    // building the scene's entity calls resources_.getModel(path,
     // *shader_), and each resulting Model's per-mesh Materials (plus
     // groundMaterial_, built directly against shader_ rather than through
     // Model) hold a pointer into that same shader_, so shader_ must
@@ -558,7 +577,7 @@ private:
     // pbr.frag), routed through resources_ for the same reason as every
     // other shader above. Must be constructed before sphereInstances_ below
     // (each instance's PBRMaterial holds a pointer into *pbrShader_, the same
-    // "shader_ must outlive entities_/groundMaterial_" constraint this
+    // "shader_ must outlive registry_/groundMaterial_" constraint this
     // comment block already describes for the Blinn-Phong path).
     std::shared_ptr<Shader> pbrShader_;
     // Phase 10: the three one-time IBL precompute programs (see
@@ -691,11 +710,12 @@ private:
     // prefilterShader_/brdfShader_ above.
     IBLProbe iblProbe_;
     // Phase 7a: a hand-built ground plane (see mesh.hpp's makeGroundPlane())
-    // with a bound normal map, drawn directly alongside entities_ rather
-    // than through Model/scene.obj -- see this header's Phase 7a comment
-    // above for why. Constructed directly as members (not wrapped in an
-    // Entity) since there's exactly one and Entity only knows how to hold a
-    // Model, not a raw Mesh + Material pair.
+    // with a bound normal map, drawn directly alongside registry_'s entities
+    // rather than through Model/scene.obj -- see this header's Phase 7a
+    // comment above for why. Constructed directly as members (not an
+    // EntityRegistry entity) since there's exactly one and a registry_
+    // entity's ModelComponent only knows how to hold a Model, not a raw
+    // Mesh + Material pair.
     Mesh groundMesh_;
     Material groundMaterial_;
     // Phase 7b: the fullscreen quad the HDR-resolve pass draws (see
@@ -707,10 +727,15 @@ private:
     // PBRMaterial) per sphere -- see application.cpp's kSphere* constants
     // for the grid layout (metallic x roughness) and Application's Phase 9
     // header comment above for why this is a second, PBRMaterial-based list
-    // alongside entities_ rather than a migration of it.
+    // alongside registry_'s entities rather than a migration of it.
     Mesh sphereMesh_;
     std::vector<SphereInstance> sphereInstances_;
-    std::vector<Entity> entities_;
+    // Phase 8a: replaces the old std::vector<Entity> entities_ -- see this
+    // header's own Phase 8a comment and ecs.hpp for the full design. The
+    // scene's Transform/Model data now lives in registry_'s
+    // ComponentPool<Transform>/ComponentPool<ModelComponent> pools, keyed by
+    // EntityId, rather than as two fixed fields per vector element.
+    EntityRegistry registry_;
     Camera camera_;
     std::uint64_t maxFrames_;
     std::uint64_t frameCount_ = 0;

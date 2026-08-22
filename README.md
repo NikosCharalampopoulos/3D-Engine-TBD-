@@ -5,8 +5,8 @@ free-fly camera, GL 4.3 core shaders/meshes/textures (bumped from 3.3 in
 Phase 12 -- see that section below), multi-light (directional
 + point + spot) Blinn-Phong lighting with tangent-space normal mapping and
 directional shadow mapping, Assimp-based multi-object scene loading with a
-real node hierarchy, MSAA anti-aliasing, a thin entity/resource-cache
-layer, an HDR + Reinhard-tonemapped post-process pipeline, (Phase 9) a real
+real node hierarchy, MSAA anti-aliasing, a resource-cache layer, an HDR +
+Reinhard-tonemapped post-process pipeline, (Phase 9) a real
 metallic/roughness Cook-Torrance PBR material/shader alongside the original
 Blinn-Phong path, proven out on a sphere reference grid, (Phase 10)
 real-time image-based lighting -- a diffuse irradiance cubemap, a
@@ -26,11 +26,13 @@ real HDRI (equirectangular Radiance .hdr) environment map -- generated
 procedurally offline, GPU-converted into a floating-point cubemap, and fed
 into both the sky background and the existing IBL pipeline in place of the
 old flat procedural skybox (which stays available as a fallback/reference)
---, (Phase 13f) Screen-Space Ambient Occlusion, and (Phase 13g) Screen-Space
+--, (Phase 13f) Screen-Space Ambient Occlusion, (Phase 13g) Screen-Space
 Reflections -- refining the PBR sphere grid's IBL-only specular term with a
-real ray-marched reflection of the actual nearby scene -- built up from
-bare-metal OpenGL, and verified at every step by a headless Xvfb+Mesa
-run/screenshot harness (no GPU or display required).
+real ray-marched reflection of the actual nearby scene --, and (Phase 8a) a
+small but genuine component-based ECS (entities as opaque IDs, components in
+typed per-type pools) replacing the earlier Phase 6 `Entity` struct -- built
+up from bare-metal OpenGL, and verified at every step by a headless
+Xvfb+Mesa run/screenshot harness (no GPU or display required).
 See "Architecture
 overview" right below for what the finished whole looks like today, or
 "Development history" further down for how it got built, phase by phase
@@ -63,8 +65,8 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   (resolve/bloom/SSAO targets, see below), a `Skybox`, a `ClusterLightCuller`,
   an `Ssao` pass, a hand-built normal-mapped ground plane
   (`groundMesh_`/`groundMaterial_`), the PBR sphere test-grid
-  (`sphereMesh_`/`sphereInstances_`), a fullscreen `postProcessQuad_`, a
-  `std::vector<Entity>`, and a `Camera`; runs the main loop (poll input ->
+  (`sphereMesh_`/`sphereInstances_`), a fullscreen `postProcessQuad_`, an
+  `EntityRegistry` (`registry_`), and a `Camera`; runs the main loop (poll input ->
   update camera -> render -> swap) until the window closes, ESC is pressed,
   or `ENGINE_MAX_FRAMES` is reached (headless verification only -- see
   below). `render()` has grown a step for essentially every phase below --
@@ -150,10 +152,16 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   pyramid) into a tree of `ModelNode`s, each with its own local transform,
   mesh indices, and children; `draw()` walks the tree depth-first,
   composing world transforms and binding each node's `Material`.
-- **`Entity`** (`entity.hpp`) -- a `Transform` plus an optional
-  `shared_ptr<Model>`; `Application::entities_` is the list `render()`
-  iterates (currently one element), rather than a hardcoded single model
-  member.
+- **`EntityRegistry`** / **`EntityId`** / **`ComponentPool<T>`** (`ecs.hpp`,
+  see "Phase 8a" below) -- a small component-based ECS replacing Phase 6's
+  `Entity` struct: entities are opaque `EntityId` indices with no data of
+  their own; a `Transform` component and a `ModelComponent` (wrapping the
+  existing `shared_ptr<Model>`) live in their own `ComponentPool<T>`, keyed
+  by entity id. `Application::registry_` currently holds one entity (the
+  `scene.obj` model); `render()`/`renderShadowPass()`/`renderSSAO()` visit it
+  via `registry_.each<ModelComponent>(...)`, looking up each entity's
+  `Transform` alongside its `ModelComponent`, rather than iterating a
+  hardcoded `std::vector<Entity>`.
 - **`ResourceManager`** (`resource_manager.hpp`/`.cpp`) -- a per-key
   `shared_ptr` cache for `Shader`/`Texture`/`Model`. Every asset load in the
   engine -- the scene's shader, the scene's model, every material's diffuse
@@ -203,8 +211,9 @@ to `camera_`, then `render()`:
    compute-shader dispatch + memory barrier -- "Phase 13d"), and builds this
    frame's view-frustum `Frustum` ("Phase 13b").
 4. Uploads view/projection/cascade/lighting/cluster/SSAO uniforms once, then
-   iterates `entities_` calling
-   `model->draw(shader, entity.transform.getModelMatrix(), frustum, cullStats)`
+   iterates `registry_`'s `ModelComponent` pool (`registry_.each<ModelComponent>`,
+   "Phase 8a"), looking up each entity's `Transform` component and calling
+   `model->draw(shader, transform.getModelMatrix(), frustum, cullStats)`
    (which recurses the model's node tree, testing each mesh's world-space
    bounding sphere against `frustum` and skipping the draw call if it's
    provably out of view) plus the hand-built ground plane and every PBR
@@ -240,7 +249,7 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        cluster_light_culler.cpp, ssao.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
-                       texture, material, pbr_material, model, entity, input,
+                       texture, material, pbr_material, model, ecs, input,
                        resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao)
@@ -2155,6 +2164,108 @@ itself).
   pixel-identical to the pre-fix build in every mode that doesn't touch this
   code path (`ENGINE_SSR_DISABLE=1` and friends), with only sub-1/255
   rounding differences in the default (SSR-enabled) render.
+
+### Phase 8a: a real component-based ECS
+
+Phase 8a is a structural refactor, not a new rendering feature: nothing about
+*what* gets rendered changes (same camera, same lighting, same `scene.obj`,
+same PBR sphere grid, same ground plane), only *how the scene's entities are
+represented* changes. It promotes Phase 6's `Entity` (`entity.hpp`'s own
+header comment said explicitly that "a real ECS could replace it wholesale in
+a later phase") into an actual, if deliberately small, component-based entity
+system -- see `include/engine/ecs.hpp` for the full design writeup this
+section summarizes.
+
+- **The old design**: `Entity` was one fixed struct -- a `Transform` plus an
+  optional `shared_ptr<Model>` -- and `Application::entities_` was a
+  `std::vector<Entity>`. Adding any new kind of per-entity data (say, a
+  future physics body) would have meant adding a third hardcoded field to
+  `Entity` itself, growing that one struct indefinitely as new sub-phases
+  (8b-8e) add new kinds of per-entity data.
+- **The new design** (`include/engine/ecs.hpp`, header-only):
+  - **`EntityId`** -- an opaque handle: nothing but a `std::uint32_t` index.
+    Entities own no data of their own; everything about an entity lives in
+    whichever component pools happen to have an entry for its id.
+    Deliberately no generation/recycling counter -- this engine only ever
+    *creates* entities (nothing calls a "destroy entity" that would free an
+    index for reuse today), so the classic ECS "stale handle into a
+    recycled index" hazard can't happen yet. A later phase that adds real
+    entity destruction is the right place to add a generation field.
+  - **`ComponentPool<T>`** -- one component type's storage: a dense
+    `std::vector<T>` parallel to a `std::vector<EntityId>` of owners, plus a
+    sparse entity-index -> dense-slot map for O(1) `add()`/`get()`/`has()`/
+    `remove()` (the standard swap-and-pop sparse-set removal, so iterating
+    and mutating both stay cheap as entities come and go, not just while
+    there's exactly one).
+  - **`EntityRegistry`** -- owns every component pool, type-erased
+    (`std::shared_ptr<void>` keyed by `std::type_index`) so a brand new
+    component type never requires touching `EntityRegistry` itself, just a
+    call to `addComponent<NewType>(id, ...)`. `create()` allocates an id;
+    `addComponent`/`getComponent`/`removeComponent`/`hasComponent<T>()` are
+    the per-component-type API; `each<T>(fn)` calls `fn(EntityId, T&)` once
+    per entity that has a `T`, which is how every render()-side call site
+    below iterates.
+  - **`Transform` reused directly as its own component payload** -- no
+    `TransformComponent` wrapper struct, since `Transform` (position +
+    quaternion rotation + scale + `getModelMatrix()`) is already plain data
+    with no dependency on the old `Entity` type.
+  - **`ModelComponent`** -- a one-field wrapper around the existing
+    `shared_ptr<Model>` (still sourced from `ResourceManager`'s cache, see
+    "Phase 6" above), kept as its own distinct type rather than registering
+    `shared_ptr<Model>` itself as a bare component, so a future component
+    that also happens to want to store *a* `shared_ptr<something-else>`
+    can't collide with "the" model component by type alone.
+  - **What this deliberately is NOT**: an archetype/sparse-set ECS in the
+    AAA-engine sense. No archetypes (entities sharing a component *set*
+    aren't packed into one contiguous table together), no compile-time
+    multi-component view/query type, no systems scheduler. This scene has
+    exactly one entity (a `Transform` + `Model` pair) today, and Phase 8a's
+    own scope doesn't add a second one -- "iterate every entity with a
+    `Model`, then look up its `Transform`" (`each<ModelComponent>` plus
+    `getComponent<Transform>`) is a one-line composition, exactly as fast
+    and far simpler to read than a generic multi-type view would be at this
+    entity count. If a later phase's entity count/variety ever makes
+    archetype packing pay for itself, `ecs.hpp` is the file to replace --
+    the same way it replaced `entity.hpp`.
+- **`Application` integration** (`application.hpp`/`.cpp`): `entities_` (a
+  `std::vector<Entity>`) becomes `registry_` (an `EntityRegistry`). The
+  constructor's scene setup goes from `Entity sceneEntity("scene", model);
+  entities_.push_back(...)` to `registry_.create()` plus two `addComponent<T>`
+  calls -- one `Transform`, one `ModelComponent`. The three call sites that
+  used to do `for (const Entity& entity : entities_) { if (entity.model())
+  {...} }` -- the shadow pass (`renderShadowPass()`), SSAO's geometry
+  pre-pass (`renderSSAO()`), and the main Blinn-Phong draw pass (`render()`,
+  which also threads the entity's world-space transform into frustum
+  culling, "Phase 13b") -- all now do
+  `registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) { ... })`,
+  looking up `registry_.getComponent<Transform>(id)` alongside each model.
+  Every one of those three passes produces exactly the same draw calls, in
+  the same order, as before -- only the storage/iteration mechanism changed,
+  not the frame's shape. The PBR sphere grid (`sphereInstances_`) and the
+  hand-built ground plane (`groundMesh_`/`groundMaterial_`) are untouched --
+  they were never `Entity`-based (see "Phase 9"/"Phase 7a" above for why),
+  and this phase is scoped to promoting `Entity`/`entities_` specifically.
+- **`tests/`**: still the Phase 0 placeholder (`enable_testing()` +
+  `add_subdirectory(tests)` stay valid, no test executable exists yet) --
+  checked before starting this phase; no test harness existed to extend, so
+  none was bolted on from scratch, per this phase's own scope.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with zero
+  warnings under `-Wall -Wextra`. `ctest` (from the build dir) reports "No
+  tests were found" -- unchanged from before this phase, confirming no test
+  suite regressed (none exists to). The real proof this is a pure refactor:
+  a pre-Phase-8a build (commit `cf893fc`, built in a separate `git worktree`
+  so the working tree never needed stashing) and this phase's build were
+  each run headlessly for 60 frames
+  (`ENGINE_MAX_FRAMES=60 bash tools/run_headless.sh`) and their screenshots
+  compared with ImageMagick's `compare -metric AE`/`RMSE`: **0 differing
+  pixels, RMSE 0** -- pixel-identical. Both runs' logs also independently
+  report `Frustum culling: 0/12 drawables culled this frame`, the same
+  drawable count as before, confirming the ECS-driven draw loop still visits
+  the same set of things frustum culling tests every frame (the `scene.obj`
+  model's nodes, the ground plane, and the 8 PBR sphere instances). The
+  screenshot itself was also inspected directly: the table/box/pyramid,
+  ground plane, directional light glow, and 8-sphere PBR grid all render
+  exactly as they did before this refactor.
 
 ## Libraries used and why
 
