@@ -10,6 +10,8 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -19,6 +21,67 @@
 namespace engine {
 
 namespace {
+
+// Result of a one-time (per process) check for GL_EXT_texture_filter_anisotropic
+// support, cached in queryAnisotropicSupport() below -- the answer can't
+// change for the lifetime of a given GL context, so there's no reason to
+// re-walk the extension list on every single Texture construction.
+struct AnisotropicSupport {
+    bool supported = false;
+    // Level actually applied to textures when supported -- the driver's own
+    // reported max (GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT), capped at 16x. Some
+    // drivers report unusually high or exotic maxima; blindly requesting
+    // whatever the driver claims isn't the standard approach, so this caps
+    // it at a conventional, always-sane upper bound instead. Unused (stays
+    // 1.0, i.e. no effect) when !supported.
+    float appliedLevel = 1.0f;
+};
+
+// Queries GL_EXT_texture_filter_anisotropic support exactly once per process
+// and caches the result in a function-local static -- safe here because
+// Texture construction (like the rest of this engine) only ever happens on
+// the single GL thread. Uses the modern glGetStringi/GL_NUM_EXTENSIONS
+// per-index query rather than the old glGetString(GL_EXTENSIONS) single
+// space-separated string, which core-profile contexts (this engine has been
+// on one since Phase 12) no longer support -- it returns null on a core
+// context, silently breaking any code still expecting the legacy string.
+const AnisotropicSupport& queryAnisotropicSupport() {
+    static const AnisotropicSupport support = [] {
+        AnisotropicSupport result;
+
+        GLint numExtensions = 0;
+        GL_CHECK(glGetIntegerv(GL_NUM_EXTENSIONS, &numExtensions));
+        for (GLint i = 0; i < numExtensions; ++i) {
+            const GLubyte* extName = nullptr;
+            GL_CHECK(extName = glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+            if (extName != nullptr &&
+                std::strcmp(reinterpret_cast<const char*>(extName), "GL_EXT_texture_filter_anisotropic") == 0) {
+                result.supported = true;
+                break;
+            }
+        }
+
+        if (result.supported) {
+            GLfloat driverMax = 1.0f;
+            GL_CHECK(glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &driverMax));
+            // Cap at 16x: the conventional "high quality" ceiling -- plenty
+            // to fix minification shimmer at grazing angles without relying
+            // on whatever unusual maximum a given driver happens to expose.
+            result.appliedLevel = std::min(static_cast<float>(driverMax), 16.0f);
+            LOG_INFO("Anisotropic filtering: GL_EXT_texture_filter_anisotropic supported (driver max " +
+                      std::to_string(driverMax) + "x), applying " + std::to_string(result.appliedLevel) +
+                      "x to all textures");
+        } else {
+            LOG_WARN(
+                "Anisotropic filtering: GL_EXT_texture_filter_anisotropic not supported by this GL "
+                "driver -- falling back to trilinear-only minification filtering (more shimmer/aliasing "
+                "on textures viewed at grazing angles, e.g. the ground plane)");
+        }
+
+        return result;
+    }();
+    return support;
+}
 
 // Maps stb_image's returned channel count to the matching GL format enum.
 // stb_image reports exactly what was in the source file when asked for
@@ -88,6 +151,25 @@ Texture::Texture(const std::string& path, bool generateMipmaps) {
     GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
     GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
                               generateMipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR));
+
+    // Anisotropic filtering fixes minification shimmer at grazing angles
+    // (e.g. the ground plane's checker texture near the horizon) that
+    // trilinear mipmapping alone can't -- trilinear blurs isotropically
+    // based on the worst-case screen-space minification axis, over-blurring
+    // the other axis, while anisotropic filtering samples more texels along
+    // the more-compressed axis specifically. Only meaningful alongside
+    // mipmaps (it refines minification filtering, which mipmaps drive), so
+    // it's gated on generateMipmaps the same as GL_LINEAR_MIPMAP_LINEAR just
+    // above. Applied here (Texture's own setup path) rather than as a
+    // per-call-site opt-in, so every texture the engine creates -- ground
+    // plane, table/box/pyramid, PBR sphere materials -- gets it uniformly,
+    // including through ResourceManager's cache.
+    if (generateMipmaps) {
+        const AnisotropicSupport& aniso = queryAnisotropicSupport();
+        if (aniso.supported) {
+            GL_CHECK(glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, aniso.appliedLevel));
+        }
+    }
 
     // GL_UNPACK_ALIGNMENT defaults to 4: glTexImage2D assumes each row of the
     // source buffer starts on a 4-byte boundary and pads accordingly when

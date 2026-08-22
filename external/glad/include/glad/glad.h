@@ -168,6 +168,13 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_TEXTURE_WRAP_R 0x8072
 #define GL_REPEAT 0x2901
 #define GL_CLAMP_TO_EDGE 0x812F
+// Phase 13a: GL_EXT_texture_filter_anisotropic (core only as of GL 4.6, not
+// this project's GL 4.3 context, so it's queried as an extension at runtime
+// rather than assumed present -- see Texture). GL_TEXTURE_MAX_ANISOTROPY_EXT
+// is a per-texture glTexParameterf pname; GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+// is the driver-limit glGetFloatv query. Values match the extension spec.
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT 0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
 
 #define GL_TEXTURE0 0x84C0
 #define GL_TEXTURE1 0x84C1
@@ -254,6 +261,9 @@ typedef GLenum(APIENTRY* PFNGLGETERRORPROC)(void);
 typedef const GLubyte* (APIENTRY* PFNGLGETSTRINGPROC)(GLenum);
 typedef const GLubyte* (APIENTRY* PFNGLGETSTRINGIPROC)(GLenum, GLuint);
 typedef void (APIENTRY* PFNGLGETINTEGERVPROC)(GLenum, GLint*);
+// Phase 13a: glGetFloatv, needed to query GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+// (a float limit, unlike the GLint-based glGetIntegerv queries above).
+typedef void (APIENTRY* PFNGLGETFLOATVPROC)(GLenum, GLfloat*);
 
 typedef GLuint(APIENTRY* PFNGLCREATESHADERPROC)(GLenum);
 typedef void (APIENTRY* PFNGLSHADERSOURCEPROC)(GLuint, GLsizei, const GLchar* const*, const GLint*);
@@ -298,6 +308,9 @@ typedef void (APIENTRY* PFNGLGENTEXTURESPROC)(GLsizei, GLuint*);
 typedef void (APIENTRY* PFNGLBINDTEXTUREPROC)(GLenum, GLuint);
 typedef void (APIENTRY* PFNGLTEXIMAGE2DPROC)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
 typedef void (APIENTRY* PFNGLTEXPARAMETERIPROC)(GLenum, GLenum, GLint);
+// Phase 13a: the float-valued sibling of glTexParameteri, needed to set
+// GL_TEXTURE_MAX_ANISOTROPY_EXT (a float pname) per texture.
+typedef void (APIENTRY* PFNGLTEXPARAMETERFPROC)(GLenum, GLenum, GLfloat);
 typedef void (APIENTRY* PFNGLGENERATEMIPMAPPROC)(GLenum);
 typedef void (APIENTRY* PFNGLACTIVETEXTUREPROC)(GLenum);
 typedef void (APIENTRY* PFNGLDELETETEXTURESPROC)(GLsizei, const GLuint*);
@@ -334,6 +347,7 @@ GLAPI PFNGLGETERRORPROC glad_glGetError;
 GLAPI PFNGLGETSTRINGPROC glad_glGetString;
 GLAPI PFNGLGETSTRINGIPROC glad_glGetStringi;
 GLAPI PFNGLGETINTEGERVPROC glad_glGetIntegerv;
+GLAPI PFNGLGETFLOATVPROC glad_glGetFloatv;
 
 GLAPI PFNGLCREATESHADERPROC glad_glCreateShader;
 GLAPI PFNGLSHADERSOURCEPROC glad_glShaderSource;
@@ -378,6 +392,7 @@ GLAPI PFNGLGENTEXTURESPROC glad_glGenTextures;
 GLAPI PFNGLBINDTEXTUREPROC glad_glBindTexture;
 GLAPI PFNGLTEXIMAGE2DPROC glad_glTexImage2D;
 GLAPI PFNGLTEXPARAMETERIPROC glad_glTexParameteri;
+GLAPI PFNGLTEXPARAMETERFPROC glad_glTexParameterf;
 GLAPI PFNGLGENERATEMIPMAPPROC glad_glGenerateMipmap;
 GLAPI PFNGLACTIVETEXTUREPROC glad_glActiveTexture;
 GLAPI PFNGLDELETETEXTURESPROC glad_glDeleteTextures;
@@ -414,6 +429,7 @@ GLAPI PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers;
 #define glGetString glad_glGetString
 #define glGetStringi glad_glGetStringi
 #define glGetIntegerv glad_glGetIntegerv
+#define glGetFloatv glad_glGetFloatv
 
 #define glCreateShader glad_glCreateShader
 #define glShaderSource glad_glShaderSource
@@ -458,6 +474,7 @@ GLAPI PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers;
 #define glBindTexture glad_glBindTexture
 #define glTexImage2D glad_glTexImage2D
 #define glTexParameteri glad_glTexParameteri
+#define glTexParameterf glad_glTexParameterf
 #define glGenerateMipmap glad_glGenerateMipmap
 #define glActiveTexture glad_glActiveTexture
 #define glDeleteTextures glad_glDeleteTextures

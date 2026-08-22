@@ -21,6 +21,7 @@ PFNGLGETERRORPROC glad_glGetError = NULL;
 PFNGLGETSTRINGPROC glad_glGetString = NULL;
 PFNGLGETSTRINGIPROC glad_glGetStringi = NULL;
 PFNGLGETINTEGERVPROC glad_glGetIntegerv = NULL;
+PFNGLGETFLOATVPROC glad_glGetFloatv = NULL;
 
 PFNGLCREATESHADERPROC glad_glCreateShader = NULL;
 PFNGLSHADERSOURCEPROC glad_glShaderSource = NULL;
@@ -65,6 +66,7 @@ PFNGLGENTEXTURESPROC glad_glGenTextures = NULL;
 PFNGLBINDTEXTUREPROC glad_glBindTexture = NULL;
 PFNGLTEXIMAGE2DPROC glad_glTexImage2D = NULL;
 PFNGLTEXPARAMETERIPROC glad_glTexParameteri = NULL;
+PFNGLTEXPARAMETERFPROC glad_glTexParameterf = NULL;
 PFNGLGENERATEMIPMAPPROC glad_glGenerateMipmap = NULL;
 PFNGLACTIVETEXTUREPROC glad_glActiveTexture = NULL;
 PFNGLDELETETEXTURESPROC glad_glDeleteTextures = NULL;
@@ -115,6 +117,7 @@ int gladLoadGLLoader(GLADloadproc load) {
     LOAD(glad_glGetString, "glGetString");
     LOAD(glad_glGetStringi, "glGetStringi");
     LOAD(glad_glGetIntegerv, "glGetIntegerv");
+    LOAD(glad_glGetFloatv, "glGetFloatv");
 
     LOAD(glad_glCreateShader, "glCreateShader");
     LOAD(glad_glShaderSource, "glShaderSource");
@@ -159,6 +162,7 @@ int gladLoadGLLoader(GLADloadproc load) {
     LOAD(glad_glBindTexture, "glBindTexture");
     LOAD(glad_glTexImage2D, "glTexImage2D");
     LOAD(glad_glTexParameteri, "glTexParameteri");
+    LOAD(glad_glTexParameterf, "glTexParameterf");
     LOAD(glad_glGenerateMipmap, "glGenerateMipmap");
     LOAD(glad_glActiveTexture, "glActiveTexture");
     LOAD(glad_glDeleteTextures, "glDeleteTextures");
