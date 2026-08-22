@@ -399,6 +399,15 @@
 // participating in (shadows, SSAO's g-buffer, frustum culling) is
 // unaffected -- only what stores the Transform+Model pair changed, not how
 // many times or in what order it's drawn.
+//
+// Phase 8b adds real save/load for registry_'s entity data (see
+// scene_serialization.hpp): the constructor's scene setup no longer builds
+// that one entity directly in C++ by default -- it calls loadScene()
+// against a checked-in assets/scenes/default.json instead (still exactly
+// the same one Transform+ModelComponent entity, now as data instead of
+// code), with the old hardcoded construction kept behind
+// ENGINE_LEGACY_SCENE as a documented escape hatch. See this class's own
+// Phase 8b constructor comment (application.cpp) for the full before/after.
 
 #include <glm/glm.hpp>
 

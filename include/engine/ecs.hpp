@@ -59,6 +59,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
@@ -167,8 +168,40 @@ private:
 // comment on why shared_ptr -- several entities can in principle share one
 // cached Model) as its own component type -- see this file's own header
 // comment for why this isn't just a bare ComponentPool<shared_ptr<Model>>.
+//
+// Phase 8b adds `path`: the asset path `model` was loaded from (relative,
+// e.g. "assets/models/scene.obj" -- the same string form ResourceManager's
+// getModel() and resolveAssetPath() take, not an already-resolved absolute
+// path -- see scene_serialization.cpp's saveScene()/loadScene()). Model
+// itself has no notion of "the path it came from" (see model.hpp -- it
+// just owns the meshes/materials Assimp produced from whatever path it was
+// constructed with), so scene serialization -- which needs to write a
+// *reloadable* reference back out, not the live GPU-resident Model object
+// -- has nowhere else to recover that string from. Kept alongside `model`
+// in this one component (rather than a second, parallel component) since
+// the two fields describe the same fact -- "this entity's Model, and where
+// it came from" -- and always change together (nothing ever assigns one of
+// the two without the other, unlike distinct components on the same
+// entity, which are independently optional by design).
 struct ModelComponent {
     std::shared_ptr<Model> model;
+    std::string path;
+};
+
+// Phase 8b: a one-field wrapper around a human-readable entity name, used
+// by scene serialization (see scene_serialization.hpp) so a saved scene
+// file's entities are identifiable/debuggable by name (e.g. "scene",
+// "player_spawn") rather than only by EntityId index -- which is
+// meaningless once reloaded, since create() just hands out fresh
+// monotonically-increasing indices again on every run, not the same
+// indices a previous save saw. Kept as its own opt-in component (like
+// ModelComponent), not a mandatory field on EntityId itself, matching this
+// registry's "components are opt-in per entity" design -- nothing at
+// runtime reads NameComponent today (only scene save/load does), so an
+// entity created directly via C++ code that never calls
+// addComponent<NameComponent>() is just as valid as one that does.
+struct NameComponent {
+    std::string name;
 };
 
 // Owns every component pool this engine's entities use, type-erased so that

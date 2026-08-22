@@ -99,6 +99,28 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(assimp)
 
+# --- nlohmann/json: header-only JSON library (Phase 8b scene files) ------
+# Fetched the same way as GLFW/GLM/Assimp above (a normal, tagged git
+# dependency) rather than hand-vendored like GLAD/stb_image below -- see
+# scene_serialization.hpp's own header comment for why those two cases
+# don't apply here: GLAD is vendored because it's a *code generator* with
+# no single canonical pre-generated file to pull a tag for, which has
+# nothing to do with a JSON *library* that ships an ordinary tagged
+# release. JSON_BuildTests is forced off for the same reason
+# ASSIMP_BUILD_TESTS is above: this project has no use for a dependency's
+# own test suite, only its (single-header) library.
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_MakeAvailable(nlohmann_json)
+
 # --- GLAD (OpenGL 3.3 core loader) ----------------------------------------
 # Vendored as plain source files rather than fetched: GLAD is a code
 # generator, not a library with a stable git tag/CMake target, so a
@@ -143,6 +165,8 @@ add_executable(engine_app
     src/compute_shader.cpp
     src/cluster_light_culler.cpp
     src/ssao.cpp
+    src/scene_serialization.cpp
+    src/scene_loader.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)
@@ -157,6 +181,7 @@ target_link_libraries(engine_app PRIVATE
     glad
     stb_image
     assimp
+    nlohmann_json::nlohmann_json
 )
 
 if(UNIX AND NOT APPLE)

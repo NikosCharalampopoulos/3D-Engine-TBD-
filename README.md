@@ -155,13 +155,19 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
 - **`EntityRegistry`** / **`EntityId`** / **`ComponentPool<T>`** (`ecs.hpp`,
   see "Phase 8a" below) -- a small component-based ECS replacing Phase 6's
   `Entity` struct: entities are opaque `EntityId` indices with no data of
-  their own; a `Transform` component and a `ModelComponent` (wrapping the
-  existing `shared_ptr<Model>`) live in their own `ComponentPool<T>`, keyed
-  by entity id. `Application::registry_` currently holds one entity (the
-  `scene.obj` model); `render()`/`renderShadowPass()`/`renderSSAO()` visit it
-  via `registry_.each<ModelComponent>(...)`, looking up each entity's
-  `Transform` alongside its `ModelComponent`, rather than iterating a
-  hardcoded `std::vector<Entity>`.
+  their own; a `Transform` component, a `ModelComponent` (wrapping the
+  existing `shared_ptr<Model>` plus, since Phase 8b, the asset path it was
+  loaded from), and a `NameComponent` (Phase 8b, a human-readable name) each
+  live in their own `ComponentPool<T>`, keyed by entity id.
+  `Application::registry_` currently holds one entity (the `scene.obj`
+  model); `render()`/`renderShadowPass()`/`renderSSAO()` visit it via
+  `registry_.each<ModelComponent>(...)`, looking up each entity's `Transform`
+  alongside its `ModelComponent`, rather than iterating a hardcoded
+  `std::vector<Entity>`.
+- **`loadScene()`/`saveScene()`** (`scene_serialization.hpp`, see "Phase 8b"
+  below) -- (de)serializes `registry_`'s entity data to/from a JSON file
+  (`assets/scenes/default.json` by default), so `Application`'s constructor
+  builds its scene from data instead of a hardcoded call sequence.
 - **`ResourceManager`** (`resource_manager.hpp`/`.cpp`) -- a per-key
   `shared_ptr` cache for `Shader`/`Texture`/`Model`. Every asset load in the
   engine -- the scene's shader, the scene's model, every material's diffuse
@@ -246,13 +252,15 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        input.cpp, resource_manager.cpp, paths.cpp, shadow_map.cpp,
                        framebuffer.cpp, skybox.cpp, ibl_probe.cpp,
                        hdri_loader.cpp, compute_shader.cpp,
-                       cluster_light_culler.cpp, ssao.cpp)
+                       cluster_light_culler.cpp, ssao.cpp,
+                       scene_serialization.cpp, scene_loader.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
                        resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
-                       cluster_light_culler, frustum, ssao)
+                       cluster_light_culler, frustum, ssao,
+                       scene_serialization)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -265,15 +273,20 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        faces (Phase 7b/10 procedural fallback), hdri/sky.hdr --
                        Phase 13e's real HDRI, rusted_metal_albedo/orm.png +
                        scuffed_plastic_albedo/orm.png -- Phase 11's textured
-                       PBR materials), models (scene.obj + scene.mtl)
+                       PBR materials), models (scene.obj + scene.mtl),
+                       scenes/default.json -- Phase 8b's serialized scene
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
-tests/                 Placeholder for later phases (empty CMakeLists)
+tests/                 scene_serialization_test.cpp (Phase 8b) + its own
+                       CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
 A single executable target (`engine_app`) is built for now. A future phase
 will likely split this into an `engine` library (most of src/) plus a thin
-app target, so tests/ and any additional front-ends can link the engine
-without recompiling it -- see the comment at the top of `CMakeLists.txt`.
+app target, so any additional front-ends can link the engine without
+recompiling it -- see the comment at the top of `CMakeLists.txt`. Phase 8b's
+own test (see `tests/CMakeLists.txt`) sidesteps needing that split today by
+linking against just one GL-independent translation unit
+(`scene_serialization.cpp`) directly, rather than the whole engine.
 
 ## Prerequisites (Linux)
 
@@ -2267,6 +2280,137 @@ section summarizes.
   ground plane, directional light glow, and 8-sphere PBR grid all render
   exactly as they did before this refactor.
 
+### Phase 8b: scene serialization / level loading
+
+Phase 8a made `registry_`'s entities data instead of a fixed `Entity`
+struct, but that data still only ever came from one hardcoded call sequence
+in `Application`'s constructor. Phase 8b adds a real save/load round trip
+for it -- `include/engine/scene_serialization.hpp` -- so a scene can be
+authored/edited as a file and reloaded, rather than requiring a C++ change
+and a rebuild for every scene edit.
+
+- **Format: JSON via nlohmann/json, FetchContent'd like GLFW/GLM/Assimp,
+  not hand-vendored like GLAD/stb_image**. This project had no existing
+  serialization format to reuse, so this phase had to pick one. The
+  question this phase's own brief raised -- does the GLAD/stb_image
+  "vendor it by hand" precedent apply to a JSON library too? -- comes down
+  to *why* GLAD is hand-vendored (see `CMakeLists.txt`'s own "GL loader"
+  comment): it's a *code generator* with no single canonical
+  pre-generated file to pull a git tag for, not "a dependency this
+  project prefers not to fetch". nlohmann/json has none of that problem --
+  it's an ordinary, actively-maintained, MIT-licensed library with tagged
+  releases, exactly the same shape of dependency GLFW/GLM/Assimp already
+  are -- so it's `FetchContent`'d (`v3.11.3`) the same way, not vendored.
+  Concretely it's also single-header (no extra build step, one
+  `INTERFACE` CMake target), and its JSON output is human-readable/
+  diffable, so `assets/scenes/default.json` is reviewable in a PR the same
+  way `assets/models/scene.obj`'s text format already is -- a hand-rolled
+  line-oriented format was considered and rejected for the same reason a
+  hand-rolled parser usually loses to a real one: today's schema needs
+  nested objects and optional fields (see below), which a line-oriented
+  format would need real design work (escaping, nesting) to support the
+  moment a later phase's component adds one more optional field, work
+  JSON already did for free.
+- **Schema**: `{ "entities": [ { "name": ..., "transform": {"position":
+  [...], "rotation": [w,x,y,z], "scale": [...]}, "model": {"path": ...} },
+  ... ] }` -- see `scene_serialization.hpp`'s own header comment for the
+  full field-by-field writeup. Two design choices worth calling out:
+  - Each entity is "an array of named component blocks" (`"transform"`,
+    `"model"`), not a schema hardcoded to today's exactly-one-Model-per-
+    entity shape -- Phase 8c-8e adding a new component type (e.g. a
+    physics body) is a new named block + a new parse/serialize branch in
+    `scene_serialization.cpp`, not a schema rewrite. `"model"` is optional
+    for the same reason: an entity can have a `Transform` with no `Model`,
+    matching `ecs.hpp`'s own "components are opt-in per entity" design.
+  - Rotation is a quaternion (`[w, x, y, z]`, the same field order
+    `glm::quat`'s own constructor and `Transform::rotation()` use), not
+    Euler angles -- storing Euler angles here would silently reintroduce
+    the exact gimbal-lock problem `transform.hpp` already documents
+    avoiding, one file away from where that reasoning lives.
+- **Two new ECS components** (`ecs.hpp`): `ModelComponent` gains a `path`
+  field (the asset path its `model` was loaded from -- `Model` itself has
+  no notion of "the path it came from", so serialization has nowhere else
+  to recover a *reloadable* reference from) and a new `NameComponent`
+  (a one-field wrapper around a human-readable name, opt-in like every
+  other component, so a saved entity is identifiable by more than a
+  meaningless-once-reloaded `EntityId` index).
+- **API, split into two translation units sharing one header** --
+  `include/engine/scene_serialization.hpp` declares all four functions;
+  `src/scene_serialization.cpp` implements the pure-data half
+  (`parseSceneRecords()`/`writeSceneRecords()`: JSON <-> `SceneEntityRecord`,
+  no GL/`ResourceManager`/`EntityRegistry` dependency at all) and
+  `src/scene_loader.cpp` implements the `EntityRegistry`-facing half
+  (`loadScene()`/`saveScene()`, which add the one GL-touching step --
+  turning a model *path* into an actual `ResourceManager::getModel()`
+  result). This split exists specifically so
+  `tests/scene_serialization_test.cpp` (see "Verify" below) can link
+  against the pure half alone and round-trip real scene data without
+  standing up a window or GL context.
+- **`Application` integration** (`application.cpp`): the constructor's old
+  hardcoded `registry_.create()` + two `addComponent<T>()` calls are now
+  gated behind `ENGINE_LEGACY_SCENE` (unset by default) -- same
+  getenv-gated before/after pattern this file already uses for e.g.
+  `ENGINE_USE_PROCEDURAL_SKYBOX` (see "Phase 13e"). The default path calls
+  `loadScene(registry_, kDefaultScenePath, resources_, *shader_)` against
+  `assets/scenes/default.json`, a checked-in scene file describing the
+  exact same one entity (Phase 5's `scene.obj`, rotated 12 degrees around
+  Y) the hardcoded path built directly in C++ -- so the running scene
+  genuinely comes from the new loader by default, not just a library that
+  exists unused alongside an unchanged hardcoded path.
+- **Malformed input**: `loadScene()`/`parseSceneRecords()` throw
+  `std::runtime_error` (after `LOG_ERROR`'ing the specific reason) for
+  every boundary failure this phase is responsible for -- a missing scene
+  file, syntactically invalid JSON (relaying nlohmann's own parse-error
+  message, which already names the byte offset and reason), a
+  structurally-valid-JSON-but-wrong-schema file (e.g. `"entities"` missing
+  or not an array, an entity missing `"name"`), and a `"model"."path"`
+  that doesn't resolve to a file on disk (checked explicitly, by name, so
+  a multi-entity scene file's error names *which* entity's asset reference
+  was bad, not just a bare Assimp failure several stack frames down) --
+  exactly this project's existing convention for every other resource
+  load failure (`Shader`/`Texture`/`Model`'s own constructors already do
+  this; see `log.hpp`'s `LOG_ERROR` and `main.cpp`'s top-level
+  `catch (const std::exception&)`), applied to a new kind of external
+  input rather than inventing a second error-handling convention for it.
+- **`tests/`**: no longer just the Phase 0 placeholder.
+  `tests/scene_serialization_test.cpp` is a plain executable (no
+  Catch2/GoogleTest fetched -- one test case doesn't yet justify a real
+  framework's build-time cost) registered via `add_test()`, so `ctest`
+  actually runs something for the first time this project. It: (1) writes
+  a handful of fabricated `SceneEntityRecord`s (including one exercising
+  every field and one relying on every optional-field default) out via
+  `writeSceneRecords()`, reads them back via `parseSceneRecords()`, and
+  checks every field survived exactly (name, position, rotation, scale,
+  model path); (2) feeds `parseSceneRecords()` a missing file, a
+  syntactically invalid JSON file, and a valid-JSON-wrong-schema file, and
+  checks each throws rather than returning something empty/wrong. It links
+  against `src/scene_serialization.cpp` directly (see the "two translation
+  units" bullet above) plus this project's already-fetched GLM and
+  nlohmann/json -- no GLFW, GL, or Assimp needed to build or run it.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with zero
+  new warnings under `-Wall -Wextra`. `ctest` reports the new
+  `scene_serialization_test` passing. Headless runs
+  (`ENGINE_MAX_FRAMES=60 bash tools/run_headless.sh`) of this phase's build
+  (loading `assets/scenes/default.json` by default) and of a pre-Phase-8b
+  baseline (commit `73b7e7a`, built in a separate `git worktree`) were
+  compared with ImageMagick's `compare -metric AE`/`RMSE`: **0 differing
+  pixels, RMSE 0** -- pixel-identical, and both logs independently report
+  `Frustum culling: 0/12 drawables culled this frame`, the same drawable
+  count as before. A third run with `ENGINE_LEGACY_SCENE=1` set (the
+  hardcoded-construction escape hatch) was also compared against the
+  default loader-driven run: also 0 AE / RMSE 0, confirming both paths
+  build the identical scene. The screenshot was inspected directly too:
+  table/box/pyramid, ground plane, directional light glow, and the
+  8-sphere PBR grid all render exactly as before. Malformed-input handling
+  was exercised for real against the built `engine_app` (not just the
+  standalone test): a missing `default.json`, an invalid-JSON
+  `default.json`, a `default.json` referencing a nonexistent model path,
+  and a valid-JSON-wrong-schema `default.json` were each tried in turn --
+  every one printed a specific `[ERROR]` line naming the actual problem,
+  then a `[ERROR] Fatal: ...` from `main()`'s top-level handler, then
+  exited with status 1 and a clean `Window destroyed, GLFW terminated` --
+  no crash, no hang, no silently-empty scene.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -2276,6 +2420,7 @@ section summarizes.
 | **stb_image** | Vendored single header in `external/stb/` (`stb_image.h`, from github.com/nothings/stb) | Public-domain, single-header, no build step -- simplest possible texture loading path. Vendored unused since Phase 0; Phase 4's `engine::Texture` (`src/texture.cpp`) is the first phase to `#include` it, and the only translation unit that `#define`s `STB_IMAGE_IMPLEMENTATION`. |
 | **GL loader** | Hand-written, vendored in `external/glad/` | See below. |
 | **Assimp** | CMake `FetchContent` (git, tag `v5.4.3`) | De facto standard asset-import library; loads Phase 5's OBJ/glTF scenes via one well-known API instead of hand-rolling per-format parsers. Importer scope narrowed to just OBJ + glTF (see "Phase 5" above) to keep build time/scope down. |
+| **nlohmann/json** | CMake `FetchContent` (git, tag `v3.11.3`) | Single-header, MIT-licensed JSON library; Phase 8b's scene file format (see "Phase 8b" above) -- fetched the same way as GLFW/GLM/Assimp (an ordinary tagged git dependency), not hand-vendored like GLAD/stb_image below (see "Phase 8b"'s own writeup on why that precedent doesn't apply to a JSON library). |
 
 ### GL loader: why hand-written instead of a generated GLAD
 

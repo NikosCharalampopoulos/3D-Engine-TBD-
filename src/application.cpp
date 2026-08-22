@@ -25,6 +25,7 @@
 #include "engine/log.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
+#include "engine/scene_serialization.hpp"
 
 namespace engine {
 
@@ -115,8 +116,19 @@ const std::string kClusterCullComputeShaderPath = resolveAssetPath("assets/shade
 // table, and a small box sitting on top of the table) at different
 // positions, proving Model's node hierarchy + transform composition places
 // more than one mesh correctly -- see assets/models/scene.obj and
-// model.cpp.
+// model.cpp. Phase 8b: only still used by the ENGINE_LEGACY_SCENE fallback
+// path below -- the default path loads this same model by way of
+// assets/scenes/default.json's own "model"."path" field instead of this
+// constant.
 const std::string kScenePath = resolveAssetPath("assets/models/scene.obj");
+
+// Phase 8b: the scene file loadScene() reads by default (see
+// scene_serialization.hpp) -- checked into assets/ like every other asset,
+// describing the exact same one entity (kScenePath's model, rotated 12
+// degrees around Y) the old hardcoded construction below built directly in
+// C++. See this class's own Phase 8b constructor comment for the
+// ENGINE_LEGACY_SCENE escape hatch back to that hardcoded path.
+const std::string kDefaultScenePath = resolveAssetPath("assets/scenes/default.json");
 
 // Phase 7a: the ground plane's own textures (see mesh.hpp's
 // makeGroundPlane() and this file's groundMesh_/groundMaterial_). The
@@ -857,6 +869,20 @@ bool proceduralSkyboxFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 8b: same getenv-gated-behavior pattern as every env var above --
+// true keeps the pre-Phase-8b hardcoded registry_.create()/addComponent<T>
+// scene construction instead of loadScene()'ing kDefaultScenePath, so that
+// path stays reachable/verifiable as a documented escape hatch rather than
+// only living on in git history (the same "keep the old path as reference"
+// convention proceduralSkyboxFromEnv()'s own comment above cites for
+// ENGINE_USE_PROCEDURAL_SKYBOX) -- e.g. useful for isolating whether a
+// rendering regression is scene-data-loading-related without needing to
+// touch/revert assets/scenes/default.json itself.
+bool legacySceneFromEnv() {
+    const char* value = std::getenv("ENGINE_LEGACY_SCENE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 // Phase 13e: builds skybox_ from either the new HDRI (default) or the old
 // 6-PNG procedural cubemap (ENGINE_USE_PROCEDURAL_SKYBOX), returning it by
 // value (Skybox is move-only, not copyable -- see skybox.hpp) so this can
@@ -1076,27 +1102,50 @@ Application::Application(int width, int height, const std::string& title, std::u
         }
     }
 
-    // The scene is one registry_ entity wrapping the same Phase 5 model
-    // (assets/models/scene.obj), loaded through resources_ instead of
-    // constructed directly. A small fixed rotation is applied to its
-    // Transform component (rather than identity), for the same reason
-    // Phase 2-4 fixed cubeTransform_'s rotation: proving the composition
-    // (entity transform * accumulated parent node transform * node's own
-    // local transform, see Model::drawNode()) is actually being applied, not
-    // just compiling, regardless of which frame a headless screenshot lands
-    // on. 12 degrees is small enough that scene.obj's three objects
-    // (deliberately laid out to fit within Phase 3/4's unchanged camera
-    // framing) stay comfortably in frame after the rotation.
-    //
-    // Phase 8a: this used to be `Entity sceneEntity(...); entities_.push_back(...)`
-    // (see this class's Phase 6 header comment); now it's registry_.create()
-    // plus two addComponent<T> calls -- a Transform component and a
-    // ModelComponent -- registered separately rather than bundled as one
-    // Entity's two fixed fields. See ecs.hpp for why.
-    const EntityId sceneEntity = registry_.create();
-    Transform& sceneTransform = registry_.addComponent<Transform>(sceneEntity);
-    sceneTransform.setRotation(glm::angleAxis(glm::radians(12.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
-    registry_.addComponent<ModelComponent>(sceneEntity, ModelComponent{resources_.getModel(kScenePath, *shader_)});
+    // Phase 8b: the scene's entities (still just the one Transform +
+    // ModelComponent pair Phase 8a's own comment below describes) now come
+    // from assets/scenes/default.json via loadScene() by default, instead
+    // of the hardcoded registry_.create()/addComponent<T> call sequence
+    // Phase 8a introduced -- see scene_serialization.hpp for the file
+    // format/why, and this constructor's own ENGINE_LEGACY_SCENE check
+    // below for the escape hatch back to that hardcoded path. loadScene()
+    // throws std::runtime_error (after LOG_ERROR'ing specifics) on a
+    // missing/malformed scene file or an unloadable model reference,
+    // propagating out of this constructor exactly like every other
+    // resource-load failure already does (Shader/Texture/Model's own
+    // constructors) -- caught by main()'s top-level try/catch, which prints
+    // it and exits cleanly rather than this engine crashing or silently
+    // running with an empty/broken scene.
+    if (legacySceneFromEnv()) {
+        // Pre-Phase-8b behavior, unchanged: one registry_ entity wrapping
+        // the same Phase 5 model (assets/models/scene.obj), loaded through
+        // resources_ instead of constructed directly. A small fixed
+        // rotation is applied to its Transform component (rather than
+        // identity), for the same reason Phase 2-4 fixed cubeTransform_'s
+        // rotation: proving the composition (entity transform * accumulated
+        // parent node transform * node's own local transform, see
+        // Model::drawNode()) is actually being applied, not just compiling,
+        // regardless of which frame a headless screenshot lands on. 12
+        // degrees is small enough that scene.obj's three objects
+        // (deliberately laid out to fit within Phase 3/4's unchanged camera
+        // framing) stay comfortably in frame after the rotation.
+        //
+        // Phase 8a: this used to be `Entity sceneEntity(...);
+        // entities_.push_back(...)` (see this class's Phase 6 header
+        // comment); now it's registry_.create() plus two addComponent<T>
+        // calls -- a Transform component and a ModelComponent -- registered
+        // separately rather than bundled as one Entity's two fixed fields.
+        // See ecs.hpp for why.
+        LOG_INFO("ENGINE_LEGACY_SCENE set: building the scene from hardcoded C++ instead of " + kDefaultScenePath);
+        const EntityId sceneEntity = registry_.create();
+        registry_.addComponent<NameComponent>(sceneEntity, NameComponent{"scene"});
+        Transform& sceneTransform = registry_.addComponent<Transform>(sceneEntity);
+        sceneTransform.setRotation(glm::angleAxis(glm::radians(12.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
+        registry_.addComponent<ModelComponent>(
+            sceneEntity, ModelComponent{resources_.getModel(kScenePath, *shader_), "assets/models/scene.obj"});
+    } else {
+        loadScene(registry_, kDefaultScenePath, resources_, *shader_);
+    }
 
     // Phase 9 bug-review composition fix: two single-axis rows instead of a
     // packed 4x4 matrix -- see kSphereRowLength/kSphereGridDistanceFromCamera's
