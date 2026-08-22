@@ -35,15 +35,35 @@
 // invert. uExposure below is kept as a small, standard, tunable brightness
 // knob (applied before the tonemap curve) restoring the punch Reinhard's
 // own compression still costs even without gamma stacked on top of it.
+//
+// Phase 11: also additively blends in the bloom pipeline's final blurred
+// bright-pass texture (uBloomBuffer -- see bloom_extract.frag/blur.frag and
+// Application::render()'s bloom section) before the Reinhard curve below,
+// exactly like the phase brief asks for: bloom composited pre-tonemap so it
+// rolls off through the same curve as everything else instead of being a
+// separately-clamped overlay. Doing that add here (in the same pass that
+// already reads uHdrBuffer) rather than as a fourth full-res GL_BLEND draw
+// into hdrFramebuffer_ itself is simpler and has the identical result --
+// both computed as (scene + bloom) before tonemap, this just does the sum
+// in one shader instead of one texture write followed by a blended second
+// one.
 in vec2 vTexCoord;
 
 out vec4 FragColor;
 
 uniform sampler2D uHdrBuffer;
+uniform sampler2D uBloomBuffer;
 uniform float uExposure;
+// A separate multiplier from uExposure (which only scales the base scene)
+// so bloom intensity can be tuned independently of overall scene exposure --
+// 1.0 (the value Application actually uses) means "add the blurred
+// bright-pass result at its own real brightness," the standard/expected
+// bloom strength.
+uniform float uBloomStrength;
 
 void main() {
     vec3 hdrColor = texture(uHdrBuffer, vTexCoord).rgb * uExposure;
-    vec3 mapped = hdrColor / (hdrColor + vec3(1.0));
+    vec3 bloomColor = texture(uBloomBuffer, vTexCoord).rgb * uBloomStrength;
+    vec3 mapped = (hdrColor + bloomColor) / (hdrColor + bloomColor + vec3(1.0));
     FragColor = vec4(mapped, 1.0);
 }

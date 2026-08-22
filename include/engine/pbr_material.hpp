@@ -35,17 +35,35 @@
 //
 // albedoMap_/normalMap_ are optional (nullable) std::shared_ptr<Texture>,
 // mirroring Material's own normalMap_ field: nice-to-haves for a future
-// textured PBR asset, not required by this phase's sphere-grid demo (every
-// sphere uses a flat albedo tint and its own procedural vertex normal, no
-// textures at all). When absent, bind() uploads uUseAlbedoMap/uUseNormalMap
-// = 0 every call -- never left stale from whatever the previously-bound
-// PBRMaterial (sharing the same GL program) last set them to.
+// textured PBR asset, not required by Phase 9's sphere-grid demo (every
+// sphere there uses a flat albedo tint and its own procedural vertex normal,
+// no textures at all). When absent, bind() uploads
+// uUseAlbedoMap/uUseNormalMap/uUseORMMap = 0 every call -- never left stale
+// from whatever the previously-bound PBRMaterial (sharing the same GL
+// program) last set them to.
+//
+// Phase 11 adds a third optional texture, metallicRoughnessMap_ -- a packed
+// "ORM" map (R = ambient occlusion, G = roughness, B = metallic, the common
+// glTF-style packing convention: one texture fetch instead of three) used by
+// this phase's textured sphere materials (rusted metal, scuffed plastic --
+// see application.cpp). When bound, pbr.frag samples it and uses its
+// G/B channels directly for roughness/metallic instead of the scalar
+// uRoughness/uMetallic uniforms, and multiplies its R channel by uAO (so the
+// scalar AO knob still works as an overall multiplier even with a map
+// bound, exactly like uAlbedo still tints uAlbedoMap's sampled color rather
+// than being ignored outright). Bound at textureUnit + 2 -- textureUnit
+// itself is always the albedo map, textureUnit + 1 the normal map (see
+// bind() below), so the three never collide as long as nothing else is
+// bound to textureUnit + 2 while a PBRMaterial::bind() call is live; see
+// application.cpp's kShadowMapTextureUnit/kIrradianceMapTextureUnit's own
+// comment for why those live at units 3+ rather than 2, specifically to
+// leave this slot free.
 //
 // Copyable/movable (not move-only like Material): PBRMaterial holds no
-// exclusive GL handle of its own -- just a non-owning Shader* and two
+// exclusive GL handle of its own -- just a non-owning Shader* and three
 // shared_ptr<Texture> -- so ordinary value semantics are safe and
 // considerably more convenient for something meant to be built many times
-// over (this phase's 4x4 sphere grid is 16 of these in one std::vector).
+// over (Phase 9's 4x4 sphere grid is 16 of these in one std::vector).
 
 #include <algorithm>
 #include <glm/glm.hpp>
@@ -60,10 +78,12 @@ namespace engine {
 class PBRMaterial {
 public:
     PBRMaterial(Shader& shader, const glm::vec3& albedo, float metallic, float roughness, float ao = 1.0f,
-                std::shared_ptr<Texture> albedoMap = nullptr, std::shared_ptr<Texture> normalMap = nullptr)
+                std::shared_ptr<Texture> albedoMap = nullptr, std::shared_ptr<Texture> normalMap = nullptr,
+                std::shared_ptr<Texture> metallicRoughnessMap = nullptr)
         : shader_(&shader),
           albedoMap_(std::move(albedoMap)),
           normalMap_(std::move(normalMap)),
+          metallicRoughnessMap_(std::move(metallicRoughnessMap)),
           albedo(albedo),
           metallic(metallic),
           roughness(roughness),
@@ -99,16 +119,29 @@ public:
         } else {
             shader_->setInt("uUseNormalMap", 0);
         }
+        // Packed ORM map (R = AO, G = roughness, B = metallic), bound at
+        // textureUnit + 2 -- see this class's header comment on why that
+        // unit is reserved for exactly this and doesn't collide with the
+        // shadow map / IBL maps' own fixed units.
+        if (metallicRoughnessMap_) {
+            metallicRoughnessMap_->bind(textureUnit + 2);
+            shader_->setInt("uORMMap", static_cast<int>(textureUnit + 2));
+            shader_->setInt("uUseORMMap", 1);
+        } else {
+            shader_->setInt("uUseORMMap", 0);
+        }
     }
 
     Shader& shader() const { return *shader_; }
     bool hasAlbedoMap() const { return albedoMap_ != nullptr; }
     bool hasNormalMap() const { return normalMap_ != nullptr; }
+    bool hasMetallicRoughnessMap() const { return metallicRoughnessMap_ != nullptr; }
 
 private:
     Shader* shader_;
     std::shared_ptr<Texture> albedoMap_;
     std::shared_ptr<Texture> normalMap_;
+    std::shared_ptr<Texture> metallicRoughnessMap_;
 
 public:
     // Public and mutable, matching Material's tint/shininess -- plain

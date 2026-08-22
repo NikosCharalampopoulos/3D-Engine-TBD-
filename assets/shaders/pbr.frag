@@ -32,6 +32,13 @@ uniform sampler2D uAlbedoMap;
 uniform int uUseAlbedoMap;
 uniform sampler2D uNormalMap;
 uniform int uUseNormalMap;
+// Phase 11: a packed "ORM" map (R = ambient occlusion, G = roughness,
+// B = metallic -- see engine::PBRMaterial's header comment). When bound,
+// its G/B channels replace uRoughness/uMetallic outright and its R channel
+// multiplies uAO (so the scalar AO knob still acts as an overall multiplier
+// even with a map bound) -- see main()'s "material inputs" block below.
+uniform sampler2D uORMMap;
+uniform int uUseORMMap;
 
 // --- Directional light (the one shadow-casting light) ---
 uniform vec3 uLightDirection;
@@ -268,6 +275,20 @@ void main() {
     }
     float metallic = uMetallic;
     float roughness = uRoughness;
+    float ao = uAO;
+    // Phase 11: packed ORM map overrides roughness/metallic outright (G/B
+    // channels) and multiplies (not replaces) the scalar AO uniform with its
+    // own R channel -- see uORMMap's comment above. Roughness is re-floored
+    // here the same way PBRMaterial::bind() floors its scalar uniform
+    // (kMinRoughness = 0.045f there) -- alpha = roughness^2 is singular at
+    // alpha == 0, and a hand-authored texture has no equivalent CPU-side
+    // clamp of its own to rely on.
+    if (uUseORMMap != 0) {
+        vec3 orm = texture(uORMMap, vTexCoord).rgb;
+        roughness = max(orm.g, 0.045);
+        metallic = clamp(orm.b, 0.0, 1.0);
+        ao *= orm.r;
+    }
 
     vec3 N = normal;
     vec3 V = normalize(uViewPos - vFragPos);
@@ -357,7 +378,7 @@ void main() {
     vec2 envBRDF = texture(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg;
     vec3 specularIBL = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
 
-    vec3 ambient = (kD * diffuseIBL + specularIBL) * uAO;
+    vec3 ambient = (kD * diffuseIBL + specularIBL) * ao;
 
     FragColor = vec4(ambient + Lo, 1.0);
 }

@@ -58,6 +58,11 @@ const std::string kSkyboxVertexShaderPath = resolveAssetPath("assets/shaders/sky
 const std::string kSkyboxFragmentShaderPath = resolveAssetPath("assets/shaders/skybox.frag");
 const std::string kPostProcessVertexShaderPath = resolveAssetPath("assets/shaders/postprocess.vert");
 const std::string kPostProcessFragmentShaderPath = resolveAssetPath("assets/shaders/postprocess.frag");
+// Phase 11: bloom's two extra passes -- both pair with
+// kPostProcessVertexShaderPath (an ordinary fullscreen quad), like
+// kBrdfLutFragmentShaderPath below already does for Phase 10's BRDF LUT.
+const std::string kBloomExtractFragmentShaderPath = resolveAssetPath("assets/shaders/bloom_extract.frag");
+const std::string kBlurFragmentShaderPath = resolveAssetPath("assets/shaders/blur.frag");
 // Phase 9: the PBR pass's own program (see application.hpp's Phase 9 note
 // and assets/shaders/pbr.vert/pbr.frag).
 const std::string kPBRVertexShaderPath = resolveAssetPath("assets/shaders/pbr.vert");
@@ -88,6 +93,19 @@ const std::string kScenePath = resolveAssetPath("assets/models/scene.obj");
 // the same PNG.
 const std::string kGroundDiffuseTexturePath = resolveAssetPath("assets/textures/checker.png");
 const std::string kGroundNormalMapPath = resolveAssetPath("assets/textures/normal_bump.png");
+
+// Phase 11: two procedural textured-PBR-material asset sets (albedo + a
+// packed ORM map each -- see pbr_material.hpp's Phase 11 comment), replacing
+// two of the sphere-grid's flat-albedo-only instances (see this file's
+// sphere-instance construction below) so the grid shows real surface detail,
+// not just flat colors. Generated with ImageMagick (organic blob/noise masks
+// blended between two flat colors -- the same "procedural, not
+// sourced/painted" approach checker.png/normal_bump.png/the skybox faces
+// used), not sourced/painted by hand.
+const std::string kRustedMetalAlbedoPath = resolveAssetPath("assets/textures/rusted_metal_albedo.png");
+const std::string kRustedMetalORMPath = resolveAssetPath("assets/textures/rusted_metal_orm.png");
+const std::string kScuffedPlasticAlbedoPath = resolveAssetPath("assets/textures/scuffed_plastic_albedo.png");
+const std::string kScuffedPlasticORMPath = resolveAssetPath("assets/textures/scuffed_plastic_orm.png");
 
 // Phase 7b: the skybox's 6 procedurally-generated face images (see
 // README.md's Phase 7b notes for how they were made and why their edges
@@ -122,20 +140,76 @@ constexpr int kShadowMapHeight = 1024;
 // exposed as one named constant (not a magic literal at the call site) so
 // it's easy to re-tune if art direction changes later.
 constexpr float kPostProcessExposure = 1.4f;
+
+// Phase 11: bloom tuning constants (see Application::render()'s bloom
+// section and this class's Phase 11 header comment).
+//
+// kBloomThreshold: bloom_extract.frag only keeps pixels whose luminance
+// exceeds this. 1.0 (the value below which Reinhard tonemapping --
+// color / (color + 1) -- is still close to a 1:1 mapping, so pixels above
+// it are exactly the ones the curve is compressing hardest) looks like the
+// natural cutoff on paper, but turned out too low in practice: this scene's
+// point lights are intense enough (kPointLights[0]'s {6.0, 2.1, 0.9},
+// kPointLights[2]'s {5.5, 5.2, 4.7}) that ordinary *diffuse* checker-floor
+// texels near them -- not just tight specular highlights -- already exceed
+// a raw HDR luminance of 1.0, so a 1.0 threshold's "bright" mask included a
+// sizable patch of ordinary floor around the sphere grid, not just
+// highlight dots; blurred and added back, that read as the floor being
+// washed out/de-saturated over a wide area rather than a soft glow localized
+// to each highlight (confirmed by diffing a bloom-off render against this
+// one: at 1.0 the floor between spheres brightened by ~30/255 with zero
+// bloom-strength contribution expected there; at 2.0 that same patch is
+// pixel-identical to the bloom-off render). 2.0 keeps the mask to what this
+// scene's tightly-concentrated specular highlights alone reach, which is
+// what should visibly glow.
+constexpr float kBloomThreshold = 2.0f;
+// kBloomDownsampleFactor: brightFramebuffer_/pingpongFramebuffer0_/1_ are
+// all sized at the window's real framebuffer resolution divided by this --
+// bloom is a soft, low-frequency glow, so blurring at a lower resolution
+// costs proportionally less per-pixel work with no visible loss of quality
+// (the opposite would be true for anything with sharp detail, e.g. the main
+// scene render itself, which stays full-resolution).
+constexpr int kBloomDownsampleFactor = 2;
+// kBloomBlurPasses: total ping-pong blur.frag draws (alternating horizontal/
+// vertical -- see render()), not blur *pairs*. 6 -- 3 full horizontal+
+// vertical pairs -- is within this phase brief's own suggested "4-6 passes,
+// typical and sufficient" range: enough for a visibly soft glow without
+// spreading it so wide it reads as a global haze rather than a localized
+// highlight around each genuinely bright pixel. Must be even (an odd count
+// would end on a lopsided horizontal-only-blurred result) -- see the
+// static_assert below.
+constexpr int kBloomBlurPasses = 6;
+static_assert(kBloomBlurPasses % 2 == 0 && kBloomBlurPasses > 0,
+              "kBloomBlurPasses must be a positive even number (full horizontal+vertical pairs)");
+// kBloomStrength: postprocess.frag's additive blend multiplier on the
+// final blurred bloom texture -- 1.0 adds it at its own real (already
+// blurred, already HDR-scaled) brightness, the standard/expected bloom
+// strength; not a magic number, just named so it's easy to re-tune later
+// without hunting through render()'s uniform uploads.
+constexpr float kBloomStrength = 1.0f;
 // The shadow map's depth texture is sampled on this fixed texture unit
 // every frame (see render()) -- unit 0 is always the current Material's
 // diffuse texture and unit 1 its optional normal map (see
-// material.hpp/Material::bind()), so 2 is free and stays bound across every
+// material.hpp/Material::bind()), so 3 is free and stays bound across every
 // per-mesh Material::bind() call in the same frame (those never touch unit
-// 2).
-constexpr unsigned int kShadowMapTextureUnit = 2;
+// 3). Phase 11 bug-review-style note: this used to be unit 2, back when
+// PBRMaterial only ever bound two of its own textures (albedo at
+// textureUnit, normal at textureUnit + 1). Phase 11 adds a third
+// PBRMaterial texture (the packed ORM map, bound at textureUnit + 2 -- see
+// pbr_material.hpp) that would otherwise land on this exact unit and
+// silently clobber whichever texture the shadow map/IBL maps left bound
+// there, so every fixed unit below was shifted up by one to keep the
+// material's own 0/1/2 range and the scene-level globals' 3/4/5/6 range
+// disjoint.
+constexpr unsigned int kShadowMapTextureUnit = 3;
 // Phase 10: iblProbe_'s three precomputed maps, bound once per frame onto
 // pbrShader_ (see render()) at fixed texture units that don't collide with
-// any PBRMaterial::bind() call's own units (0 = albedo map, 1 = normal map --
-// see pbr_material.hpp) or kShadowMapTextureUnit above.
-constexpr unsigned int kIrradianceMapTextureUnit = 3;
-constexpr unsigned int kPrefilterMapTextureUnit = 4;
-constexpr unsigned int kBrdfLutTextureUnit = 5;
+// any PBRMaterial::bind() call's own units (0 = albedo map, 1 = normal map,
+// 2 = Phase 11's packed ORM map -- see pbr_material.hpp) or
+// kShadowMapTextureUnit above.
+constexpr unsigned int kIrradianceMapTextureUnit = 4;
+constexpr unsigned int kPrefilterMapTextureUnit = 5;
+constexpr unsigned int kBrdfLutTextureUnit = 6;
 
 // Phase 4's directional light: a fixed "sun" direction/color, not yet
 // animated or configurable -- proving the Phong math works is this phase's
@@ -489,6 +563,8 @@ Application::Application(int width, int height, const std::string& title, std::u
       shadowShader_(resources_.getShader(kShadowVertexShaderPath, kShadowFragmentShaderPath)),
       skyboxShader_(resources_.getShader(kSkyboxVertexShaderPath, kSkyboxFragmentShaderPath)),
       postProcessShader_(resources_.getShader(kPostProcessVertexShaderPath, kPostProcessFragmentShaderPath)),
+      bloomExtractShader_(resources_.getShader(kPostProcessVertexShaderPath, kBloomExtractFragmentShaderPath)),
+      blurShader_(resources_.getShader(kPostProcessVertexShaderPath, kBlurFragmentShaderPath)),
       pbrShader_(resources_.getShader(kPBRVertexShaderPath, kPBRFragmentShaderPath)),
       irradianceShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kIrradianceFragmentShaderPath)),
       prefilterShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kPrefilterFragmentShaderPath)),
@@ -500,6 +576,20 @@ Application::Application(int width, int height, const std::string& title, std::u
       // directly, so this stays correct even on a HiDPI display where the
       // framebuffer is larger than the window's requested size.
       hdrFramebuffer_(window_.getSize().first, window_.getSize().second),
+      // Phase 11: bloom's own off-screen targets, sized at
+      // 1/kBloomDownsampleFactor of the window's real framebuffer
+      // resolution -- see this header's Phase 11 comment on
+      // brightFramebuffer_/pingpongFramebuffer0_/1_ for why half-res. `/ 2`
+      // (not e.g. rounding up) matches every dimension this engine actually
+      // runs at (800x600 and other common even sizes); a stray odd input
+      // resolution would round down by one texel here, which has no
+      // visible consequence for a soft blur target.
+      brightFramebuffer_(window_.getSize().first / kBloomDownsampleFactor,
+                          window_.getSize().second / kBloomDownsampleFactor),
+      pingpongFramebuffer0_(window_.getSize().first / kBloomDownsampleFactor,
+                             window_.getSize().second / kBloomDownsampleFactor),
+      pingpongFramebuffer1_(window_.getSize().first / kBloomDownsampleFactor,
+                             window_.getSize().second / kBloomDownsampleFactor),
       skybox_(kSkyboxFacePaths),
       // Phase 10: convolves skybox_'s own just-constructed cubemap (see
       // ibl_probe.hpp) -- must come after skybox_ (and after
@@ -561,6 +651,26 @@ Application::Application(int width, int height, const std::string& title, std::u
 
     sphereInstances_.reserve(2 * static_cast<std::size_t>(kSphereRowLength));
 
+    // Phase 11: two of the grid's flat-albedo-only spheres (one per row, an
+    // interior column each -- not either row's extreme ends, so the
+    // metallic=0/1 and roughness=min/max contrast points this grid exists to
+    // demonstrate stay intact) are replaced with real textured PBR materials,
+    // so the screenshot shows actual surface detail/variation within an
+    // object rather than only flat colors swept across separate objects.
+    // Textures loaded once here (through resources_, like every other asset)
+    // rather than per-sphere-instance, even though each is only used once --
+    // consistent with how every other texture in this engine gets loaded.
+    auto rustedMetalAlbedo = resources_.getTexture(kRustedMetalAlbedoPath);
+    auto rustedMetalORM = resources_.getTexture(kRustedMetalORMPath);
+    auto scuffedPlasticAlbedo = resources_.getTexture(kScuffedPlasticAlbedoPath);
+    auto scuffedPlasticORM = resources_.getTexture(kScuffedPlasticORMPath);
+    // Column index (within each 4-wide row) replaced by a textured material
+    // -- deliberately an interior column (not 0 or kSphereRowLength - 1) on
+    // each row, so both rows' most illustrative points (metallic 0 vs. 1;
+    // roughness min vs. max) stay pure scalar-swept spheres.
+    constexpr int kRustedMetalCol = 1;
+    constexpr int kScuffedPlasticCol = 2;
+
     // Row A (upper of the two, placed above gridCenter): metallic sweep
     // 0 -> 1 left to right at a fixed low roughness -- see
     // kMetallicRowRoughness's comment above. Demonstrates the Fresnel
@@ -575,8 +685,20 @@ Application::Application(int width, int height, const std::string& title, std::u
         const float colOffset =
             (static_cast<float>(col) - static_cast<float>(kSphereRowLength - 1) * 0.5f) * kSphereColSpacing;
 
-        SphereInstance instance{Transform{}, PBRMaterial(*pbrShader_, kSphereAlbedo, metallic, kMetallicRowRoughness,
-                                                           kSphereAO)};
+        // col == kRustedMetalCol: a rusted-metal textured material instead of
+        // the row's own scalar metallic sweep value -- the albedo/ORM
+        // textures' own per-pixel metallic (mostly high, low in the rust
+        // patches) and roughness (mostly low, high in the rust patches)
+        // replace `metallic`/kMetallicRowRoughness entirely once bound (see
+        // pbr.frag's uUseORMMap branch), so this sphere reads as "a real
+        // rusted metal surface" rather than one more point on the sweep.
+        SphereInstance instance =
+            (col == kRustedMetalCol)
+                ? SphereInstance{Transform{}, PBRMaterial(*pbrShader_, glm::vec3(1.0f), metallic,
+                                                           kMetallicRowRoughness, kSphereAO, rustedMetalAlbedo,
+                                                           /*normalMap=*/nullptr, rustedMetalORM)}
+                : SphereInstance{Transform{}, PBRMaterial(*pbrShader_, kSphereAlbedo, metallic,
+                                                           kMetallicRowRoughness, kSphereAO)};
         glm::vec3 position = gridCenter + gridRight * colOffset;
         position.y = kSphereGridHeight + kSphereRowSeparation * 0.5f;
         instance.transform.setPosition(position);
@@ -597,7 +719,16 @@ Application::Application(int width, int height, const std::string& title, std::u
         const float colOffset =
             (static_cast<float>(col) - static_cast<float>(kSphereRowLength - 1) * 0.5f) * kSphereColSpacing;
 
-        SphereInstance instance{Transform{}, PBRMaterial(*pbrShader_, kSphereAlbedo, kRoughnessRowMetallic,
+        // col == kScuffedPlasticCol: a scuffed-plastic textured material --
+        // same reasoning as kRustedMetalCol above, just on this row (a
+        // near-zero-metallic, glossy-with-matte-scratches surface, the
+        // dielectric counterpart to the metal sphere above).
+        SphereInstance instance =
+            (col == kScuffedPlasticCol)
+                ? SphereInstance{Transform{}, PBRMaterial(*pbrShader_, glm::vec3(1.0f), kRoughnessRowMetallic,
+                                                           roughness, kSphereAO, scuffedPlasticAlbedo,
+                                                           /*normalMap=*/nullptr, scuffedPlasticORM)}
+                : SphereInstance{Transform{}, PBRMaterial(*pbrShader_, kSphereAlbedo, kRoughnessRowMetallic,
                                                            roughness, kSphereAO)};
         glm::vec3 position = gridCenter + gridRight * colOffset;
         position.y = kSphereGridHeight - kSphereRowSeparation * 0.5f;
@@ -861,6 +992,65 @@ void Application::render() {
     // painting over the table/box/pyramid/ground.
     skybox_.draw(*skyboxShader_, view, projection);
 
+    // Phase 11: bloom -- entirely screen-space passes against
+    // hdrFramebuffer_'s now-finished HDR color buffer (scene + skybox),
+    // before that buffer is resolved to the window below. See this class's
+    // Phase 11 header comment for the overall shape (bright-pass extract ->
+    // ping-ponged separable blur -> additive composite in the final resolve
+    // pass).
+    {
+        // Bright-pass extraction: hdrFramebuffer_ (full res) ->
+        // brightFramebuffer_ (half res -- see kBloomDownsampleFactor).
+        // Downsampling and thresholding happen in the same draw call for
+        // free: this pass's own (smaller) target resolution decides how
+        // many texels get sampled, and Framebuffer's GL_LINEAR minification
+        // filter does the actual averaging as hdrFramebuffer_'s full-res
+        // texture is sampled down into it.
+        brightFramebuffer_.bindForWriting();
+        GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+        bloomExtractShader_->use();
+        hdrFramebuffer_.bindColorTexture(0);
+        bloomExtractShader_->setInt("uHdrBuffer", 0);
+        bloomExtractShader_->setFloat("uThreshold", kBloomThreshold);
+        postProcessQuad_.bind();
+        postProcessQuad_.draw();
+
+        // Separable Gaussian blur, ping-ponged between pingpongFramebuffer0_/
+        // 1_ -- see kBloomBlurPasses' comment above for the exact pass
+        // count/parity this loop depends on. The first iteration's source is
+        // brightFramebuffer_ itself; every iteration after reads whichever
+        // ping-pong target is NOT this iteration's write target (i.e.
+        // whichever one the previous iteration just finished writing) --
+        // exactly the standard ping-pong pattern, since a texture can't be
+        // simultaneously bound for reading and drawn into.
+        const glm::vec2 blurTexelSize(1.0f / static_cast<float>(pingpongFramebuffer0_.width()),
+                                        1.0f / static_cast<float>(pingpongFramebuffer0_.height()));
+        blurShader_->use();
+        blurShader_->setInt("uImage", 0);
+        blurShader_->setVec2("uTexelSize", blurTexelSize);
+
+        bool horizontal = true;
+        for (int i = 0; i < kBloomBlurPasses; ++i) {
+            Framebuffer& target = horizontal ? pingpongFramebuffer0_ : pingpongFramebuffer1_;
+            target.bindForWriting();
+            GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+            blurShader_->setInt("uHorizontal", horizontal ? 1 : 0);
+            if (i == 0) {
+                brightFramebuffer_.bindColorTexture(0);
+            } else {
+                Framebuffer& source = horizontal ? pingpongFramebuffer1_ : pingpongFramebuffer0_;
+                source.bindColorTexture(0);
+            }
+            postProcessQuad_.bind();
+            postProcessQuad_.draw();
+            horizontal = !horizontal;
+        }
+        // kBloomBlurPasses is asserted even (see its own comment), so the
+        // loop's last write is always to pingpongFramebuffer1_ -- that's
+        // where the final blurred bloom texture the resolve pass below
+        // reads now lives.
+    }
+
     // Phase 7b: resolve hdrFramebuffer_'s HDR color buffer to the window's
     // real (default) framebuffer via one fullscreen tonemap + gamma-correct
     // pass -- see assets/shaders/postprocess.vert/.frag. Both buffers are
@@ -877,6 +1067,13 @@ void Application::render() {
     postProcessShader_->use();
     hdrFramebuffer_.bindColorTexture(0);
     postProcessShader_->setInt("uHdrBuffer", 0);
+    // Phase 11: the bloom pipeline's final blurred output (see the bloom
+    // block above) -- additively blended with uHdrBuffer before Reinhard
+    // tonemapping in postprocess.frag, at a fixed texture unit (1) that
+    // doesn't collide with uHdrBuffer's own (0) within this one draw call.
+    pingpongFramebuffer1_.bindColorTexture(1);
+    postProcessShader_->setInt("uBloomBuffer", 1);
+    postProcessShader_->setFloat("uBloomStrength", kBloomStrength);
     postProcessShader_->setFloat("uExposure", kPostProcessExposure);
     postProcessQuad_.bind();
     postProcessQuad_.draw();

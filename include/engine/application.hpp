@@ -129,12 +129,34 @@
 // mipmapped GGX-prefiltered specular cubemap, and a 2D BRDF integration LUT,
 // the standard split-sum approximation (Karis, "Real Shading in Unreal
 // Engine 4"). render() binds all three onto pbrShader_ (fixed texture units
-// 3/4/5 -- see kIrradianceMapTextureUnit/kPrefilterMapTextureUnit/
+// 4/5/6 -- see kIrradianceMapTextureUnit/kPrefilterMapTextureUnit/
 // kBrdfLutTextureUnit in application.cpp, chosen not to collide with unit 0
-// (albedo map)/1 (normal map)/2 (shadow map)) right alongside every other
-// per-frame pbrShader_ uniform upload, once per frame -- no change to
-// render()'s overall shape, since iblProbe_'s own three maps never change
-// after startup (this engine's skybox is static for the whole run).
+// (albedo map)/1 (normal map)/2 (Phase 11's ORM map)/3 (shadow map)) right
+// alongside every other per-frame pbrShader_ uniform upload, once per frame
+// -- no change to render()'s overall shape, since iblProbe_'s own three
+// maps never change after startup (this engine's skybox is static for the
+// whole run).
+//
+// Phase 11 adds two features on top of Phase 9/10's "full PBR" pipeline:
+//   - Textured PBR materials (see pbr_material.hpp's Phase 11 comment): two
+//     of sphereInstances_' materials now bind an albedo + packed ORM texture
+//     instead of flat scalar values -- no new Application-level rendering
+//     step, just different PBRMaterial construction arguments (see
+//     application.cpp's sphere-instance construction).
+//   - Bloom: after the existing lit-scene-+-skybox render into
+//     hdrFramebuffer_, a bright-pass extraction (bloomExtractShader_, into
+//     brightFramebuffer_) isolates pixels above a luminance threshold, a
+//     ping-ponged separable Gaussian blur (blurShader_, alternating between
+//     pingpongFramebuffer0_/pingpongFramebuffer1_, both reused via the same
+//     Framebuffer class rather than one-off FBO code) softens that into a
+//     glow, and the final postprocess pass (postProcessShader_/
+//     postprocess.frag) additively blends the blurred result onto the HDR
+//     color buffer before Reinhard tonemapping -- so bloom is tonemapped
+//     exactly like everything else, not a separate hacky overlay. All three
+//     new Framebuffers are sized at half the window's resolution (see
+//     kBloomDownsampleFactor) -- bloom is a soft, low-frequency glow, so a
+//     half-res blur costs a quarter the per-pixel work of a full-res one
+//     with no visible loss of quality.
 
 #include <glm/glm.hpp>
 
@@ -239,6 +261,18 @@ private:
     // as shadowShader_ above.
     std::shared_ptr<Shader> skyboxShader_;
     std::shared_ptr<Shader> postProcessShader_;
+    // Phase 11: bloom's two extra passes' own programs -- both pair
+    // postprocess.vert (an ordinary fullscreen quad, no model/view/
+    // projection) with a new fragment shader, the same "reuse the existing
+    // screen-space vertex stage" pattern brdfShader_ already uses (see
+    // Phase 10's comment above). bloomExtractShader_ thresholds
+    // hdrFramebuffer_'s color by luminance (assets/shaders/
+    // bloom_extract.frag); blurShader_ is the separable Gaussian blur pass,
+    // run twice per ping-pong iteration (horizontal, then vertical --
+    // assets/shaders/blur.frag), reused across every iteration in
+    // render()'s bloom loop rather than needing a second program.
+    std::shared_ptr<Shader> bloomExtractShader_;
+    std::shared_ptr<Shader> blurShader_;
     // Phase 9: the PBR pass's own program (assets/shaders/pbr.vert/
     // pbr.frag), routed through resources_ for the same reason as every
     // other shader above. Must be constructed before sphereInstances_ below
@@ -267,6 +301,23 @@ private:
     // window.hpp), so -- like every other fixed-at-construction GL
     // resource in this engine -- this only ever needs to be sized once.
     Framebuffer hdrFramebuffer_;
+    // Phase 11: bloom's own off-screen targets, all the same Framebuffer
+    // class as hdrFramebuffer_ above (deliberately reused rather than a new
+    // one-off FBO type -- see this class's Phase 11 header comment), each
+    // sized at half the window's real framebuffer resolution (see
+    // kBloomDownsampleFactor in application.cpp). brightFramebuffer_ holds
+    // the bright-pass extraction's output; pingpongFramebuffer0_/1_
+    // alternate as the separable Gaussian blur's read/write targets each
+    // pass (a single Framebuffer can't be both simultaneously -- sampling a
+    // texture that's also the current draw target is undefined behavior,
+    // which is exactly why ping-ponging between two targets is the standard
+    // separable-blur pattern). Each of these having its own (here, unused)
+    // depth renderbuffer is a small, harmless side effect of reusing
+    // Framebuffer as-is rather than adding a "skip the depth attachment"
+    // parameter for a feature this size.
+    Framebuffer brightFramebuffer_;
+    Framebuffer pingpongFramebuffer0_;
+    Framebuffer pingpongFramebuffer1_;
     // Phase 7b: the procedural-sky cubemap background -- see skybox.hpp.
     // Loads its own 6 face images directly (not through resources_/Texture,
     // see skybox.hpp's class comment on why it's a separate small class).
