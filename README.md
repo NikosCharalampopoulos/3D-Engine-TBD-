@@ -1667,6 +1667,66 @@ SSR now can.
   `-Wall -Wextra`, and a Debug build's `GL_CHECK` drains zero GL errors across
   a full headless run.
 
+- **Bug found post-verification (#2): an isolated false-hit blob survived
+  the aliasing fix above.** A pixel-level before/after comparison of the
+  mottled-patch fix (an ASCII luminance map of the same top-right sphere,
+  not just an eyeballed screenshot) turned up a second, different defect the
+  first fix never touched: a small, disconnected dark "island" sitting
+  between the sphere's specular highlight and its shadow terminator,
+  disjoint from the smooth shadow gradient around it -- present, pixel-for-
+  pixel identical, in both the pre- and post-aliasing-fix screenshots, and
+  completely absent with `ENGINE_SSR_DISABLE=1` in both. A debug build that
+  colored each accepted `traceSSR()` hit by its own coarse-march step index
+  (how far along the ray the crossing was found, alongside the existing
+  raw-hitUV visualization the first bug's own investigation used) showed
+  the mechanism directly: fragments just outside the island correctly found
+  their hit late in the march (out on the reflected floor, matching their
+  neighbors' smoothly-varying hitUV), while fragments inside it found a
+  "hit" only 4-5 steps in -- a plateau of suspiciously early, near-identical
+  hitUVs breaking up what should have been one continuous ramp. Decoding
+  those early hitUVs back to screen pixels landed on an entirely ordinary
+  patch of the same checkerboard floor -- a real surface, just reached far
+  too early, and not the sphere itself (self-intersection is still
+  geometrically impossible off a convex surface, as the first bug's own
+  investigation already established). Root cause: `uSSRDepthMap` is SSAO's
+  existing G-buffer depth, rendered at half the window's resolution purely
+  for SSAO's own affordability (`kSSAODownsampleFactor`) and reused here
+  specifically to avoid a second full-resolution geometry pre-pass (see this
+  phase's own header comment) -- but that buffer is a *separate*
+  rasterization of the same triangles at coarser pixel centers, not a
+  downsampled copy of the full-res one the ray march otherwise reasons
+  about, so right where depth changes fast across screen space (exactly the
+  grazing/silhouette angles the first bug's convex-mirror angular
+  amplification already made sensitive) it can legitimately disagree with
+  the true surface by a small amount. `kSSRThickness`'s original 2-step
+  margin was generous enough to accept that small disagreement as "still
+  the surface" during an early march step -- where a fixed view-space margin
+  covers a much larger fraction of the (so-far-tiny) distance traveled than
+  the same margin does later on -- producing a too-early, wrong hit for
+  whichever fragments landed squarely on the low-res buffer's own
+  disagreement, while immediate neighbors narrowly avoided it and correctly
+  kept marching to the true, far intersection everyone should share. A
+  neighbor-texel depth-discontinuity check was tried first (rejecting a hit
+  whose surrounding `uSSRDepthMap` texels disagreed sharply -- the standard
+  false-hit-at-a-silhouette-edge guard) and measured to have *zero* effect,
+  confirming this wasn't an edge at all, just an otherwise-smooth surface
+  sampled at a slightly wrong position. Tightening `kSSRThickness` itself
+  (from 2 steps' worth down to 0.1 steps' worth) is what actually closes the
+  gap, verified by sweeping the margin (2.0/1.0/0.5/0.2/0.15/0.1/0.05 steps)
+  and measuring the island's own region against the `ENGINE_SSR_DISABLE=1`
+  render at each step: it converges to within single-digit-of-255 luminance
+  by 0.1 and does not measurably improve further below that. Verified: the
+  island is gone -- the same region now matches
+  `ENGINE_SSR_DISABLE=1`'s smooth gradient there pixel-for-pixel in the
+  ASCII luminance map, and within single-digit-of-255 RMSE numerically --
+  while a full-frame diff against the pre-this-fix render shows the change
+  confined to the sphere grid (as expected for an SSR-only fix) with the
+  checkerboard reflections on the grid's other spheres visually unchanged
+  (`kSSRRefineSteps`'s binary search, run immediately after any coarse
+  accept, is what actually pins a legitimate hit down to sub-step precision
+  regardless of how tight this gate is). Clean rebuild is warning-free under
+  `-Wall -Wextra`.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

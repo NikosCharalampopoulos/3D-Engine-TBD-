@@ -431,13 +431,70 @@ vec3 shadeDirectLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float 
 // surface a hit is still accepted as *that* surface, rather than the ray
 // having sailed past a thin occluder into unrelated, much deeper geometry
 // (the classic SSR self-intersection/false-hit failure mode) -- scaled to
-// the march's own per-step distance (2 steps' worth) rather than a fixed
-// absolute, so it stays proportionate if kSSRMaxDistance/kSSRMaxSteps above
-// are ever retuned.
+// the march's own per-step distance rather than a fixed absolute, so it
+// stays proportionate if kSSRMaxDistance/kSSRMaxSteps above are ever
+// retuned.
+//
+// Phase 13g bug review #2: kSSRThickness was originally 2 steps' worth
+// (~0.214 units). That margin is generous enough to hide a second, distinct
+// false-hit mechanism from the mottled-reflection bug this file's other
+// Phase 13g bug-fix comment already covers -- a headless screenshot's
+// top-right sphere (this time between the specular highlight and the
+// terminator, ENGINE_SSR_DISABLE=1 confirming it away completely) showed a
+// jagged, disconnected dark patch sitting in the middle of an otherwise
+// smooth shadow gradient, unmoved by that first fix (identical before/after
+// its textureGrad change). A debug build that colored each accepted hit by
+// its coarse-march step index (i.e. how far along the ray the crossing was
+// found) showed the difference immediately: fragments just outside the
+// patch correctly found their hit late in the march (step ~16 of 28, out on
+// the reflected floor, matching the smoothly-varying hitUV neighboring
+// fragments already show), while fragments inside the patch found a "hit"
+// at step ~4-5 -- a plateau of near-identical, suspiciously early hitUVs
+// sandwiched inside what should have been one continuous ramp. Decoding
+// those early hitUVs back to screen pixels landed on an ordinary,
+// unremarkable patch of the same checkerboard floor -- not a silhouette,
+// not the sphere itself (self-intersection is still geometrically
+// impossible off a convex surface, see this file's other Phase 13g
+// comment), just a legitimate point on a legitimate surface, reached far
+// too early. The cause: uSSRDepthMap is SSAO's existing G-buffer depth,
+// rendered at HALF the window's resolution purely for SSAO's own
+// affordability (kSSAODownsampleFactor, see application.cpp) and reused
+// here to avoid a second full-res geometry pre-pass (see this file's Phase
+// 13g header comment) -- but that buffer is a SEPARATE rasterization of the
+// same triangles at coarser pixel centers, not a downsampled copy of the
+// full-res one this fragment's own march otherwise reasons about, so it can
+// legitimately disagree with the true surface by a small amount right where
+// depth is changing fast across screen space -- exactly the grazing/
+// silhouette angles this sphere's edge already amplifies into large per-
+// fragment hitUV swings (see the textureGrad fix's own comment). A 2-step
+// margin was large enough to swallow that small disagreement as "still the
+// surface" at an early march step, where a fixed view-space margin covers a
+// much larger fraction of the (so-far-tiny) distance traveled than the same
+// margin does later in the march -- accepting a too-early, wrong hit for
+// some fragments (whichever land squarely on the low-res buffer's own
+// disagreement) while immediate neighbors narrowly avoid it and correctly
+// keep marching to the true, far intersection everyone should share. A
+// neighbor-texel depth-discontinuity check was tried first (rejecting a hit
+// whose surrounding uSSRDepthMap texels disagreed sharply, the standard
+// "false hit at a silhouette edge" guard) and measured to have *zero*
+// effect here -- confirming this isn't an edge/discontinuity at all, just
+// an otherwise-smooth surface sampled at a slightly wrong position, which a
+// discontinuity check can't see. Tightening kSSRThickness directly is what
+// actually closes the gap: verified across a sweep (2.0/1.0/0.5/0.2/0.15/
+// 0.1/0.05 steps' worth) that the patch's own region converges to within
+// single-digit-of-255 luminance of the ENGINE_SSR_DISABLE=1 render at 0.1
+// and does not measurably improve further below that, while a full-frame
+// diff against the pre-this-fix render at 0.1 shows no visible loss of the
+// legitimate checkerboard reflections elsewhere on the grid (kSSRRefineSteps'
+// binary search, run immediately after any coarse accept, is what actually
+// pins a legitimate hit down to sub-step precision -- this gate's only
+// remaining job is rejecting an implausible crossing outright, which a
+// flat, correctly-sampled surface satisfies trivially regardless of how
+// tight the margin is).
 const int kSSRMaxSteps = 28;
 const float kSSRMaxDistance = 3.0;
 const int kSSRRefineSteps = 4;
-const float kSSRThickness = 2.0 * (kSSRMaxDistance / float(kSSRMaxSteps));
+const float kSSRThickness = 0.1 * (kSSRMaxDistance / float(kSSRMaxSteps));
 
 // Reconstructs a view-space position from a screen UV + raw device depth --
 // identical math to ssao.frag's own reconstructViewPos() (necessarily
