@@ -65,7 +65,28 @@ public:
     // Throws std::runtime_error if the resulting FBO isn't
     // GL_FRAMEBUFFER_COMPLETE, mirroring ShadowMap/Window/Shader/Texture's
     // throw-on-first-failure convention.
-    explicit Framebuffer(int width, int height, int samples = 0);
+    //
+    // Phase 13f: `depthAsTexture` (default false, preserving every existing
+    // call site's original renderbuffer-depth behavior) requests a
+    // GL_TEXTURE_2D depth attachment (GL_DEPTH_COMPONENT24, same internal
+    // format as the renderbuffer path) instead of the write-only
+    // renderbuffer this class has used since Phase 7b -- see this header's
+    // own Phase 7b comment on why a renderbuffer was originally the right
+    // (cheaper, write-only) choice for a target nothing needed to *sample*
+    // depth from. SSAO's geometry pre-pass (see application.cpp's
+    // Phase 13f render() additions) is the first thing in this engine that
+    // does: it reconstructs each visible fragment's view-space position from
+    // this depth texture + the inverse projection matrix, so that one
+    // attachment has to be a real, samplable GL_TEXTURE_2D this time, mirroring
+    // how ShadowMap's own depth attachment has always been a texture for the
+    // exact same "something needs to sample it" reason (see shadow_map.cpp).
+    // Throws std::runtime_error if combined with samples > 1: a multisample
+    // depth texture would need sampler2DMS + manual per-sample resolution
+    // logic in whatever reads it, which nothing in this engine needs (SSAO's
+    // own G-buffer pre-pass is deliberately single-sample -- see that pass's
+    // own comment in application.cpp) and Framebuffer has no reason to
+    // support speculatively.
+    explicit Framebuffer(int width, int height, int samples = 0, bool depthAsTexture = false);
     ~Framebuffer();
 
     Framebuffer(const Framebuffer&) = delete;
@@ -93,6 +114,17 @@ public:
     // an ordinary sampler2D-compatible texture.
     void bindColorTexture(unsigned int unit) const;
 
+    // Phase 13f: binds this target's depth texture as a regular 2D texture
+    // (for sampling, not writing) on the given unit -- mirrors
+    // bindColorTexture()/ShadowMap::bindForReading()'s shape.
+    //
+    // Precondition: this Framebuffer must have been constructed with
+    // depthAsTexture = true (see the constructor's own comment) -- a
+    // depth *renderbuffer* (every pre-Phase-13f Framebuffer, and every
+    // Phase 13f one that doesn't request this) was never meant to be
+    // sampled and isn't a GL texture object at all.
+    void bindDepthTexture(unsigned int unit) const;
+
     // MSAA HDR framebuffer bug fix: resolves this (typically multisample)
     // framebuffer's color buffer into `target` (a same-size, single-sample
     // Framebuffer) via glBlitFramebuffer(GL_COLOR_BUFFER_BIT, GL_NEAREST) --
@@ -119,6 +151,14 @@ private:
     unsigned int fbo_ = 0;
     unsigned int colorTexture_ = 0;
     unsigned int depthRenderbuffer_ = 0;
+    // Phase 13f: populated instead of depthRenderbuffer_ when constructed
+    // with depthAsTexture = true (mutually exclusive with it -- exactly one
+    // of the two is ever nonzero for a given live instance). Kept as a
+    // separate member (rather than reusing depthRenderbuffer_'s handle slot
+    // for both) so the destructor/move ops know which GL delete call
+    // (glDeleteTextures vs. glDeleteRenderbuffers) owns whichever handle is
+    // actually live, without needing a third bool flag to remember which.
+    unsigned int depthTexture_ = 0;
     int width_ = 0;
     int height_ = 0;
     int samples_ = 0;

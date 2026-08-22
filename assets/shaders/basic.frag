@@ -180,6 +180,19 @@ uniform float uClusterFarPlane;
 // depth rather than only "compiles and doesn't crash."
 uniform int uClusterDebug;
 
+// Phase 13f: screen-space ambient occlusion -- see pbr.frag's identical
+// uSSAOMap/uSSAOEnabled comment for the full rationale. Applied here too
+// (not left PBR-only): SSAO is a purely screen-space, geometry-derived
+// effect -- it only ever needs this fragment's own screen position, view-
+// space normal, and the depth buffer, none of which depend on which BRDF
+// (Blinn-Phong here, Cook-Torrance in pbr.frag) produced this pixel's color
+// -- so a box sitting on this shader's own table should darken at the
+// contact crease exactly like a PBR sphere resting on the ground does,
+// rather than the effect visibly stopping at the boundary between this
+// engine's two coexisting shading models.
+uniform sampler2D uSSAOMap;
+uniform int uSSAOEnabled;
+
 // Picks which of the CLUSTER_GRID_X x CLUSTER_GRID_Y x CLUSTER_GRID_Z
 // clusters this fragment falls into, from its screen-space tile
 // (gl_FragCoord.xy, the same pixel coordinates cluster_aabb.comp's own
@@ -442,7 +455,10 @@ void main() {
     // direct highlight reflectance and is deliberately left un-modulated by
     // the texture, the usual approximation for a non-metallic/dielectric
     // surface -- unchanged from Phase 4, just summed over more lights now.
-    vec3 litColor = (uAmbientColor + diffuseSum) * baseColor + specularSum;
+    // Phase 13f: SSAO multiplies only the ambient term, same as pbr.frag --
+    // see uSSAOMap's own comment above.
+    float ssao = uSSAOEnabled != 0 ? texture(uSSAOMap, gl_FragCoord.xy / uScreenSize).r : 1.0;
+    vec3 litColor = (uAmbientColor * ssao + diffuseSum) * baseColor + specularSum;
 
     // Phase 13d debug visualization (ENGINE_CLUSTER_DEBUG=1): blends in a
     // heat-map color (red = more lights, blue = fewer) keyed by this

@@ -297,6 +297,44 @@
 //     the same Reinhard tonemap in the final postprocess pass -- no separate
 //     tonemap step was ever needed for the sky background, and none is
 //     needed now.
+//
+// Phase 13f adds Screen-Space Ambient Occlusion (SSAO), feeding into
+// basic.frag/pbr.frag's existing ambient term as a second, per-pixel,
+// geometry-derived occlusion factor alongside their existing material-
+// authored uAO/ORM-map scalar:
+//   - renderSSAO() (called from render(), right after the shadow pass, since
+//     it needs to hand shader_/pbrShader_ a finished texture to sample while
+//     shading) runs three screen-space passes: a lightweight geometry
+//     pre-pass (ssaoGBuffer_ -- a view-space normal color attachment plus a
+//     real, samplable depth *texture*, see framebuffer.hpp's Phase 13f
+//     depthAsTexture option) that Model::drawNormalDepth()/the ground
+//     plane/every PBR sphere render into; the classic Crysis/John Chapman
+//     hemisphere-kernel occlusion pass (ssaoRaw_, see ssao.frag) that
+//     reconstructs each pixel's view-space position from that depth texture
+//     plus the inverse projection matrix (rather than a second G-buffer
+//     position render target -- the "buffer-lighter" approach this phase's
+//     brief calls out as preferable for a scene this simple); and a small
+//     box-blur pass (ssaoBlurred_, see ssao_blur.frag) that smooths the
+//     kernel pass's per-pixel noise, sized to exactly cancel the tileable
+//     rotation-noise texture's own repeat period (see ssaoKernel_/ssao.hpp).
+//   - basic.frag/pbr.frag each sample ssaoBlurred_ at their own screen
+//     position (gl_FragCoord.xy / uScreenSize, the same convention Phase
+//     13d's clustered-lighting tile lookup already established) and
+//     multiply it into their ambient term, alongside (not instead of) their
+//     existing material AO -- see pbr.frag's own uSSAOMap comment for why
+//     both are multiplied together rather than one replacing the other.
+//     Applied to both shading models (not left PBR-only) since SSAO is a
+//     purely screen-space effect independent of which BRDF produced a
+//     pixel's color -- see basic.frag's own comment.
+//   - ENGINE_SSAO_DISABLE (ssaoDisabled_) forces both shaders' ambient SSAO
+//     factor to a flat 1.0 (no occlusion) instead of sampling ssaoBlurred_,
+//     letting a headless run isolate SSAO's own exact contribution by
+//     comparing an on/off screenshot pair from the same build.
+//     ENGINE_SSAO_DEBUG (ssaoDebugMode_) makes the final postprocess pass
+//     show ssaoRaw_ (the pre-blur occlusion buffer) directly, so that
+//     buffer's own noise/halo/banding characteristics can be checked in
+//     isolation from its (deliberately subtle) blended contribution to the
+//     final lit image.
 
 #include <glm/glm.hpp>
 
@@ -319,6 +357,7 @@
 #include "engine/shader.hpp"
 #include "engine/shadow_map.hpp"
 #include "engine/skybox.hpp"
+#include "engine/ssao.hpp"
 #include "engine/transform.hpp"
 #include "engine/window.hpp"
 
@@ -363,6 +402,19 @@ private:
     // shadowCascades_[i], using lightSpaceMatrices[i]) instead of once
     // total -- see this header's own Phase 13c comment.
     void renderShadowPass(const std::array<glm::mat4, kCascadeCount>& lightSpaceMatrices);
+
+    // Phase 13f: SSAO's three screen-space passes (see this header's own
+    // Phase 13f comment below and assets/shaders/gbuffer.vert/.frag,
+    // ssao.frag, ssao_blur.frag) -- a lightweight view-space normal + depth
+    // geometry pre-pass (into ssaoGBuffer_), the kernel-sampling pass (into
+    // ssaoRaw_), then a small blur pass (into ssaoBlurred_, what
+    // shader_/pbrShader_ actually sample while shading, see render()).
+    // Called once per frame from render(), after the shadow pass and before
+    // the main color pass -- like renderShadowPass(), it needs this frame's
+    // own view/projection matrices (the camera may have moved) and restores
+    // nothing itself; render() rebinds the default framebuffer/window
+    // viewport immediately afterward via hdrFramebuffer_.bindForWriting().
+    void renderSSAO(const glm::mat4& view, const glm::mat4& projection);
 
     // Phase 9: one sphere in the PBR test-grid -- its own placement
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
@@ -428,6 +480,17 @@ private:
     // render()'s bloom loop rather than needing a second program.
     std::shared_ptr<Shader> bloomExtractShader_;
     std::shared_ptr<Shader> blurShader_;
+    // Phase 13f: SSAO's three programs -- gbufferShader_ (assets/shaders/
+    // gbuffer.vert/.frag) is the lightweight view-space-normal-plus-depth
+    // geometry pre-pass; ssaoShader_ (assets/shaders/ssao.frag, paired with
+    // postProcessVertexShaderPath like every other fullscreen pass) is the
+    // hemisphere-kernel occlusion sampling pass; ssaoBlurShader_ (assets/
+    // shaders/ssao_blur.frag) is the small box blur that smooths its noisy
+    // output. Routed through resources_ for the same "one consistent
+    // loading path" reason as every other shader above.
+    std::shared_ptr<Shader> gbufferShader_;
+    std::shared_ptr<Shader> ssaoShader_;
+    std::shared_ptr<Shader> ssaoBlurShader_;
     // Phase 9: the PBR pass's own program (assets/shaders/pbr.vert/
     // pbr.frag), routed through resources_ for the same reason as every
     // other shader above. Must be constructed before sphereInstances_ below
@@ -514,6 +577,39 @@ private:
     Framebuffer brightFramebuffer_;
     Framebuffer pingpongFramebuffer0_;
     Framebuffer pingpongFramebuffer1_;
+    // Phase 13f: SSAO's own three render targets, all sized at
+    // 1/kSSAODownsampleFactor of the window's real framebuffer resolution
+    // (application.cpp) -- primarily a performance tradeoff (this
+    // technique's per-pixel cost, kSSAOKernelSize texture fetches per pixel
+    // in the kernel pass alone, is steep enough on this project's software-
+    // rasterizer headless verification target to matter for wall-clock run
+    // time), the same half-res idea bloom's own kBloomDownsampleFactor
+    // already uses, not because SSAO is conceptually as soft/low-frequency
+    // as bloom's glow -- Framebuffer's own GL_LINEAR filtering upsamples the
+    // result back onto full-res geometry with no visible halo/blockiness at
+    // this scene's contact-crease scale (confirmed by this phase's own
+    // screenshot/pixel-sample verification).
+    //   - ssaoGBuffer_: this pass's own lightweight geometry pre-pass output
+    //     -- a view-space normal in its ordinary RGBA16F color attachment,
+    //     and (the reason this one Framebuffer is built with
+    //     depthAsTexture = true, see framebuffer.hpp's Phase 13f comment) a
+    //     real, samplable depth texture ssao.frag reconstructs each pixel's
+    //     view-space position from.
+    //   - ssaoRaw_: the kernel-sampling pass's raw, per-pixel-noisy
+    //     occlusion output (see ssao.frag) -- an ordinary (unused-depth,
+    //     same as brightFramebuffer_ above) Framebuffer reused purely for
+    //     its RGBA16F color attachment, only .r of which SSAO actually uses.
+    //   - ssaoBlurred_: the small box-blur pass's smoothed final output --
+    //     what shader_/pbrShader_ actually sample while shading (see
+    //     render()) and what the ambient term in basic.frag/pbr.frag
+    //     multiplies in.
+    Framebuffer ssaoGBuffer_;
+    Framebuffer ssaoRaw_;
+    Framebuffer ssaoBlurred_;
+    // Phase 13f: SSAO's hemisphere sample kernel + tileable rotation-noise
+    // texture -- see ssao.hpp. Only needs window_'s GL context to exist,
+    // like clusterLightCuller_ above.
+    SSAOKernel ssaoKernel_;
     // Phase 7b: the sky cubemap background -- see skybox.hpp. Loads its own
     // texture data directly (not through resources_/Texture, see skybox.hpp's
     // class comment on why it's a separate small class).
@@ -583,6 +679,26 @@ private:
     // cameraDemoMode_/frustumCullDemoMode_ above; independent of both (a
     // debug visualization, not an alternate camera path).
     bool clusterDebugMode_ = false;
+
+    // Phase 13f: set from ENGINE_SSAO_DISABLE -- true forces
+    // basic.frag/pbr.frag's uSSAOEnabled uniform to 0 every frame, making
+    // both shaders fall back to an unconditional ssao = 1.0 (no occlusion)
+    // instead of sampling ssaoBlurred_ -- so a headless run can compare an
+    // SSAO-on and SSAO-off screenshot/pixel-sample pair from the same build
+    // to isolate SSAO's own exact contribution, without needing a second
+    // compile-time toggle. Default false (SSAO on), matching every other
+    // env-gated flag in this class defaulting to "off/normal behavior
+    // unless explicitly requested."
+    bool ssaoDisabled_ = false;
+
+    // Phase 13f: set from ENGINE_SSAO_DEBUG -- true makes the final
+    // postprocess pass show ssaoRaw_ (SSAO's raw, pre-blur occlusion buffer)
+    // directly instead of the ordinarily-tonemapped scene, so a headless
+    // screenshot can verify the occlusion term's own noise/halo/banding
+    // characteristics in isolation -- see postprocess.frag's own Phase 13f
+    // comment. Same getenv-gated pattern as cameraDemoMode_/
+    // clusterDebugMode_ above.
+    bool ssaoDebugMode_ = false;
 };
 
 }  // namespace engine

@@ -77,6 +77,26 @@ uniform vec2 uShadowMapTexelSize;
 uniform samplerCube uIrradianceMap;
 uniform samplerCube uPrefilterMap;
 uniform sampler2D uBrdfLUT;
+
+// Phase 13f: screen-space ambient occlusion -- see assets/shaders/ssao.frag/
+// ssao_blur.frag and application.cpp's Phase 13f render() additions. A
+// per-pixel, geometry-derived occlusion factor (1.0 = fully open, 0.0 =
+// fully occluded) sampled at this fragment's own screen position
+// (gl_FragCoord.xy / uScreenSize -- uScreenSize already exists below for
+// Phase 13d's clustered-lighting tile lookup) and multiplied into the
+// ambient term below, alongside (not instead of) uAO/the ORM map's own
+// material-authored AO above: uAO represents baked-in per-surface detail a
+// texture author chose (independent of any other geometry in the scene),
+// while this SSAO term represents *this frame's* actual nearby geometry
+// blocking ambient light (a box sitting on a table darkens the contact
+// crease between them regardless of either surface's own material AO) --
+// the standard practice is to multiply both together since they model two
+// different, independent sources of the same "how occluded is ambient light
+// here" question. uSSAOEnabled (see application.cpp's ENGINE_SSAO_DISABLE)
+// lets a headless run compare this shader's output with SSAO's exact
+// contribution isolated versus forced off, without needing a second build.
+uniform sampler2D uSSAOMap;
+uniform int uSSAOEnabled;
 // kPrefilterMipLevels - 1 (see IBLProbe::kPrefilterMipLevels) -- the highest
 // valid mip index of uPrefilterMap, i.e. the roughness-1.0 mip. Kept in sync
 // with that constant by hand (no shared GLSL/C++ constant crosses this
@@ -474,7 +494,12 @@ void main() {
     vec2 envBRDF = texture(uBrdfLUT, vec2(max(dot(N, V), 0.0), roughness)).rg;
     vec3 specularIBL = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
 
-    vec3 ambient = (kD * diffuseIBL + specularIBL) * ao;
+    // Phase 13f: screen-space AO, sampled at this fragment's own screen
+    // position (the same gl_FragCoord/uScreenSize UV computeClusterIndex()
+    // above already uses) and multiplied in alongside the material's own
+    // scalar/ORM-map AO -- see uSSAOMap's own comment above for why both.
+    float ssao = uSSAOEnabled != 0 ? texture(uSSAOMap, gl_FragCoord.xy / uScreenSize).r : 1.0;
+    vec3 ambient = (kD * diffuseIBL + specularIBL) * ao * ssao;
 
     vec3 finalColor = ambient + Lo;
 

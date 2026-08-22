@@ -142,6 +142,7 @@ add_executable(engine_app
     src/paths.cpp
     src/compute_shader.cpp
     src/cluster_light_culler.cpp
+    src/ssao.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

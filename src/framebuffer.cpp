@@ -42,7 +42,7 @@ int clampMultisampleCount(int requestedSamples) {
 
 }  // namespace
 
-Framebuffer::Framebuffer(int width, int height, int samples) : width_(width), height_(height) {
+Framebuffer::Framebuffer(int width, int height, int samples, bool depthAsTexture) : width_(width), height_(height) {
     // samples <= 1 is this class's original single-sample behavior (every
     // pre-existing call site -- brightFramebuffer_/pingpongFramebuffer0_/1_'s
     // bloom targets -- passes no argument here at all, defaulting to 0);
@@ -54,6 +54,16 @@ Framebuffer::Framebuffer(int width, int height, int samples) : width_(width), he
     const bool wantsMultisample = samples > 1;
     if (wantsMultisample) {
         samples_ = clampMultisampleCount(samples);
+    }
+
+    // Phase 13f: see this class's own constructor doc comment for why this
+    // combination is refused rather than silently doing something weaker
+    // (e.g. quietly falling back to a renderbuffer) -- nothing in this
+    // engine asks for it, and a multisample depth texture would need
+    // sampler2DMS handling nothing downstream implements.
+    if (wantsMultisample && depthAsTexture) {
+        LOG_ERROR("Framebuffer: depthAsTexture is not supported together with multisampling");
+        throw std::runtime_error("Framebuffer: depthAsTexture is not supported together with multisampling");
     }
 
     if (wantsMultisample) {
@@ -101,7 +111,7 @@ Framebuffer::Framebuffer(int width, int height, int samples) : width_(width), he
         GL_CHECK(glBindTexture(GL_TEXTURE_2D, 0));
     }
 
-    // Depth attachment: a renderbuffer, not a texture -- nothing needs to
+    // Depth attachment: a renderbuffer by default -- nothing needs to
     // *sample* this target's depth the way the main pass samples
     // ShadowMap's depth texture (that's the shadow map's own, separate
     // depth texture), so GL's cheaper write-only renderbuffer attachment is
@@ -109,22 +119,49 @@ Framebuffer::Framebuffer(int width, int height, int samples) : width_(width), he
     // uses glRenderbufferStorageMultisample with the exact same samples_
     // the color texture above was just allocated with -- GL requires every
     // attachment on one FBO to share one sample count.
-    GL_CHECK(glGenRenderbuffers(1, &depthRenderbuffer_));
-    GL_CHECK(glBindRenderbuffer(GL_RENDERBUFFER, depthRenderbuffer_));
-    if (wantsMultisample) {
-        GL_CHECK(glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples_, GL_DEPTH_COMPONENT24, width_, height_));
+    //
+    // Phase 13f: depthAsTexture (never combined with wantsMultisample -- see
+    // the constructor's own guard above) instead allocates a real
+    // GL_TEXTURE_2D depth attachment, same GL_DEPTH_COMPONENT24 storage
+    // format, filtering/wrap parameters mirroring ShadowMap's own depth
+    // texture (GL_NEAREST -- a depth buffer's own device-space values should
+    // never be blended together by linear filtering; GL_CLAMP_TO_EDGE --
+    // this engine's fullscreen SSAO passes never sample outside [0,1]
+    // texture space either) -- see SSAO's own comment in application.cpp for
+    // why this Framebuffer needs a samplable depth this phase.
+    if (depthAsTexture) {
+        GL_CHECK(glGenTextures(1, &depthTexture_));
+        GL_CHECK(glBindTexture(GL_TEXTURE_2D, depthTexture_));
+        GL_CHECK(glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width_, height_, 0, GL_DEPTH_COMPONENT,
+                               GL_FLOAT, nullptr));
+        GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        GL_CHECK(glBindTexture(GL_TEXTURE_2D, 0));
     } else {
-        GL_CHECK(glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width_, height_));
+        GL_CHECK(glGenRenderbuffers(1, &depthRenderbuffer_));
+        GL_CHECK(glBindRenderbuffer(GL_RENDERBUFFER, depthRenderbuffer_));
+        if (wantsMultisample) {
+            GL_CHECK(
+                glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples_, GL_DEPTH_COMPONENT24, width_, height_));
+        } else {
+            GL_CHECK(glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width_, height_));
+        }
+        GL_CHECK(glBindRenderbuffer(GL_RENDERBUFFER, 0));
     }
-    GL_CHECK(glBindRenderbuffer(GL_RENDERBUFFER, 0));
 
     GL_CHECK(glGenFramebuffers(1, &fbo_));
     GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, fbo_));
     GL_CHECK(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                       wantsMultisample ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D, colorTexture_,
                                       0));
-    GL_CHECK(
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRenderbuffer_));
+    if (depthAsTexture) {
+        GL_CHECK(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTexture_, 0));
+    } else {
+        GL_CHECK(
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRenderbuffer_));
+    }
 
     const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
@@ -132,16 +169,19 @@ Framebuffer::Framebuffer(int width, int height, int samples) : width_(width), he
         glDeleteFramebuffers(1, &fbo_);
         glDeleteTextures(1, &colorTexture_);
         glDeleteRenderbuffers(1, &depthRenderbuffer_);
+        glDeleteTextures(1, &depthTexture_);
         fbo_ = 0;
         colorTexture_ = 0;
         depthRenderbuffer_ = 0;
+        depthTexture_ = 0;
         LOG_ERROR("Framebuffer: HDR framebuffer incomplete (status 0x" + std::to_string(status) + ")");
         throw std::runtime_error("Framebuffer: HDR framebuffer incomplete");
     }
 
     LOG_INFO("Framebuffer created: " + std::to_string(width_) + "x" + std::to_string(height_) +
               (wantsMultisample ? (" RGBA16F " + std::to_string(samples_) + "x-multisample color + depth24 target")
-                                 : std::string(" RGBA16F color + depth24 target")));
+                                 : std::string(" RGBA16F color + depth24 target")) +
+              (depthAsTexture ? " (depth as sampled texture)" : ""));
 }
 
 Framebuffer::~Framebuffer() {
@@ -154,18 +194,23 @@ Framebuffer::~Framebuffer() {
     if (depthRenderbuffer_ != 0) {
         glDeleteRenderbuffers(1, &depthRenderbuffer_);
     }
+    if (depthTexture_ != 0) {
+        glDeleteTextures(1, &depthTexture_);
+    }
 }
 
 Framebuffer::Framebuffer(Framebuffer&& other) noexcept
     : fbo_(other.fbo_),
       colorTexture_(other.colorTexture_),
       depthRenderbuffer_(other.depthRenderbuffer_),
+      depthTexture_(other.depthTexture_),
       width_(other.width_),
       height_(other.height_),
       samples_(other.samples_) {
     other.fbo_ = 0;
     other.colorTexture_ = 0;
     other.depthRenderbuffer_ = 0;
+    other.depthTexture_ = 0;
     other.width_ = 0;
     other.height_ = 0;
     other.samples_ = 0;
@@ -182,10 +227,14 @@ Framebuffer& Framebuffer::operator=(Framebuffer&& other) noexcept {
         if (depthRenderbuffer_ != 0) {
             glDeleteRenderbuffers(1, &depthRenderbuffer_);
         }
+        if (depthTexture_ != 0) {
+            glDeleteTextures(1, &depthTexture_);
+        }
 
         fbo_ = other.fbo_;
         colorTexture_ = other.colorTexture_;
         depthRenderbuffer_ = other.depthRenderbuffer_;
+        depthTexture_ = other.depthTexture_;
         width_ = other.width_;
         height_ = other.height_;
         samples_ = other.samples_;
@@ -193,6 +242,7 @@ Framebuffer& Framebuffer::operator=(Framebuffer&& other) noexcept {
         other.fbo_ = 0;
         other.colorTexture_ = 0;
         other.depthRenderbuffer_ = 0;
+        other.depthTexture_ = 0;
         other.width_ = 0;
         other.height_ = 0;
         other.samples_ = 0;
@@ -213,6 +263,15 @@ void Framebuffer::bindColorTexture(unsigned int unit) const {
     // sampler2D.
     GL_CHECK(glActiveTexture(GL_TEXTURE0 + unit));
     GL_CHECK(glBindTexture(GL_TEXTURE_2D, colorTexture_));
+}
+
+void Framebuffer::bindDepthTexture(unsigned int unit) const {
+    // Precondition (see this method's header comment): only meaningful on
+    // an instance constructed with depthAsTexture = true, where
+    // depthTexture_ is the live handle -- depthRenderbuffer_ (every other
+    // instance) is not a texture and was never meant to be sampled.
+    GL_CHECK(glActiveTexture(GL_TEXTURE0 + unit));
+    GL_CHECK(glBindTexture(GL_TEXTURE_2D, depthTexture_));
 }
 
 void Framebuffer::resolveTo(const Framebuffer& target) const {

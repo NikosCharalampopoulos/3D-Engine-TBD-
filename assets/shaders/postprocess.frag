@@ -61,7 +61,25 @@ uniform float uExposure;
 // bloom strength.
 uniform float uBloomStrength;
 
+// Phase 13f: ENGINE_SSAO_DEBUG=1 (see application.cpp) -- when set, this
+// pass shows SSAO's own raw (pre-blur) occlusion buffer directly, in place
+// of the ordinarily-tonemapped scene, so a headless screenshot can verify
+// the occlusion term's own noise/banding/halo characteristics in isolation
+// rather than only its (deliberately subtle) blended contribution to the
+// final lit image -- the same "debug visualization overrides the normal
+// composite" pattern basic.frag/pbr.frag's own uClusterDebug already uses,
+// just at the postprocess stage since SSAO's buffer lives at this pass's
+// own resolution, not per-fragment in the main color pass.
+uniform sampler2D uSSAOMap;
+uniform int uSSAODebug;
+
 void main() {
+    if (uSSAODebug != 0) {
+        float ao = texture(uSSAOMap, vTexCoord).r;
+        FragColor = vec4(ao, ao, ao, 1.0);
+        return;
+    }
+
     vec3 hdrColor = texture(uHdrBuffer, vTexCoord).rgb * uExposure;
     vec3 bloomColor = texture(uBloomBuffer, vTexCoord).rgb * uBloomStrength;
     vec3 mapped = (hdrColor + bloomColor) / (hdrColor + bloomColor + vec3(1.0));

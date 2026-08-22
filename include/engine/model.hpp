@@ -129,10 +129,24 @@ public:
     // special case.
     void drawDepthOnly(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
 
+    // Phase 13f: draws every node's mesh geometry with `shader` (expected to
+    // be SSAO's G-buffer shader, see application.cpp's Phase 13f render()
+    // additions and assets/shaders/gbuffer.vert/.frag) uploading each node's
+    // uModel *and* uNormalMatrix -- unlike drawDepthOnly() above, SSAO's
+    // geometry pass needs each fragment's normal (to build its per-pixel
+    // occlusion sample basis), not just its depth -- but still no
+    // Material::bind(), since no material property (texture, tint,
+    // shininess) is ever read by that pass either. A third entry point
+    // rather than a flag on drawDepthOnly() or draw(), matching this class's
+    // existing "one dedicated method per pass's exact uniform contract"
+    // convention.
+    void drawNormalDepth(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
+
 private:
     void drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform, const Frustum* frustum,
                   CullStats* cullStats) const;
     void drawNodeDepthOnly(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
+    void drawNodeNormalDepth(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
 
     std::vector<Mesh> meshes_;
     std::vector<Material> materials_;

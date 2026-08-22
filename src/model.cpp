@@ -372,4 +372,32 @@ void Model::drawNodeDepthOnly(Shader& shader, const ModelNode& node, const glm::
     }
 }
 
+void Model::drawNormalDepth(Shader& shader, const glm::mat4& rootTransform) const {
+    drawNodeNormalDepth(shader, root_, rootTransform);
+}
+
+void Model::drawNodeNormalDepth(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const {
+    const glm::mat4 worldTransform = parentTransform * node.localTransform;
+
+    if (!node.meshIndices.empty()) {
+        // Same non-shortcut normal-matrix computation drawNode()/
+        // Application::render() use elsewhere -- see drawNode()'s own
+        // comment on why mat3(worldTransform) directly would be wrong under
+        // non-uniform scale. No Material::bind(): SSAO's G-buffer pass (see
+        // gbuffer.frag) only ever writes a view-space normal + depth, never
+        // a material's texture/tint/shininess.
+        const glm::mat3 normalMatrix = glm::inverseTranspose(glm::mat3(worldTransform));
+        shader.setMat4("uModel", worldTransform);
+        shader.setMat3("uNormalMatrix", normalMatrix);
+        for (const std::size_t meshIndex : node.meshIndices) {
+            meshes_[meshIndex].bind();
+            meshes_[meshIndex].draw();
+        }
+    }
+
+    for (const ModelNode& child : node.children) {
+        drawNodeNormalDepth(shader, child, worldTransform);
+    }
+}
+
 }  // namespace engine

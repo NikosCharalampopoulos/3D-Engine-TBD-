@@ -68,6 +68,16 @@ const std::string kPostProcessFragmentShaderPath = resolveAssetPath("assets/shad
 // kBrdfLutFragmentShaderPath below already does for Phase 10's BRDF LUT.
 const std::string kBloomExtractFragmentShaderPath = resolveAssetPath("assets/shaders/bloom_extract.frag");
 const std::string kBlurFragmentShaderPath = resolveAssetPath("assets/shaders/blur.frag");
+// Phase 13f: SSAO's three passes -- gbufferShader_ pairs its own dedicated
+// vertex stage (gbuffer.vert, since it needs a view-space normal varying
+// none of this engine's other vertex shaders compute) with gbuffer.frag;
+// ssaoShader_/ssaoBlurShader_ both pair the existing fullscreen-quad
+// postprocess.vert with their own fragment shaders, like every other
+// screen-space pass in this engine.
+const std::string kGBufferVertexShaderPath = resolveAssetPath("assets/shaders/gbuffer.vert");
+const std::string kGBufferFragmentShaderPath = resolveAssetPath("assets/shaders/gbuffer.frag");
+const std::string kSSAOFragmentShaderPath = resolveAssetPath("assets/shaders/ssao.frag");
+const std::string kSSAOBlurFragmentShaderPath = resolveAssetPath("assets/shaders/ssao_blur.frag");
 // Phase 9: the PBR pass's own program (see application.hpp's Phase 9 note
 // and assets/shaders/pbr.vert/pbr.frag).
 const std::string kPBRVertexShaderPath = resolveAssetPath("assets/shaders/pbr.vert");
@@ -245,6 +255,70 @@ constexpr unsigned int kShadowMapTextureUnitBase = 3;
 constexpr unsigned int kIrradianceMapTextureUnit = 6;
 constexpr unsigned int kPrefilterMapTextureUnit = 7;
 constexpr unsigned int kBrdfLutTextureUnit = 8;
+// Phase 13f: ssaoBlurred_'s own fixed texture unit, bound once per frame
+// onto both shader_ and pbrShader_ (see render()) -- the next free unit
+// after the three IBL maps above and the (up to) three shadow-cascade units
+// (kShadowMapTextureUnitBase..+2, i.e. 3/4/5).
+constexpr unsigned int kSSAOMapTextureUnit = 9;
+
+// Phase 13f: SSAO tuning constants (see ssao.hpp/ssao.cpp and
+// assets/shaders/ssao.frag/ssao_blur.frag).
+//
+// kSSAOKernelSize: hemisphere sample count -- 32 sits at the low end of this
+// technique's usual 32-64 range (LearnOpenGL's own reference implementation
+// uses 64), chosen here because this scene's raw kernel-sampled noise is
+// smoothed by the blur pass immediately afterward anyway (see
+// kSSAONoiseDim below) and this is a small hand-authored scene running on a
+// software rasterizer under headless verification, not a AAA production
+// title -- doubling the sample count would cost roughly twice this pass's
+// runtime for a subtlety difference this scene's own screenshot-level
+// verification wouldn't meaningfully show.
+constexpr int kSSAOKernelSize = 32;
+// kSSAODownsampleFactor: ssaoGBuffer_/ssaoRaw_/ssaoBlurred_ are all sized at
+// the window's real framebuffer resolution divided by this -- the same
+// "soft/low-frequency effect, so downsample it" tradeoff bloom's own
+// kBloomDownsampleFactor already makes (see that constant's comment), just
+// applied here because this technique's per-pixel cost (kSSAOKernelSize
+// texture fetches/pixel in the kernel pass alone) is steep enough on this
+// project's software-rasterizer (llvmpipe) headless verification target to
+// matter for wall-clock run time, not because SSAO is conceptually as soft
+// as bloom's own glow -- a half-res AO buffer bilinearly upsampled back onto
+// full-res geometry (Framebuffer's own GL_LINEAR minification/magnification,
+// see framebuffer.cpp) reads as indistinguishable from full-res at this
+// scene's contact-crease scale, confirmed by the screenshot/pixel-sample
+// verification this phase's own review requires.
+constexpr int kSSAODownsampleFactor = 2;
+// kSSAONoiseDim: the tileable rotation-noise texture's width/height (a
+// square NxN texture) -- 4 is the standard size this technique's reference
+// implementations use, small enough to tile many times across an
+// 800x600-class window (a bigger noise texture would mean visibly fewer,
+// more widely-spaced independent per-pixel rotations) while still being
+// large enough that ssao_blur.frag's own NxN box blur (radius
+// kSSAONoiseDim / 2, see render()) meaningfully smooths the noise this
+// texture's own periodicity introduces.
+constexpr int kSSAONoiseDim = 4;
+// kSSAORadius/kSSAOBias: view-space units -- this engine's own hand-
+// authored scene sits at roughly a 1-world-unit scale (the PBR sphere grid's
+// own radius is 0.14, see kSphereRadius; the ground plane's half-extent is
+// 2.6, see kGroundHalfExtent), noticeably smaller than the "meters, human-
+// scale rooms" scene LearnOpenGL's own reference SSAO radius (0.5) assumes,
+// so both constants are tuned down from that reference to avoid the classic
+// "radius too large for the scene" failure mode: a giant sampling
+// hemisphere relative to the sphere grid's own small radius would sample
+// well past each sphere's own silhouette into open air/the ground plane
+// behind it, producing a visible dark halo around every sphere instead of
+// contact-only occlusion. 0.35 keeps the hemisphere comparable to (a bit
+// larger than) the sphere grid's own radius -- enough to reach the
+// sphere-to-ground contact crease and the box-on-table contact area without
+// reaching all the way past an object's own silhouette into unrelated
+// background geometry. kSSAOBias (a small constant offset in the occlusion
+// depth comparison, see ssao.frag) is the standard self-acne guard: without
+// it, a perfectly flat surface's own depth-buffer quantization noise can
+// register as self-occlusion (every kernel sample landing "behind" the very
+// surface it started on), producing a visible fine speckle pattern across
+// flat surfaces that have no actual nearby occluder at all.
+constexpr float kSSAORadius = 0.35f;
+constexpr float kSSAOBias = 0.015f;
 
 // Phase 4's directional light: a fixed "sun" direction/color, not yet
 // animated or configurable -- proving the Phong math works is this phase's
@@ -745,6 +819,20 @@ bool clusterDebugModeFromEnv() {
 // in git history (see this project's established "keep the old path as
 // reference" convention, e.g. Material/basic.frag alongside
 // PBRMaterial/pbr.frag since Phase 9).
+// Phase 13f: same getenv-gated-behavior pattern as every env var above --
+// see ssaoDisabled_'s own application.hpp comment for what this flag does.
+bool ssaoDisabledFromEnv() {
+    const char* value = std::getenv("ENGINE_SSAO_DISABLE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+// Phase 13f: same getenv-gated-behavior pattern -- see ssaoDebugMode_'s own
+// application.hpp comment for what this flag does.
+bool ssaoDebugModeFromEnv() {
+    const char* value = std::getenv("ENGINE_SSAO_DEBUG");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 bool proceduralSkyboxFromEnv() {
     const char* value = std::getenv("ENGINE_USE_PROCEDURAL_SKYBOX");
     return value != nullptr && *value != '\0' && std::string(value) != "0";
@@ -802,6 +890,11 @@ Application::Application(int width, int height, const std::string& title, std::u
       postProcessShader_(resources_.getShader(kPostProcessVertexShaderPath, kPostProcessFragmentShaderPath)),
       bloomExtractShader_(resources_.getShader(kPostProcessVertexShaderPath, kBloomExtractFragmentShaderPath)),
       blurShader_(resources_.getShader(kPostProcessVertexShaderPath, kBlurFragmentShaderPath)),
+      // Phase 13f: SSAO's three programs -- see this class's own Phase 13f
+      // header comment.
+      gbufferShader_(resources_.getShader(kGBufferVertexShaderPath, kGBufferFragmentShaderPath)),
+      ssaoShader_(resources_.getShader(kPostProcessVertexShaderPath, kSSAOFragmentShaderPath)),
+      ssaoBlurShader_(resources_.getShader(kPostProcessVertexShaderPath, kSSAOBlurFragmentShaderPath)),
       pbrShader_(resources_.getShader(kPBRVertexShaderPath, kPBRFragmentShaderPath)),
       irradianceShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kIrradianceFragmentShaderPath)),
       prefilterShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kPrefilterFragmentShaderPath)),
@@ -856,6 +949,21 @@ Application::Application(int width, int height, const std::string& title, std::u
                              window_.getSize().second / kBloomDownsampleFactor),
       pingpongFramebuffer1_(window_.getSize().first / kBloomDownsampleFactor,
                              window_.getSize().second / kBloomDownsampleFactor),
+      // Phase 13f: SSAO's own three render targets, all sized at
+      // 1/kSSAODownsampleFactor of the window's real framebuffer resolution
+      // -- see that constant's own comment for why. Only ssaoGBuffer_ needs
+      // depthAsTexture = true (see framebuffer.hpp); ssaoRaw_/ssaoBlurred_
+      // are ordinary single-sample Framebuffers, their own (harmless,
+      // unused) depth renderbuffer the same accepted waste
+      // brightFramebuffer_/pingpongFramebuffer0_/1_ above already carry.
+      ssaoGBuffer_(window_.getSize().first / kSSAODownsampleFactor,
+                   window_.getSize().second / kSSAODownsampleFactor, /*samples=*/0, /*depthAsTexture=*/true),
+      ssaoRaw_(window_.getSize().first / kSSAODownsampleFactor, window_.getSize().second / kSSAODownsampleFactor),
+      ssaoBlurred_(window_.getSize().first / kSSAODownsampleFactor,
+                   window_.getSize().second / kSSAODownsampleFactor),
+      // Phase 13f: SSAO's hemisphere kernel + tileable rotation-noise
+      // texture -- see ssao.hpp.
+      ssaoKernel_(kSSAOKernelSize, kSSAONoiseDim),
       // Phase 13e: built from the new HDRI by default, or the old 6-PNG
       // procedural cubemap under ENGINE_USE_PROCEDURAL_SKYBOX -- see
       // buildSkybox() above. Must come after equirectToCubemapShader_
@@ -884,7 +992,9 @@ Application::Application(int width, int height, const std::string& title, std::u
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()),
       frustumCullDemoMode_(frustumCullDemoModeFromEnv()),
-      clusterDebugMode_(clusterDebugModeFromEnv()) {
+      clusterDebugMode_(clusterDebugModeFromEnv()),
+      ssaoDisabled_(ssaoDisabledFromEnv()),
+      ssaoDebugMode_(ssaoDebugModeFromEnv()) {
     // No depth buffer testing existed in Phase 1 (nothing but a flat clear
     // needed it); real 3D geometry does, so faces occlude each other
     // correctly instead of painting in draw-call order.
@@ -919,6 +1029,21 @@ Application::Application(int width, int height, const std::string& title, std::u
         const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
         clusterLightCuller_.computeClusterAABBs(
             projection, camera_.nearPlane(), glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
+    }
+
+    // Phase 13f: ssaoKernel_'s hemisphere samples are fixed for this
+    // engine's whole run (see ssao.hpp/ssao.cpp) -- uploaded once here,
+    // rather than every frame in renderSSAO(), since GL uniform state
+    // persists on a program object across frames (the same reasoning
+    // render()'s own per-frame uniform uploads rely on, just applied to a
+    // uniform that -- unlike view/projection/lighting -- never actually
+    // changes after this constructor runs).
+    {
+        ssaoShader_->use();
+        const std::vector<glm::vec3>& kernel = ssaoKernel_.samples();
+        for (std::size_t i = 0; i < kernel.size(); ++i) {
+            ssaoShader_->setVec3("uSamples[" + std::to_string(i) + "]", kernel[i]);
+        }
     }
 
     // The scene is one Entity wrapping the same Phase 5 model
@@ -1163,6 +1288,106 @@ void Application::renderShadowPass(const std::array<glm::mat4, kCascadeCount>& l
     GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
 }
 
+void Application::renderSSAO(const glm::mat4& view, const glm::mat4& projection) {
+    // ssaoGBuffer_/ssaoRaw_/ssaoBlurred_ are all the same size (see this
+    // class's Phase 13f header comment / kSSAODownsampleFactor's own
+    // comment) -- that's the right size for uNoiseScale/uTexelSize below,
+    // read from ssaoGBuffer_ itself (Framebuffer::width()/height()) rather
+    // than re-deriving window_.getSize() / kSSAODownsampleFactor by hand.
+    const int ssaoWidth = ssaoGBuffer_.width();
+    const int ssaoHeight = ssaoGBuffer_.height();
+
+    // 1) Geometry pre-pass: view-space normal + a real depth texture, single
+    // sample, at ssaoGBuffer_'s own (downsampled) resolution -- see
+    // kSSAODownsampleFactor's own comment for why not the window's full
+    // resolution. Everything the main color pass draws is drawn again here
+    // -- entities_, the ground plane, the PBR sphere grid -- exactly the
+    // same "every drawable needs to appear in this auxiliary pass too"
+    // situation renderShadowPass() above already has, just with a
+    // normal+depth shader instead of a depth-only one.
+    ssaoGBuffer_.bindForWriting();
+    // Color-clears to a flat +Z-ish normal rather than black: any pixel this
+    // pass's geometry never covers (i.e. the skybox/background, drawn by a
+    // completely separate pass -- see render()) would otherwise read back
+    // as a zero vector, which normalize() in ssao.frag would turn into NaN.
+    // In practice ssao.frag never reaches that branch for those pixels at
+    // all (its own depth >= 1.0 background check returns early first -- see
+    // that shader), but clearing to a valid unit vector here costs nothing
+    // and removes any dependence on that ordering staying that way.
+    GL_CHECK(glClearColor(0.0f, 0.0f, 1.0f, 1.0f));
+    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+
+    gbufferShader_->use();
+    gbufferShader_->setMat4("uView", view);
+    gbufferShader_->setMat4("uProjection", projection);
+
+    for (const Entity& entity : entities_) {
+        if (entity.model()) {
+            entity.model()->drawNormalDepth(*gbufferShader_, entity.transform.getModelMatrix());
+        }
+    }
+
+    {
+        // The ground plane: identity model matrix, same as its main-pass
+        // draw in render() below.
+        const glm::mat4 groundModel(1.0f);
+        const glm::mat3 groundNormalMatrix = glm::inverseTranspose(glm::mat3(groundModel));
+        gbufferShader_->setMat4("uModel", groundModel);
+        gbufferShader_->setMat3("uNormalMatrix", groundNormalMatrix);
+        groundMesh_.bind();
+        groundMesh_.draw();
+    }
+
+    sphereMesh_.bind();
+    for (const SphereInstance& instance : sphereInstances_) {
+        const glm::mat4 sphereModel = instance.transform.getModelMatrix();
+        const glm::mat3 sphereNormalMatrix = glm::inverseTranspose(glm::mat3(sphereModel));
+        gbufferShader_->setMat4("uModel", sphereModel);
+        gbufferShader_->setMat3("uNormalMatrix", sphereNormalMatrix);
+        sphereMesh_.draw();
+    }
+
+    // 2) Kernel pass: samples ssaoGBuffer_'s normal + depth, writes a raw,
+    // per-pixel-noisy occlusion factor into ssaoRaw_ -- see ssao.frag.
+    ssaoRaw_.bindForWriting();
+    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+
+    ssaoShader_->use();
+    ssaoGBuffer_.bindColorTexture(0);
+    ssaoShader_->setInt("uNormalMap", 0);
+    ssaoGBuffer_.bindDepthTexture(1);
+    ssaoShader_->setInt("uDepthMap", 1);
+    ssaoKernel_.bindNoiseTexture(2);
+    ssaoShader_->setInt("uNoiseMap", 2);
+    ssaoShader_->setMat4("uProjection", projection);
+    ssaoShader_->setMat4("uInvProjection", glm::inverse(projection));
+    // Tiles ssaoKernel_'s own kSSAONoiseDim x kSSAONoiseDim noise texture
+    // across the SSAO kernel pass's own (downsampled) target -- see
+    // ssao.frag's uNoiseMap sampling comment.
+    ssaoShader_->setVec2("uNoiseScale", glm::vec2(static_cast<float>(ssaoWidth) / static_cast<float>(kSSAONoiseDim),
+                                                    static_cast<float>(ssaoHeight) / static_cast<float>(kSSAONoiseDim)));
+    ssaoShader_->setFloat("uRadius", kSSAORadius);
+    ssaoShader_->setFloat("uBias", kSSAOBias);
+    postProcessQuad_.bind();
+    postProcessQuad_.draw();
+
+    // 3) Blur pass: smooths ssaoRaw_'s per-pixel noise into ssaoBlurred_ --
+    // what basic.frag/pbr.frag actually sample while shading (see render()).
+    ssaoBlurred_.bindForWriting();
+    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+
+    ssaoBlurShader_->use();
+    ssaoRaw_.bindColorTexture(0);
+    ssaoBlurShader_->setInt("uSSAOMap", 0);
+    ssaoBlurShader_->setVec2("uTexelSize",
+                              glm::vec2(1.0f / static_cast<float>(ssaoWidth), 1.0f / static_cast<float>(ssaoHeight)));
+    // Half the noise texture's own tile size -- see ssao_blur.frag's own
+    // comment on why this exactly cancels that texture's periodicity.
+    ssaoBlurShader_->setInt("uBlurRadius", kSSAONoiseDim / 2);
+    postProcessQuad_.bind();
+    postProcessQuad_.draw();
+}
+
 void Application::render() {
     const auto [fbWidth, fbHeight] = window_.getSize();
     const float aspect = fbHeight != 0 ? static_cast<float>(fbWidth) / static_cast<float>(fbHeight) : 1.0f;
@@ -1187,6 +1412,22 @@ void Application::render() {
     renderShadowPass(lightSpaceMatrices);
     GL_CHECK(glViewport(0, 0, fbWidth, fbHeight));
 
+    const glm::mat4 view = camera_.getViewMatrix();
+    const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
+
+    // Phase 13f: SSAO's own three screen-space passes -- run here (after the
+    // shadow pass, before the main color pass) so shader_/pbrShader_ below
+    // have a finished, blurred occlusion texture (ssaoBlurred_) ready to
+    // sample while shading the scene. Needs this frame's own view/projection
+    // (just moved above, ahead of where they used to be computed) the same
+    // way the shadow pass above needs this frame's own light-space matrices.
+    // renderSSAO() leaves the last-bound FBO pointed at ssaoBlurred_ (not
+    // the window) and the viewport at ssaoBlurred_'s own (downsampled, see
+    // kSSAODownsampleFactor) resolution -- hdrFramebuffer_.bindForWriting()
+    // right below rebinds both correctly before anything draws into the
+    // window's own framebuffer chain.
+    renderSSAO(view, projection);
+
     // Phase 7b: the whole lit scene (+ skybox) renders into hdrFramebuffer_
     // -- a floating-point off-screen target -- instead of straight to the
     // default framebuffer; see render()'s tail below for the fullscreen
@@ -1201,9 +1442,6 @@ void Application::render() {
     // color.
     GL_CHECK(glClearColor(kClearR, kClearG, kClearB, kClearA));
     GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
-
-    const glm::mat4 view = camera_.getViewMatrix();
-    const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
 
     // Phase 13d: re-cull every light against every cluster's (already-built,
     // see the constructor) AABB using this frame's own view matrix --
@@ -1274,6 +1512,18 @@ void Application::render() {
     shader_->setFloat("uClusterNearPlane", camera_.nearPlane());
     shader_->setFloat("uClusterFarPlane", ClusterLightCuller::kClusterFarDistance);
     shader_->setInt("uClusterDebug", clusterDebugMode_ ? 1 : 0);
+
+    // Phase 13f: SSAO's final blurred occlusion texture -- bound once here,
+    // at a fixed unit both shader_ (this upload) and pbrShader_ (its own
+    // identical upload below) point their own uSSAOMap sampler at, since
+    // texture-unit bindings are global GL state, not per-program (same
+    // reasoning the shadow cascades'/IBL maps' own single-bind-per-frame
+    // uploads above already rely on). ssaoDisabled_ (ENGINE_SSAO_DISABLE)
+    // forces uSSAOEnabled to 0 instead, making both shaders fall back to an
+    // unconditional ssao = 1.0 -- see basic.frag/pbr.frag's own comment.
+    ssaoBlurred_.bindColorTexture(kSSAOMapTextureUnit);
+    shader_->setInt("uSSAOMap", static_cast<int>(kSSAOMapTextureUnit));
+    shader_->setInt("uSSAOEnabled", ssaoDisabled_ ? 0 : 1);
 
     // Phase 7a: point/spot lights, uploaded as a live count + a fixed-size
     // array each frame (see basic.frag's uNumPointLights/uPointLights and
@@ -1379,6 +1629,11 @@ void Application::render() {
     pbrShader_->setFloat("uClusterNearPlane", camera_.nearPlane());
     pbrShader_->setFloat("uClusterFarPlane", ClusterLightCuller::kClusterFarDistance);
     pbrShader_->setInt("uClusterDebug", clusterDebugMode_ ? 1 : 0);
+
+    // Phase 13f: same texture unit shader_'s own upload above already bound
+    // ssaoBlurred_ to -- see that upload's comment.
+    pbrShader_->setInt("uSSAOMap", static_cast<int>(kSSAOMapTextureUnit));
+    pbrShader_->setInt("uSSAOEnabled", ssaoDisabled_ ? 0 : 1);
 
     pbrShader_->setInt("uNumPointLights", static_cast<int>(kPointLights.size()));
     for (std::size_t i = 0; i < kPointLights.size(); ++i) {
@@ -1552,6 +1807,15 @@ void Application::render() {
     postProcessShader_->setInt("uBloomBuffer", 1);
     postProcessShader_->setFloat("uBloomStrength", kBloomStrength);
     postProcessShader_->setFloat("uExposure", kPostProcessExposure);
+    // Phase 13f: ENGINE_SSAO_DEBUG -- see postprocess.frag's own comment.
+    // ssaoRaw_ (not ssaoBlurred_) is what this shows: the pre-blur buffer is
+    // the more useful one to inspect for this technique's classic failure
+    // modes (per-pixel noise/banding from the rotation-noise tiling) since
+    // the blur pass exists specifically to hide those in the final
+    // composited image.
+    ssaoRaw_.bindColorTexture(2);
+    postProcessShader_->setInt("uSSAOMap", 2);
+    postProcessShader_->setInt("uSSAODebug", ssaoDebugMode_ ? 1 : 0);
     postProcessQuad_.bind();
     postProcessQuad_.draw();
 }
