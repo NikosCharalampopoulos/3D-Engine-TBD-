@@ -183,9 +183,38 @@
 //     kBloomDownsampleFactor) -- bloom is a soft, low-frequency glow, so a
 //     half-res blur costs a quarter the per-pixel work of a full-res one
 //     with no visible loss of quality.
+//
+// Phase 13c replaces Phase 7a/7b's single whole-scene shadow map with
+// Cascaded Shadow Maps (CSM), without changing the shadow-casting light
+// itself (still just the one directional light) or the overall render()/
+// renderShadowPass() shape:
+//   - kCascadeCount (3) separate ShadowMap instances (shadowCascades_
+//     below), each covering a different depth range ("cascade") of the
+//     camera's own view frustum -- see computeCascades() in application.cpp
+//     for the split-depth scheme (a blend of logarithmic and uniform
+//     splits, the standard "practical split scheme") and per-cascade
+//     frustum-fitting (unproject that depth range's 8 frustum corners via
+//     Camera::getProjectionMatrix()'s near/far overload + frustum.hpp's
+//     frustumCornersWorldSpace(), then fit a tight orthographic projection
+//     around their light-space bounding box). Replacing the old single
+//     fixed-size ortho projection covering the *whole* scene, this gives
+//     cascades near the camera a much smaller world-space area per
+//     shadow-map texel (i.e. higher effective shadow resolution close up)
+//     without needing a bigger shadow map.
+//   - renderShadowPass() now depth-renders the whole scene once per cascade
+//     (kCascadeCount total passes, one full scene draw each) rather than
+//     once total.
+//   - basic.frag/pbr.frag each pick which cascade a given fragment belongs
+//     to (comparing its view-space depth, a new varying, against the
+//     cascades' own split depths) and sample that cascade's own shadow map
+//     with its own light-space matrix, blending across a small transition
+//     band near each split rather than a hard cutoff (see those shaders'
+//     own Phase 13c comments) to avoid a visible seam where shadow
+//     resolution/aliasing changes abruptly between cascades.
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -223,6 +252,14 @@ public:
 
     void run();
 
+    // Phase 13c: number of cascades in the CSM implementation (see this
+    // header's own Phase 13c comment and application.cpp's computeCascades()
+    // for why 3). Declared here, not only as an application.cpp-local
+    // constant, because it also sizes shadowCascades_ below and the
+    // std::array parameter renderShadowPass() takes -- both declared in this
+    // header, so both need it visible here too.
+    static constexpr int kCascadeCount = 3;
+
 private:
     void update(double deltaTime, const InputState& input);
     void render();
@@ -234,7 +271,11 @@ private:
     // binding) before returning, since ShadowMap::bindForWriting() points
     // the viewport at the shadow map's own (typically much smaller)
     // resolution.
-    void renderShadowPass(const glm::mat4& lightSpaceMatrix);
+    //
+    // Phase 13c: now renders the whole scene once per cascade (into
+    // shadowCascades_[i], using lightSpaceMatrices[i]) instead of once
+    // total -- see this header's own Phase 13c comment.
+    void renderShadowPass(const std::array<glm::mat4, kCascadeCount>& lightSpaceMatrices);
 
     // Phase 9: one sphere in the PBR test-grid -- its own placement
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
@@ -318,7 +359,16 @@ private:
     // Phase 7a: the directional light's depth-only render target. Fixed
     // resolution (see application.cpp's kShadowMapWidth/Height), independent
     // of the window's own framebuffer size.
-    ShadowMap shadowMap_;
+    //
+    // Phase 13c: now kCascadeCount (3) separate instances, one per CSM
+    // cascade, rather than one covering the whole scene -- see shadow_map.hpp's
+    // own Phase 13c comment for why N instances rather than one array
+    // texture. All list-initialized together in the constructor's member-
+    // initializer list (each element move-constructed from a temporary
+    // ShadowMap(kShadowMapWidth, kShadowMapHeight), std::array<T, N>'s usual
+    // aggregate-initialization), same "single self-contained initializer"
+    // style the old single shadowMap_ member had.
+    std::array<ShadowMap, kCascadeCount> shadowCascades_;
     // Phase 7b: the off-screen floating-point target render() draws the
     // whole lit scene (+ skybox) into, before postProcessShader_ resolves
     // it to the window -- see framebuffer.hpp. Sized once, from the

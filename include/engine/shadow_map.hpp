@@ -11,6 +11,21 @@
 // class only knows how to do exactly that, the same "just enough structure,
 // no speculative generality" philosophy as Entity/ResourceManager.
 //
+// Phase 13c: Application now constructs kCascadeCount (3) instances of this
+// same class -- one per cascade of its Cascaded Shadow Maps implementation
+// (see application.hpp's Phase 13c comment and computeCascades() in
+// application.cpp) -- rather than this class growing a "how many depth
+// layers" parameter of its own. Each cascade is a genuinely separate
+// depth-only FBO/texture/light-space-matrix/viewport, exactly what this
+// class already models one of; N independent ShadowMap instances (a
+// std::array<ShadowMap, N>) was chosen over adding an internal texture-
+// array/layered-FBO mode to this class because it required no change to
+// ShadowMap itself at all -- simpler and lower-risk than teaching this
+// already-working class a second internal representation, at the cost of N
+// separate texture bindings per frame instead of one array-texture bind (a
+// cost this engine's small cascade count/scene size doesn't make worth
+// paying down).
+//
 // Move-only, same rationale as Texture/Mesh/Shader: the FBO and depth
 // texture are scarce GL handles owned by exactly one ShadowMap.
 

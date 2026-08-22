@@ -24,7 +24,8 @@ in vec3 vNormal;
 in vec3 vFragPos;
 in vec2 vTexCoord;
 in vec3 vTangent;
-in vec4 vFragPosLightSpace;
+// Phase 13c: replaces vFragPosLightSpace -- see basic.vert's comment.
+in float vViewSpaceDepth;
 
 out vec4 FragColor;
 
@@ -42,20 +43,48 @@ uniform int uUseNormalMap;
 // Directional light: uLightDirection points *from* the light *toward* the
 // scene (the usual "sun ray direction" convention), so surfaces are lit
 // along -uLightDirection. This is the one shadow-casting light this phase
-// implements (see uShadowMap/shadowFactor() below).
+// implements (see uShadowMap0/1/2/shadowFactor() below).
 uniform vec3 uLightDirection;
 uniform vec3 uLightColor;
 uniform vec3 uAmbientColor;
 uniform vec3 uViewPos;
 
-// Directional light's shadow map (see engine::ShadowMap) plus the matrix
-// that placed vFragPosLightSpace into that light's clip space (computed
-// per-vertex in basic.vert, not recomputed here).
-uniform sampler2D uShadowMap;
+// Phase 13c: Cascaded Shadow Maps. NUM_CASCADES separate depth maps (see
+// engine::ShadowMap/Application::shadowCascades_), each covering a
+// different depth range of the camera's own view frustum, replace the
+// single whole-scene shadow map Phase 7a/7b used -- see
+// application.cpp's computeCascades() for how each cascade's own light-
+// space matrix/depth range is built. uLightSpaceMatrices[i] is a mat4
+// array (not opaque -- see below), so it can be dynamically indexed by a
+// per-fragment cascade index with no restriction.
+#define NUM_CASCADES 3
+uniform mat4 uLightSpaceMatrices[NUM_CASCADES];
+// The far edge (view-space depth) of cascades 0..NUM_CASCADES-1 -- cascade
+// i covers the depth range (uCascadeSplits[i-1], uCascadeSplits[i]]
+// (cascade 0's own near edge is implicitly the camera's own near plane,
+// never needed here since every visible fragment's depth is already at
+// least that).
+uniform float uCascadeSplits[NUM_CASCADES];
+// GLSL 330 core does NOT guarantee a sampler (an opaque type) array can be
+// indexed by a non-constant, per-fragment-varying expression -- that
+// guarantee only arrives with GL_ARB_gpu_shader5/GLSL 400's "dynamically
+// uniform expression" rules, neither of which this engine's GL 3.3 core
+// target requires or can rely on across drivers. Three separate named
+// samplers plus an explicit branch (sampleCascadeDepth() below) sidesteps
+// the question entirely rather than depending on driver-specific leniency
+// -- unlike uLightSpaceMatrices/uCascadeSplits above (ordinary mat4/float
+// arrays, not opaque types, which GLSL 330 has always allowed dynamic
+// indexing into).
+uniform sampler2D uShadowMap0;
+uniform sampler2D uShadowMap1;
+uniform sampler2D uShadowMap2;
+// All three cascades share one resolution (see application.cpp's
+// kShadowMapWidth/Height), so one texel-size uniform serves all of them.
 // Phase 7b bug-review fix: the shadow map's per-texel size in [0,1]
 // shadow-space units (1.0 / resolution, uploaded from Application -- see
-// ShadowMap's real width/height), used by shadowFactor()'s PCF kernel below
-// to offset its neighboring samples by exactly one texel each step.
+// ShadowMap's real width/height), used by shadowFactorForCascade()'s PCF
+// kernel below to offset its neighboring samples by exactly one texel each
+// step.
 uniform vec2 uShadowMapTexelSize;
 
 #define MAX_POINT_LIGHTS 8
@@ -103,13 +132,27 @@ float attenuationFor(float constant, float linear, float quadratic, float distan
     return 1.0 / (constant + linear * distance + quadratic * distance * distance);
 }
 
-// Directional-light shadow factor: 0.0 = fully lit, 1.0 = fully shadowed.
-// vFragPosLightSpace was computed in basic.vert as uLightSpaceMatrix *
-// worldPos; perspective-dividing by w (always 1 for this phase's
-// orthographic light projection, but doing it anyway keeps this correct
-// even if a later phase swaps in a perspective light projection) and
-// remapping [-1,1] NDC to [0,1] texture space gives the coordinates to look
-// the fragment up in the shadow map at.
+// Fetches cascade `index`'s own depth texture at `uv` -- an explicit branch
+// rather than a dynamically-indexed sampler array, see uShadowMap0/1/2's own
+// comment above for why.
+float sampleCascadeDepth(int index, vec2 uv) {
+    if (index == 0) {
+        return texture(uShadowMap0, uv).r;
+    } else if (index == 1) {
+        return texture(uShadowMap1, uv).r;
+    }
+    return texture(uShadowMap2, uv).r;
+}
+
+// Directional-light shadow factor for ONE specific cascade: 0.0 = fully
+// lit, 1.0 = fully shadowed. Computes fragPosLightSpace itself (as
+// uLightSpaceMatrices[cascadeIndex] * vec4(vFragPos, 1.0)) rather than
+// reading a vertex-precomputed varying -- see basic.vert's own comment on
+// why CSM moved that computation here. Perspective-dividing by w (always 1
+// for this phase's orthographic light projections, but doing it anyway
+// keeps this correct even if a later phase swaps in a perspective light
+// projection) and remapping [-1,1] NDC to [0,1] texture space gives the
+// coordinates to look the fragment up in that cascade's shadow map at.
 //
 // Bias: slope-scaled (scaled by 1 - N.L, i.e. bigger for surfaces nearly
 // edge-on to the light) rather than a single fixed constant, clamped to a
@@ -127,13 +170,20 @@ float attenuationFor(float constant, float linear, float quadratic, float distan
 // per step) and averaging each one's binary in/out result instead produces
 // intermediate values (e.g. 3/9, 6/9) exactly along that boundary, which
 // reads as a soft, anti-aliased edge instead of a jagged one.
-float shadowFactor(vec3 normal, vec3 lightDir) {
-    vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
+float shadowFactorForCascade(int cascadeIndex, vec3 normal, vec3 lightDir) {
+    vec4 fragPosLightSpace = uLightSpaceMatrices[cascadeIndex] * vec4(vFragPos, 1.0);
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
 
-    // Outside the light's own orthographic frustum (or beyond its far
-    // plane) -- there is no shadow-map data for this fragment, so treat it
-    // as unshadowed rather than sampling/clamping into a meaningless texel.
+    // Outside this cascade's own orthographic frustum (or beyond its far
+    // plane) -- there is no shadow-map data for this fragment in this
+    // cascade, so treat it as unshadowed rather than sampling/clamping into
+    // a meaningless texel. In practice this shouldn't happen for the
+    // cascade a fragment is actually assigned to (each cascade's box is fit
+    // to fully contain its own depth slice), but stays as a defensive guard
+    // -- e.g. against the small padding margins (see
+    // application.cpp's kCascadeXYPadding/kCascadeZPadding) not being
+    // generous enough for some corner case.
     if (projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0 ||
         projCoords.z > 1.0) {
         return 0.0;
@@ -146,11 +196,50 @@ float shadowFactor(vec3 normal, vec3 lightDir) {
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
             vec2 offset = vec2(float(x), float(y)) * uShadowMapTexelSize;
-            float closestDepth = texture(uShadowMap, projCoords.xy + offset).r;
+            float closestDepth = sampleCascadeDepth(cascadeIndex, projCoords.xy + offset);
             shadowSum += (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
         }
     }
     return shadowSum / 9.0;
+}
+
+// Phase 13c: picks which cascade vViewSpaceDepth falls into, then blends
+// smoothly into the next cascade over a small transition band near each
+// split. A hard cutoff between cascades is visible as a seam: a fragment a
+// sub-pixel away across the split boundary can jump from one cascade's own
+// PCF kernel/bias/effective resolution to a completely different one,
+// which reads as a visible line where shadow softness/aliasing changes
+// abruptly. kCascadeBlendBand (view-space world units) is fixed rather than
+// derived from uCascadeSplits[] -- generous enough relative to this scene's
+// own smallest cascade gap (see application.cpp's computeCascades(), the
+// cascade 0 -> 1 gap is the tightest at this phase's chosen split scheme)
+// to visibly smooth the seam without blending across so wide a band that
+// two cascades' differently-sized effective texel footprints average into
+// a visibly softer ring around each split.
+const float kCascadeBlendBand = 0.75;
+
+float shadowFactor(vec3 normal, vec3 lightDir) {
+    int cascadeIndex = 0;
+    for (int i = 0; i < NUM_CASCADES - 1; ++i) {
+        if (vViewSpaceDepth > uCascadeSplits[i]) {
+            cascadeIndex = i + 1;
+        }
+    }
+
+    float shadow = shadowFactorForCascade(cascadeIndex, normal, lightDir);
+
+    // Blend towards the next cascade only near this cascade's own far
+    // split, and never past the last cascade (nothing to blend into).
+    if (cascadeIndex < NUM_CASCADES - 1) {
+        float splitDepth = uCascadeSplits[cascadeIndex];
+        float blend = clamp((vViewSpaceDepth - (splitDepth - kCascadeBlendBand)) / kCascadeBlendBand, 0.0, 1.0);
+        if (blend > 0.0) {
+            float nextShadow = shadowFactorForCascade(cascadeIndex + 1, normal, lightDir);
+            shadow = mix(shadow, nextShadow, blend);
+        }
+    }
+
+    return shadow;
 }
 
 void main() {

@@ -20,9 +20,6 @@ uniform mat4 uProjection;
 // Application::render()) -- see basic.vert's comment on why mat3(uModel)
 // directly would be a subtly-wrong shortcut under non-uniform scale.
 uniform mat3 uNormalMatrix;
-// Light-space "view * projection" for the directional light's shadow pass --
-// same matrix/convention as basic.vert (see shadow_map.hpp).
-uniform mat4 uLightSpaceMatrix;
 
 out vec3 vNormal;
 out vec3 vFragPos;
@@ -31,7 +28,16 @@ out vec2 vTexCoord;
 // for the same reason basic.vert does -- a tangent is an ordinary direction
 // embedded in the surface, not a "must stay perpendicular" quantity.
 out vec3 vTangent;
-out vec4 vFragPosLightSpace;
+// Phase 13c: replaces the old single vFragPosLightSpace varying -- CSM's
+// fragment shader picks one of several cascades' light-space matrices per
+// fragment (based on view-space depth), computing
+// uLightSpaceMatrices[cascadeIndex] * vec4(vFragPos, 1.0) itself using
+// vFragPos (already provided above) rather than the vertex shader
+// pre-computing every candidate cascade's light-space position up front --
+// see basic.vert's identical comment (this shader's vertex contract is
+// otherwise unchanged from it) for why that's exactly equivalent to the old
+// per-vertex computation.
+out float vViewSpaceDepth;
 
 void main() {
     vec4 worldPos = uModel * vec4(aPos, 1.0);
@@ -39,6 +45,6 @@ void main() {
     vNormal = normalize(uNormalMatrix * aNormal);
     vTangent = normalize(mat3(uModel) * aTangent);
     vTexCoord = aTexCoord;
-    vFragPosLightSpace = uLightSpaceMatrix * worldPos;
+    vViewSpaceDepth = -(uView * worldPos).z;
     gl_Position = uProjection * uView * worldPos;
 }

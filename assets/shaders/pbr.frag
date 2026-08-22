@@ -18,7 +18,8 @@ in vec3 vNormal;
 in vec3 vFragPos;
 in vec2 vTexCoord;
 in vec3 vTangent;
-in vec4 vFragPosLightSpace;
+// Phase 13c: replaces vFragPosLightSpace -- see pbr.vert's comment.
+in float vViewSpaceDepth;
 
 out vec4 FragColor;
 
@@ -46,7 +47,16 @@ uniform vec3 uLightColor;
 uniform vec3 uAmbientColor;
 uniform vec3 uViewPos;
 
-uniform sampler2D uShadowMap;
+// Phase 13c: Cascaded Shadow Maps -- see basic.frag's identical comment on
+// uLightSpaceMatrices/uCascadeSplits/uShadowMap0/1/2 (this shader reuses the
+// exact same uniform names/layout, same duplication-by-design rationale as
+// every other reused block in this file).
+#define NUM_CASCADES 3
+uniform mat4 uLightSpaceMatrices[NUM_CASCADES];
+uniform float uCascadeSplits[NUM_CASCADES];
+uniform sampler2D uShadowMap0;
+uniform sampler2D uShadowMap1;
+uniform sampler2D uShadowMap2;
 uniform vec2 uShadowMapTexelSize;
 
 // --- Phase 10: image-based lighting (see engine::IBLProbe) ---
@@ -105,12 +115,23 @@ float attenuationFor(float constant, float linear, float quadratic, float distan
 }
 
 // Directional-light shadow factor -- identical to basic.frag's
-// shadowFactor() (same PCF kernel, same slope-scaled bias); duplicated here
+// shadowFactorForCascade()/shadowFactor() (same cascade selection, same PCF
+// kernel, same slope-scaled bias, same cascade-blend band); duplicated here
 // rather than shared via #include since this engine's Shader class links
 // each program from exactly one vertex + one fragment file with no
 // preprocessing/#include support (see shader.hpp).
-float shadowFactor(vec3 normal, vec3 lightDir) {
-    vec3 projCoords = vFragPosLightSpace.xyz / vFragPosLightSpace.w;
+float sampleCascadeDepth(int index, vec2 uv) {
+    if (index == 0) {
+        return texture(uShadowMap0, uv).r;
+    } else if (index == 1) {
+        return texture(uShadowMap1, uv).r;
+    }
+    return texture(uShadowMap2, uv).r;
+}
+
+float shadowFactorForCascade(int cascadeIndex, vec3 normal, vec3 lightDir) {
+    vec4 fragPosLightSpace = uLightSpaceMatrices[cascadeIndex] * vec4(vFragPos, 1.0);
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords = projCoords * 0.5 + 0.5;
 
     if (projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0 ||
@@ -125,11 +146,35 @@ float shadowFactor(vec3 normal, vec3 lightDir) {
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
             vec2 offset = vec2(float(x), float(y)) * uShadowMapTexelSize;
-            float closestDepth = texture(uShadowMap, projCoords.xy + offset).r;
+            float closestDepth = sampleCascadeDepth(cascadeIndex, projCoords.xy + offset);
             shadowSum += (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
         }
     }
     return shadowSum / 9.0;
+}
+
+const float kCascadeBlendBand = 0.75;
+
+float shadowFactor(vec3 normal, vec3 lightDir) {
+    int cascadeIndex = 0;
+    for (int i = 0; i < NUM_CASCADES - 1; ++i) {
+        if (vViewSpaceDepth > uCascadeSplits[i]) {
+            cascadeIndex = i + 1;
+        }
+    }
+
+    float shadow = shadowFactorForCascade(cascadeIndex, normal, lightDir);
+
+    if (cascadeIndex < NUM_CASCADES - 1) {
+        float splitDepth = uCascadeSplits[cascadeIndex];
+        float blend = clamp((vViewSpaceDepth - (splitDepth - kCascadeBlendBand)) / kCascadeBlendBand, 0.0, 1.0);
+        if (blend > 0.0) {
+            float nextShadow = shadowFactorForCascade(cascadeIndex + 1, normal, lightDir);
+            shadow = mix(shadow, nextShadow, blend);
+        }
+    }
+
+    return shadow;
 }
 
 // --- Cook-Torrance microfacet BRDF terms ---

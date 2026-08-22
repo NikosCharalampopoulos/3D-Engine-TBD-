@@ -146,6 +146,43 @@ private:
     std::array<FrustumPlane, 6> planes_{};
 };
 
+// Phase 13c: unprojects the 8 corners of the canonical OpenGL NDC cube
+// ([-1,1]^3) through the inverse of a view-projection matrix, recovering
+// that frustum's 8 world-space corners. Added for CSM's per-cascade
+// frustum-fitting (application.cpp's computeCascades()): each cascade needs
+// the world-space corners of just its own [near_i, far_i) depth slice of
+// the camera's full frustum (built by passing a projection matrix whose
+// near/far are that slice's bounds -- see Camera::getProjectionMatrix's
+// 3-argument overload), not the 6 planes Frustum itself extracts. A free
+// function alongside Frustum rather than a Frustum method/member: Frustum's
+// own intersects() test only ever needs planes, never corners, so keeping
+// this separate avoids growing Frustum's own stored state (it would need to
+// cache the source matrix, not just the derived planes) for a need only CSM
+// has.
+//
+// Corner order is not meaningful to any caller (every corner is min/maxed
+// over, never indexed by which face/corner it came from), so this simply
+// walks x/y/z in nested-loop order rather than a "named corner" convention.
+inline std::array<glm::vec3, 8> frustumCornersWorldSpace(const glm::mat4& viewProjection) {
+    const glm::mat4 inverseViewProjection = glm::inverse(viewProjection);
+    std::array<glm::vec3, 8> corners{};
+    std::size_t index = 0;
+    for (int ix = 0; ix < 2; ++ix) {
+        for (int iy = 0; iy < 2; ++iy) {
+            for (int iz = 0; iz < 2; ++iz) {
+                const glm::vec4 ndc(2.0f * static_cast<float>(ix) - 1.0f, 2.0f * static_cast<float>(iy) - 1.0f,
+                                     2.0f * static_cast<float>(iz) - 1.0f, 1.0f);
+                glm::vec4 worldPos = inverseViewProjection * ndc;
+                // Perspective-divide: a perspective projection's inverse
+                // does not return w == 1 the way an orthographic one would.
+                worldPos /= worldPos.w;
+                corners[index++] = glm::vec3(worldPos);
+            }
+        }
+    }
+    return corners;
+}
+
 }  // namespace engine
 
 #endif  // ENGINE_FRUSTUM_HPP

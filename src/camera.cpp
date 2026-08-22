@@ -34,7 +34,11 @@ glm::mat4 Camera::getViewMatrix() const {
 }
 
 glm::mat4 Camera::getProjectionMatrix(float aspectRatio) const {
-    return glm::perspective(glm::radians(fovYDeg_), aspectRatio, nearPlane_, farPlane_);
+    return getProjectionMatrix(aspectRatio, nearPlane_, farPlane_);
+}
+
+glm::mat4 Camera::getProjectionMatrix(float aspectRatio, float nearPlane, float farPlane) const {
+    return glm::perspective(glm::radians(fovYDeg_), aspectRatio, nearPlane, farPlane);
 }
 
 void Camera::processMovement(const InputState& input, float deltaTime) {

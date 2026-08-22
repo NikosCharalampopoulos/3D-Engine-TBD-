@@ -35,6 +35,17 @@ public:
     // per-camera (set at construction or via the setters below) rather than
     // parameters here, so every call site doesn't have to know/repeat them.
     glm::mat4 getProjectionMatrix(float aspectRatio) const;
+    // Phase 13c: same perspective projection as above, but with explicit
+    // near/far overriding nearPlane_/farPlane_ -- CSM's cascade splitting
+    // (application.cpp's computeCascades()) uses this to build a projection
+    // for just one cascade's [near_i, far_i) depth slice of the camera's
+    // full view frustum, so that slice's 8 world-space corners can be
+    // recovered by unprojecting through it (see frustum.hpp's
+    // frustumCornersWorldSpace()). Sharing fovYDeg_ with the real camera
+    // projection (rather than a second, independently-set FOV) is what
+    // makes each slice's corners a true subset of the camera's own actual
+    // view frustum, not an approximation of it.
+    glm::mat4 getProjectionMatrix(float aspectRatio, float nearPlane, float farPlane) const;
 
     // Moves position_ along the camera's own front/right/worldUp axes based
     // on whichever of `input`'s movement flags are set, scaled by deltaTime
@@ -75,6 +86,12 @@ public:
     const glm::vec3& front() const { return front_; }
     float yaw() const { return yawDeg_; }
     float pitch() const { return pitchDeg_; }
+    // Phase 13c: CSM's cascade splitting needs the camera's own near plane
+    // as the first split's near bound (see application.cpp's
+    // computeCascades()) -- exposed as a getter rather than duplicated as a
+    // second hardcoded constant there.
+    float nearPlane() const { return nearPlane_; }
+    float farPlane() const { return farPlane_; }
 
     void setMovementSpeed(float unitsPerSecond) { movementSpeed_ = unitsPerSecond; }
     void setMouseSensitivity(float degreesPerPixel) { mouseSensitivity_ = degreesPerPixel; }

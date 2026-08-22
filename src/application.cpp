@@ -10,8 +10,10 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <thread>
 #include <utility>
@@ -123,9 +125,16 @@ const std::array<std::string, 6> kSkyboxFacePaths = {
 
 // Phase 7a: fixed resolution for the directional light's shadow map (see
 // shadow_map.hpp) -- independent of the window's own framebuffer size.
-// 1024x1024 is generous for this engine's small hand-authored test scene; a
-// larger/more detailed scene would want a bigger map (or cascaded shadow
-// maps, out of scope here).
+// 1024x1024 is generous for this engine's small hand-authored test scene.
+//
+// Phase 13c: every cascade uses this same resolution (rather than, say, a
+// bigger map for the near cascade and smaller ones further out) -- CSM's
+// whole resolution win here comes from each cascade's own tightly-fitted
+// (much smaller than the old whole-scene map's) world-space footprint, not
+// from spending more texels on any one cascade; keeping every cascade's
+// resolution identical also lets every cascade share one
+// uShadowMapTexelSize uniform upload (see render()) instead of needing a
+// per-cascade one.
 constexpr int kShadowMapWidth = 1024;
 constexpr int kShadowMapHeight = 1024;
 
@@ -188,29 +197,34 @@ static_assert(kBloomBlurPasses % 2 == 0 && kBloomBlurPasses > 0,
 // strength; not a magic number, just named so it's easy to re-tune later
 // without hunting through render()'s uniform uploads.
 constexpr float kBloomStrength = 1.0f;
-// The shadow map's depth texture is sampled on this fixed texture unit
+// The shadow maps' depth textures are sampled on these fixed texture units
 // every frame (see render()) -- unit 0 is always the current Material's
 // diffuse texture and unit 1 its optional normal map (see
-// material.hpp/Material::bind()), so 3 is free and stays bound across every
+// material.hpp/Material::bind()), so 3+ is free and stays bound across every
 // per-mesh Material::bind() call in the same frame (those never touch unit
-// 3). Phase 11 bug-review-style note: this used to be unit 2, back when
-// PBRMaterial only ever bound two of its own textures (albedo at
+// 3 or above). Phase 11 bug-review-style note: this used to start at unit 2,
+// back when PBRMaterial only ever bound two of its own textures (albedo at
 // textureUnit, normal at textureUnit + 1). Phase 11 adds a third
 // PBRMaterial texture (the packed ORM map, bound at textureUnit + 2 -- see
 // pbr_material.hpp) that would otherwise land on this exact unit and
 // silently clobber whichever texture the shadow map/IBL maps left bound
 // there, so every fixed unit below was shifted up by one to keep the
-// material's own 0/1/2 range and the scene-level globals' 3/4/5/6 range
-// disjoint.
-constexpr unsigned int kShadowMapTextureUnit = 3;
+// material's own 0/1/2 range and the scene-level globals' range disjoint.
+//
+// Phase 13c: one shadow map per cascade now, so this is a base unit --
+// cascade i is bound at kShadowMapTextureUnitBase + i (0, 1, 2 -- see
+// Application::kCascadeCount) -- rather than a single fixed unit; every
+// other scene-level global's unit below is shifted up accordingly to stay
+// disjoint from all three.
+constexpr unsigned int kShadowMapTextureUnitBase = 3;
 // Phase 10: iblProbe_'s three precomputed maps, bound once per frame onto
 // pbrShader_ (see render()) at fixed texture units that don't collide with
 // any PBRMaterial::bind() call's own units (0 = albedo map, 1 = normal map,
-// 2 = Phase 11's packed ORM map -- see pbr_material.hpp) or
-// kShadowMapTextureUnit above.
-constexpr unsigned int kIrradianceMapTextureUnit = 4;
-constexpr unsigned int kPrefilterMapTextureUnit = 5;
-constexpr unsigned int kBrdfLutTextureUnit = 6;
+// 2 = Phase 11's packed ORM map -- see pbr_material.hpp) or the 3 cascade
+// shadow map units above (kShadowMapTextureUnitBase..+2).
+constexpr unsigned int kIrradianceMapTextureUnit = 6;
+constexpr unsigned int kPrefilterMapTextureUnit = 7;
+constexpr unsigned int kBrdfLutTextureUnit = 8;
 
 // Phase 4's directional light: a fixed "sun" direction/color, not yet
 // animated or configurable -- proving the Phong math works is this phase's
@@ -360,35 +374,165 @@ constexpr float kGroundHalfExtent = 2.6f;
 constexpr float kGroundY = -0.01f;
 constexpr float kGroundUvTiling = 6.0f;
 
-// Directional light's shadow-map projection: a directional light has no
-// real position (it's meant to be infinitely far away), so this picks a
-// fixed, reasonable light-space "eye" -- a point kLightDistance back along
-// -kLightDirection from the scene's center -- purely to build an
-// orthographic view/projection pair from.
+// Phase 13c: Cascaded Shadow Maps. Phase 7a/7b's single fixed orthographic
+// projection (a hand-picked half-extent/near/far sized to cover the whole
+// scene from one fixed light-space eye position -- see git history for that
+// superseded computeLightSpaceMatrix()) is replaced by kCascadeCount
+// separate, per-cascade orthographic projections, each tightly fitted
+// around only the world-space region *that cascade's own depth slice of the
+// camera's view frustum* actually covers -- see computeCascades() below.
+// This is what gives CSM its resolution win: a cascade close to the camera
+// covers a much smaller world-space area than the old whole-scene map did,
+// so the same kShadowMapWidth/Height texel budget lands a proportionally
+// finer world-space grid over it.
 //
-// kOrthoHalfExtent must cover the ground plane's *diagonal* footprint as
-// seen from the light, not just kGroundHalfExtent itself: because the light
-// looks along an oblique direction (kLightDirection has both a horizontal
-// and vertical component, not a top-down one), the light-space "right" axis
-// does not line up with the ground plane's own X or Z edges. A square of
-// half-extent kGroundHalfExtent projected onto an axis running diagonally
-// across it needs up to its full diagonal half-length
-// (kGroundHalfExtent * sqrt(2) ~= 3.68 for kGroundHalfExtent = 2.6), not
-// just kGroundHalfExtent itself, to stay fully inside [-kOrthoHalfExtent,
-// kOrthoHalfExtent]. A previous value of 3.0 here was verified (by
-// projecting the ground plane's corners into light space) to fall about 0.56
-// units short of that, silently clipping the plane's far corners out of the
-// shadow frustum -- harmless in this particular scene (nothing casts a
-// shadow anywhere near those corners) but wrong on its own terms, and a
-// latent bug for any future scene that moves a shadow-casting object out
-// there. 4.0 comfortably covers the diagonal with margin to spare.
-//
-// kOrthoNear/kOrthoFar cover the distance from that eye point back through
-// the scene and out the other side with margin.
-constexpr float kLightDistance = 6.0f;
-constexpr float kOrthoHalfExtent = 4.0f;
-constexpr float kOrthoNear = 0.5f;
-constexpr float kOrthoFar = 12.0f;
+// 3 cascades is the standard/common choice for this technique (see e.g.
+// LearnOpenGL's CSM article, GPU Gems 3 ch. 10) -- enough to show a
+// meaningfully different world-space texel density between the nearest and
+// farthest cascade without spending more shadow-map memory/depth-pass draw
+// calls than this small test scene's shadow quality needs justify. (See
+// Application::kCascadeCount, declared in application.hpp since
+// shadowCascades_/renderShadowPass() there also need it.)
+constexpr int kCascadeCount = Application::kCascadeCount;
+static_assert(kCascadeCount == 3, "the constants/comments below assume 3 cascades");
+
+// Split-depth scheme: the "practical split scheme" (GPU Gems 3, ch. 10) --
+// a blend of a logarithmic split (equal *ratios* between consecutive split
+// distances, matching how on-screen texel density/depth precision falls off
+// with distance under a perspective projection) and a uniform split (equal
+// *differences*, avoiding the log scheme's tendency to make the nearest
+// cascade too thin to be useful). kCascadeSplitLambda = 0.5 blends the two
+// evenly -- the commonly cited default (and this phase's own brief's
+// suggested starting point) rather than a value hand-tuned to this specific
+// scene. The actual resulting split distances are logged once at startup
+// (see the constructor) so they're visible/checkable in a run's own log
+// output rather than only inferable from these constants.
+constexpr float kCascadeSplitLambda = 0.5f;
+
+// Splits are computed between the camera's own near plane and
+// kCascadeShadowDistance -- deliberately NOT the camera's real far plane
+// (100 units, Camera's own default, never overridden by this engine -- see
+// camera.hpp). This scene's own shadow-relevant content (scene.obj's table/
+// pyramid/box, the ground plane -- kGroundHalfExtent's own diagonal-
+// footprint comment below covers its reach, the largest of any caster here
+// -- and the PBR sphere grid) all sits within roughly 8-9 world units of
+// kDefaultCameraPosition, so splitting cascades across the camera's full
+// 100-unit far plane would burn two of three cascades' resolution on empty
+// space nothing ever casts a shadow into or onto. Capping cascade coverage
+// at a "how far do shadows actually need to stay sharp" distance, separate
+// from the camera's own far-plane culling distance, is standard practice
+// (Unity/Unreal's own "max shadow distance" setting is exactly this same
+// idea), not a scene-specific hack -- though the specific value (12.0) is
+// chosen for this scene's own scale.
+constexpr float kCascadeShadowDistance = 12.0f;
+
+// Per-cascade frustum-fitting (see computeCascades()): each cascade's own
+// light-space "eye" sits kCascadeLightBackoff back along -lightDir from that
+// cascade's own frustum-slice center, and its fitted orthographic box is
+// padded by kCascadeXYPadding (in the light's own right/up plane) and
+// kCascadeZPadding (along the light's own view direction) beyond the tight
+// bounding box of that slice's 8 unprojected corners. Both the backoff and
+// the padding need to be generous enough that a shadow-casting object
+// sitting just outside one cascade's own tight camera-frustum slice (e.g.
+// the ground plane's edges reaching past where the camera can actually see
+// them, or an object standing tall right at a cascade's depth boundary)
+// still gets rendered into that cascade's own depth map rather than being
+// clipped out of its light-space projection. Fixed, generous constants
+// (rather than derived from the scene's real bounds) are enough here since
+// this whole hand-authored scene comfortably fits within a ~20-unit radius
+// of its own center -- a larger or more spread-out scene would need these
+// derived from the scene's own actual bounds instead of hardcoded.
+constexpr float kCascadeLightBackoff = 20.0f;
+constexpr float kCascadeXYPadding = 1.0f;
+constexpr float kCascadeZPadding = 5.0f;
+
+// One cascade's own computed light-space matrix, plus the view-space depth
+// marking its own FAR edge (the near edge is the previous cascade's own
+// splitFar, or the camera's own near plane for cascade 0) -- uploaded to
+// basic.frag/pbr.frag as uCascadeSplits[] so each fragment shader can pick
+// which cascade it falls into (see render()).
+struct Cascade {
+    float splitFar;
+    glm::mat4 lightSpaceMatrix;
+};
+
+// Builds all kCascadeCount cascades for this frame's camera pose: computes
+// the practical-split-scheme depth ranges above, then for each range
+// unprojects that depth slice's 8 frustum corners (via camera's own
+// getProjectionMatrix(aspect, splitNear, splitFar) + frustumCornersWorldSpace(),
+// see frustum.hpp) and fits a tight orthographic light-space projection
+// around their bounding box -- the standard CSM per-cascade frustum-fitting
+// method (LearnOpenGL's CSM article / GPU Gems 3 ch. 10), not a novel
+// scheme.
+// Split-depth computation, factored out of computeCascades() below purely
+// so the constructor can also call it once at startup to log the actual
+// resulting split distances (see this file's Phase 13c kCascadeSplitLambda
+// comment) -- the split scheme itself only depends on the camera's own
+// near plane and kCascadeShadowDistance, neither of which changes frame to
+// frame, so there's nothing view-dependent for the constructor's one-off
+// log line to be missing.
+std::array<float, static_cast<std::size_t>(kCascadeCount) + 1> computeCascadeSplitDepths(float nearPlane,
+                                                                                          float farPlane) {
+    std::array<float, static_cast<std::size_t>(kCascadeCount) + 1> splitDepths{};
+    splitDepths[0] = nearPlane;
+    for (int i = 1; i <= kCascadeCount; ++i) {
+        const float p = static_cast<float>(i) / static_cast<float>(kCascadeCount);
+        const float logSplit = nearPlane * std::pow(farPlane / nearPlane, p);
+        const float uniformSplit = nearPlane + (farPlane - nearPlane) * p;
+        splitDepths[static_cast<std::size_t>(i)] =
+            kCascadeSplitLambda * logSplit + (1.0f - kCascadeSplitLambda) * uniformSplit;
+    }
+    return splitDepths;
+}
+
+std::array<Cascade, kCascadeCount> computeCascades(const Camera& camera, float aspect, const glm::vec3& lightDir) {
+    const float nearPlane = camera.nearPlane();
+    const float farPlane = kCascadeShadowDistance;
+    const std::array<float, static_cast<std::size_t>(kCascadeCount) + 1> splitDepths =
+        computeCascadeSplitDepths(nearPlane, farPlane);
+
+    std::array<Cascade, kCascadeCount> cascades{};
+    for (int i = 0; i < kCascadeCount; ++i) {
+        const float splitNear = splitDepths[static_cast<std::size_t>(i)];
+        const float splitFar = splitDepths[static_cast<std::size_t>(i) + 1];
+
+        const glm::mat4 sliceProjection = camera.getProjectionMatrix(aspect, splitNear, splitFar);
+        const glm::mat4 sliceViewProjection = sliceProjection * camera.getViewMatrix();
+        const std::array<glm::vec3, 8> corners = frustumCornersWorldSpace(sliceViewProjection);
+
+        glm::vec3 center(0.0f);
+        for (const glm::vec3& corner : corners) {
+            center += corner;
+        }
+        center /= static_cast<float>(corners.size());
+
+        const glm::vec3 eye = center - lightDir * kCascadeLightBackoff;
+        const glm::mat4 lightView = glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
+
+        glm::vec3 minBounds(std::numeric_limits<float>::max());
+        glm::vec3 maxBounds(std::numeric_limits<float>::lowest());
+        for (const glm::vec3& corner : corners) {
+            const glm::vec3 lightSpaceCorner = glm::vec3(lightView * glm::vec4(corner, 1.0f));
+            minBounds = glm::min(minBounds, lightSpaceCorner);
+            maxBounds = glm::max(maxBounds, lightSpaceCorner);
+        }
+
+        // Light-view-space Z is negative in front of the eye (OpenGL's
+        // usual "camera looks down -Z" convention) and grows more negative
+        // with distance -- glm::ortho's near/far are positive *distances*
+        // forward from the eye, so the box's nearest corner (largest,
+        // least-negative Z) maps to the smaller distance and its farthest
+        // corner (most negative Z) maps to the larger one.
+        const float orthoNear = -maxBounds.z - kCascadeZPadding;
+        const float orthoFar = -minBounds.z + kCascadeZPadding;
+        const glm::mat4 lightProjection =
+            glm::ortho(minBounds.x - kCascadeXYPadding, maxBounds.x + kCascadeXYPadding,
+                       minBounds.y - kCascadeXYPadding, maxBounds.y + kCascadeXYPadding, orthoNear, orthoFar);
+
+        cascades[static_cast<std::size_t>(i)] = Cascade{splitFar, lightProjection * lightView};
+    }
+    return cascades;
+}
 
 // Phase 9 bug-review composition fix: the original layout here was a packed
 // 4x4 grid (16 spheres, both metallic and roughness swept as a 2D matrix)
@@ -515,15 +659,6 @@ constexpr float kMetallicRowRoughness = 0.2f;
 constexpr float kRoughnessRowMetallic = 1.0f;
 constexpr float kSphereAO = 1.0f;
 
-glm::mat4 computeLightSpaceMatrix() {
-    const glm::vec3 lightDir = glm::normalize(kLightDirection);
-    const glm::vec3 lightEye = kSceneCenter - lightDir * kLightDistance;
-    const glm::mat4 lightView = glm::lookAt(lightEye, kSceneCenter, glm::vec3(0.0f, 1.0f, 0.0f));
-    const glm::mat4 lightProjection = glm::ortho(-kOrthoHalfExtent, kOrthoHalfExtent, -kOrthoHalfExtent,
-                                                   kOrthoHalfExtent, kOrthoNear, kOrthoFar);
-    return lightProjection * lightView;
-}
-
 // Uploads one PointLightData/SpotLightData's fields to `uPointLights[index]`
 // / `uSpotLights[index]` in basic.frag. Named-uniform lookups are built as
 // plain strings each call (like every other Shader::set*() call site in
@@ -549,6 +684,19 @@ void uploadSpotLight(Shader& shader, std::size_t index, const SpotLightData& lig
     shader.setFloat(prefix + "quadratic", light.quadratic);
     shader.setFloat(prefix + "innerCutoff", light.innerCutoffCos);
     shader.setFloat(prefix + "outerCutoff", light.outerCutoffCos);
+}
+
+// Phase 13c: uploads every cascade's own light-space matrix + far split
+// depth (uLightSpaceMatrices[i]/uCascadeSplits[i] in basic.frag/pbr.frag) --
+// shared by both shader_ and pbrShader_'s per-frame uploads in render(),
+// same "uploadPointLight/uploadSpotLight, called once per light per
+// program" pattern above.
+void uploadCascades(Shader& shader, const std::array<Cascade, kCascadeCount>& cascades) {
+    for (int i = 0; i < kCascadeCount; ++i) {
+        const std::string index = std::to_string(i);
+        shader.setMat4("uLightSpaceMatrices[" + index + "]", cascades[static_cast<std::size_t>(i)].lightSpaceMatrix);
+        shader.setFloat("uCascadeSplits[" + index + "]", cascades[static_cast<std::size_t>(i)].splitFar);
+    }
 }
 
 bool cameraDemoModeFromEnv() {
@@ -585,7 +733,13 @@ Application::Application(int width, int height, const std::string& title, std::u
       irradianceShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kIrradianceFragmentShaderPath)),
       prefilterShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kPrefilterFragmentShaderPath)),
       brdfShader_(resources_.getShader(kPostProcessVertexShaderPath, kBrdfLutFragmentShaderPath)),
-      shadowMap_(kShadowMapWidth, kShadowMapHeight),
+      // Phase 13c: kCascadeCount independent ShadowMap instances, all the
+      // same fixed resolution (see kShadowMapWidth/Height's own Phase 13c
+      // comment) -- std::array<ShadowMap, N>'s usual aggregate
+      // initialization, each element move-constructed from its own
+      // temporary ShadowMap(width, height).
+      shadowCascades_{{ShadowMap(kShadowMapWidth, kShadowMapHeight), ShadowMap(kShadowMapWidth, kShadowMapHeight),
+                       ShadowMap(kShadowMapWidth, kShadowMapHeight)}},
       // Phase 7b: sized from window_'s own real framebuffer size (already
       // constructed at this point -- see this header's declaration-order
       // comment) rather than the constructor's width/height parameters
@@ -770,6 +924,22 @@ Application::Application(int width, int height, const std::string& title, std::u
     if (cameraDemoMode_) {
         LOG_INFO("ENGINE_CAMERA_DEMO set: driving the camera through a scripted orbit instead of live input");
     }
+
+    // Phase 13c: log the practical-split-scheme's actual resulting cascade
+    // split distances once at startup -- kCascadeSplitLambda/
+    // kCascadeShadowDistance above are the tunable inputs, but this is the
+    // real output a reviewer would otherwise have to compute by hand to
+    // check.
+    {
+        const std::array<float, static_cast<std::size_t>(kCascadeCount) + 1> splitDepths =
+            computeCascadeSplitDepths(camera_.nearPlane(), kCascadeShadowDistance);
+        std::string splitsLog = "CSM cascade splits (view-space depth):";
+        for (std::size_t i = 0; i < splitDepths.size(); ++i) {
+            splitsLog += " " + std::to_string(splitDepths[i]);
+        }
+        LOG_INFO(splitsLog);
+    }
+
     LOG_INFO("Application initialized");
 }
 
@@ -818,42 +988,54 @@ void Application::update(double deltaTime, const InputState& input) {
     }
 }
 
-void Application::renderShadowPass(const glm::mat4& lightSpaceMatrix) {
-    // Points the viewport at shadowMap_'s own resolution and binds its FBO;
-    // render() restores the window's real viewport (and default framebuffer
-    // binding, done here) once this returns.
-    shadowMap_.bindForWriting();
-    // Only a depth buffer exists on this FBO (see ShadowMap -- no color
-    // attachment at all), so only GL_DEPTH_BUFFER_BIT is meaningful to
-    // clear here.
-    GL_CHECK(glClear(GL_DEPTH_BUFFER_BIT));
+void Application::renderShadowPass(const std::array<glm::mat4, kCascadeCount>& lightSpaceMatrices) {
+    // Phase 13c: the whole scene is depth-rendered once per cascade, into
+    // that cascade's own ShadowMap -- shadowCascades_[i]'s own light-space
+    // matrix differs (a tighter, per-cascade-fitted projection -- see
+    // computeCascades()), so this can't be collapsed into a single pass the
+    // way the old one-shadow-map version was. Everything the color pass
+    // draws (entities_, the ground plane, the PBR sphere grid) still needs
+    // to appear in every cascade's own depth map exactly as before -- a
+    // caster missing from one cascade's map would show a wrong (missing or
+    // stale) shadow for any fragment sampling that cascade.
+    for (int cascade = 0; cascade < kCascadeCount; ++cascade) {
+        // Points the viewport at this cascade's own resolution and binds
+        // its FBO; render() restores the window's real viewport (and
+        // default framebuffer binding, done once below) once this returns.
+        shadowCascades_[static_cast<std::size_t>(cascade)].bindForWriting();
+        // Only a depth buffer exists on this FBO (see ShadowMap -- no color
+        // attachment at all), so only GL_DEPTH_BUFFER_BIT is meaningful to
+        // clear here.
+        GL_CHECK(glClear(GL_DEPTH_BUFFER_BIT));
 
-    shadowShader_->use();
-    shadowShader_->setMat4("uLightSpaceMatrix", lightSpaceMatrix);
+        shadowShader_->use();
+        shadowShader_->setMat4("uLightSpaceMatrix", lightSpaceMatrices[static_cast<std::size_t>(cascade)]);
 
-    for (const Entity& entity : entities_) {
-        if (entity.model()) {
-            entity.model()->drawDepthOnly(*shadowShader_, entity.transform.getModelMatrix());
+        for (const Entity& entity : entities_) {
+            if (entity.model()) {
+                entity.model()->drawDepthOnly(*shadowShader_, entity.transform.getModelMatrix());
+            }
         }
-    }
 
-    // The ground plane too, for the same "depth pass renders everything the
-    // main pass renders" reason -- its own geometry is already baked in
-    // world space (see makeGroundPlane()), so its model matrix is identity.
-    shadowShader_->setMat4("uModel", glm::mat4(1.0f));
-    groundMesh_.bind();
-    groundMesh_.draw();
+        // The ground plane too, for the same "depth pass renders everything
+        // the main pass renders" reason -- its own geometry is already
+        // baked in world space (see makeGroundPlane()), so its model matrix
+        // is identity.
+        shadowShader_->setMat4("uModel", glm::mat4(1.0f));
+        groundMesh_.bind();
+        groundMesh_.draw();
 
-    // Phase 9: the PBR sphere grid casts/receives shadows through this same
-    // depth-only pass -- shadow.vert reads only aPos (see that file), so it
-    // doesn't matter that these spheres' color pass uses pbrShader_ rather
-    // than shader_. sphereMesh_ is bound once and drawn once per instance,
-    // re-uploading only uModel between draws (each instance shares the same
-    // geometry).
-    sphereMesh_.bind();
-    for (const SphereInstance& instance : sphereInstances_) {
-        shadowShader_->setMat4("uModel", instance.transform.getModelMatrix());
-        sphereMesh_.draw();
+        // Phase 9: the PBR sphere grid casts/receives shadows through this
+        // same depth-only pass -- shadow.vert reads only aPos (see that
+        // file), so it doesn't matter that these spheres' color pass uses
+        // pbrShader_ rather than shader_. sphereMesh_ is bound once and
+        // drawn once per instance, re-uploading only uModel between draws
+        // (each instance shares the same geometry).
+        sphereMesh_.bind();
+        for (const SphereInstance& instance : sphereInstances_) {
+            shadowShader_->setMat4("uModel", instance.transform.getModelMatrix());
+            sphereMesh_.draw();
+        }
     }
 
     GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
@@ -863,12 +1045,24 @@ void Application::render() {
     const auto [fbWidth, fbHeight] = window_.getSize();
     const float aspect = fbHeight != 0 ? static_cast<float>(fbWidth) / static_cast<float>(fbHeight) : 1.0f;
 
-    // The directional light's shadow map is rendered first, into its own
-    // depth-only FBO/viewport; glViewport is restored to the window's real
-    // framebuffer size immediately after, since renderShadowPass() leaves it
-    // pointed at shadowMap_'s (generally different) resolution.
-    const glm::mat4 lightSpaceMatrix = computeLightSpaceMatrix();
-    renderShadowPass(lightSpaceMatrix);
+    // Phase 13c: the camera's own aspect ratio (computed above) feeds
+    // computeCascades()'s per-cascade sub-frustum construction (see
+    // Camera::getProjectionMatrix's near/far overload), so cascades must be
+    // (re)computed here, fresh every frame, same as the frustum/view/
+    // projection matrices below -- never cached across frames.
+    const std::array<Cascade, kCascadeCount> cascades =
+        computeCascades(camera_, aspect, glm::normalize(kLightDirection));
+    std::array<glm::mat4, kCascadeCount> lightSpaceMatrices{};
+    for (int i = 0; i < kCascadeCount; ++i) {
+        lightSpaceMatrices[static_cast<std::size_t>(i)] = cascades[static_cast<std::size_t>(i)].lightSpaceMatrix;
+    }
+
+    // The directional light's cascaded shadow maps are rendered first, into
+    // their own depth-only FBOs/viewport; glViewport is restored to the
+    // window's real framebuffer size immediately after, since
+    // renderShadowPass() leaves it pointed at whichever cascade it wrote to
+    // last (all the same, generally different-from-the-window, resolution).
+    renderShadowPass(lightSpaceMatrices);
     GL_CHECK(glViewport(0, 0, fbWidth, fbHeight));
 
     // Phase 7b: the whole lit scene (+ skybox) renders into hdrFramebuffer_
@@ -911,7 +1105,7 @@ void Application::render() {
     shader_->use();
     shader_->setMat4("uView", view);
     shader_->setMat4("uProjection", projection);
-    shader_->setMat4("uLightSpaceMatrix", lightSpaceMatrix);
+    uploadCascades(*shader_, cascades);
     shader_->setVec3("uLightDirection", kLightDirection);
     shader_->setVec3("uLightColor", kLightColor);
     shader_->setVec3("uAmbientColor", kAmbientColor);
@@ -931,24 +1125,33 @@ void Application::render() {
         uploadSpotLight(*shader_, i, kSpotLights[i]);
     }
 
-    // Shadow map bound once here (not per-material) at a fixed texture unit
-    // that no Material::bind() call below ever touches (see
-    // kShadowMapTextureUnit's comment) -- it stays bound across every
-    // subsequent draw call this frame.
-    shadowMap_.bindForReading(kShadowMapTextureUnit);
-    shader_->setInt("uShadowMap", static_cast<int>(kShadowMapTextureUnit));
+    // Phase 13c: all kCascadeCount cascades' shadow maps bound once here
+    // (not per-material) at fixed texture units that no Material::bind()
+    // call below ever touches (see kShadowMapTextureUnitBase's comment) --
+    // they stay bound across every subsequent draw call this frame. Each
+    // cascade gets its own named sampler uniform (uShadowMap0/1/2, not a
+    // sampler array -- see basic.frag's own comment on why) pointed at its
+    // own unit.
+    for (int i = 0; i < kCascadeCount; ++i) {
+        shadowCascades_[static_cast<std::size_t>(i)].bindForReading(kShadowMapTextureUnitBase +
+                                                                     static_cast<unsigned int>(i));
+        shader_->setInt("uShadowMap" + std::to_string(i),
+                         static_cast<int>(kShadowMapTextureUnitBase + static_cast<unsigned int>(i)));
+    }
     // Phase 7b bug-review fix: PCF (percentage-closer filtering) in
-    // basic.frag's shadowFactor() samples a small 3x3 grid of texels around
-    // each fragment's shadow-map lookup rather than just the one nearest
-    // texel, so shadow edges soften into a gradient of partially-shadowed
-    // values instead of a single hard-aliased 0/1 step. It needs the shadow
-    // map's own per-texel size (in [0,1] shadow-space units) to offset those
-    // samples by the right amount -- derived here from shadowMap_'s real
-    // resolution rather than hardcoded in the shader, so it stays correct
-    // if kShadowMapWidth/Height above ever changes.
+    // basic.frag's shadowFactorForCascade() samples a small 3x3 grid of
+    // texels around each fragment's shadow-map lookup rather than just the
+    // one nearest texel, so shadow edges soften into a gradient of
+    // partially-shadowed values instead of a single hard-aliased 0/1 step.
+    // It needs the shadow map's own per-texel size (in [0,1] shadow-space
+    // units) to offset those samples by the right amount -- derived here
+    // from one cascade's real resolution (every cascade shares the same
+    // one, see kShadowMapWidth/Height's own Phase 13c comment) rather than
+    // hardcoded in the shader, so it stays correct if kShadowMapWidth/
+    // Height above ever changes.
     shader_->setVec2("uShadowMapTexelSize",
-                       glm::vec2(1.0f / static_cast<float>(shadowMap_.width()),
-                                 1.0f / static_cast<float>(shadowMap_.height())));
+                       glm::vec2(1.0f / static_cast<float>(shadowCascades_[0].width()),
+                                 1.0f / static_cast<float>(shadowCascades_[0].height())));
 
     // Each entity's transform matrix is the "rootTransform" Model::draw()
     // composes above the file's own node hierarchy: draw() recurses through
@@ -1001,7 +1204,7 @@ void Application::render() {
     pbrShader_->use();
     pbrShader_->setMat4("uView", view);
     pbrShader_->setMat4("uProjection", projection);
-    pbrShader_->setMat4("uLightSpaceMatrix", lightSpaceMatrix);
+    uploadCascades(*pbrShader_, cascades);
     pbrShader_->setVec3("uLightDirection", kLightDirection);
     pbrShader_->setVec3("uLightColor", kLightColor);
     pbrShader_->setVec3("uAmbientColor", kAmbientColor);
@@ -1016,14 +1219,17 @@ void Application::render() {
         uploadSpotLight(*pbrShader_, i, kSpotLights[i]);
     }
 
-    // shadowMap_ is still bound for reading on kShadowMapTextureUnit from
-    // the upload above (binding a texture unit is global GL state, not
-    // per-program) -- only the sampler uniform needs re-pointing at that
+    // Every cascade's shadow map is still bound for reading on its own unit
+    // from the upload above (binding a texture unit is global GL state, not
+    // per-program) -- only each sampler uniform needs re-pointing at that
     // same unit on this different program.
-    pbrShader_->setInt("uShadowMap", static_cast<int>(kShadowMapTextureUnit));
+    for (int i = 0; i < kCascadeCount; ++i) {
+        pbrShader_->setInt("uShadowMap" + std::to_string(i),
+                            static_cast<int>(kShadowMapTextureUnitBase + static_cast<unsigned int>(i)));
+    }
     pbrShader_->setVec2("uShadowMapTexelSize",
-                         glm::vec2(1.0f / static_cast<float>(shadowMap_.width()),
-                                   1.0f / static_cast<float>(shadowMap_.height())));
+                         glm::vec2(1.0f / static_cast<float>(shadowCascades_[0].width()),
+                                   1.0f / static_cast<float>(shadowCascades_[0].height())));
 
     // Phase 10: iblProbe_'s three precomputed maps -- bound once per frame
     // (they never change after startup, see ibl_probe.hpp) at fixed texture
