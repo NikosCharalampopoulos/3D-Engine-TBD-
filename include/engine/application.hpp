@@ -515,12 +515,14 @@ private:
     ResourceManager resources_;
     std::shared_ptr<Shader> shader_;
     // Phase 7a: a second, minimal program (assets/shaders/shadow.vert/
-    // shadow.frag) used only to render shadowMap_'s depth pass -- see
+    // shadow.frag) used only to render the shadow map's depth pass -- see
     // renderShadowPass(). Routed through resources_ like shader_, even
     // though nothing else currently requests the same (vertex, fragment)
     // pair, for the same reason every other asset load goes through the
     // cache: one consistent loading path, not because sharing is expected
-    // here.
+    // here. Still just this one program for all kCascadeCount cascades
+    // (Phase 13c, below) -- shadow.vert only reads position, so one
+    // depth-only program serves every cascade's own depth pass.
     std::shared_ptr<Shader> shadowShader_;
     // Phase 7b: the skybox's own program (assets/shaders/skybox.vert/
     // skybox.frag) and the HDR-resolve fullscreen pass's program

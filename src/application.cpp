@@ -825,12 +825,6 @@ bool clusterDebugModeFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
-// Phase 13e: same getenv-gated-behavior pattern as every env var above --
-// true keeps the Phase 7b/10 procedural 6-face skybox instead of the new
-// HDRI, so that path stays reachable/verifiable rather than only living on
-// in git history (see this project's established "keep the old path as
-// reference" convention, e.g. Material/basic.frag alongside
-// PBRMaterial/pbr.frag since Phase 9).
 // Phase 13f: same getenv-gated-behavior pattern as every env var above --
 // see ssaoDisabled_'s own application.hpp comment for what this flag does.
 bool ssaoDisabledFromEnv() {
@@ -852,6 +846,12 @@ bool ssrDisabledFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 13e: same getenv-gated-behavior pattern as every env var above --
+// true keeps the Phase 7b/10 procedural 6-face skybox instead of the new
+// HDRI, so that path stays reachable/verifiable rather than only living on
+// in git history (see this project's established "keep the old path as
+// reference" convention, e.g. Material/basic.frag alongside
+// PBRMaterial/pbr.frag since Phase 9).
 bool proceduralSkyboxFromEnv() {
     const char* value = std::getenv("ENGINE_USE_PROCEDURAL_SKYBOX");
     return value != nullptr && *value != '\0' && std::string(value) != "0";
@@ -1717,18 +1717,21 @@ void Application::render() {
     // (pbrShader_/pbr.vert/pbr.frag) after the Blinn-Phong entities_/ground
     // plane above -- see this class's Phase 9 header comment. Scene-level
     // uniforms (view/projection/light-space matrix, the directional light,
-    // ambient, view position, every point/spot light, and the shadow map)
-    // are the exact same values already uploaded to shader_ above; they're
+    // view position, every point/spot light, and the shadow map) are the
+    // exact same values already uploaded to shader_ above; they're
     // re-uploaded here onto pbrShader_ because GL uniform state lives on
     // each program object independently -- switching the active program via
-    // use() does not carry shader_'s uniform values over to pbrShader_.
+    // use() does not carry shader_'s uniform values over to pbrShader_. No
+    // uAmbientColor upload here (unlike shader_ below) -- Phase 10 replaced
+    // pbr.frag's flat ambient placeholder with real IBL, which doesn't read
+    // it (see pbr.frag's own uIrradianceMap/uPrefilterMap/uBrdfLUT uploads
+    // further down).
     pbrShader_->use();
     pbrShader_->setMat4("uView", view);
     pbrShader_->setMat4("uProjection", projection);
     uploadCascades(*pbrShader_, cascades);
     pbrShader_->setVec3("uLightDirection", kLightDirection);
     pbrShader_->setVec3("uLightColor", kLightColor);
-    pbrShader_->setVec3("uAmbientColor", kAmbientColor);
     pbrShader_->setVec3("uViewPos", camera_.position());
 
     // Phase 13d: see shader_'s identical upload above.

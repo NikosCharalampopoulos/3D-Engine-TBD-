@@ -22,6 +22,13 @@ namespace engine {
 
 namespace {
 
+// Phase 13a: anisotropic texture filtering, fixing the ground plane's
+// checker texture shimmering at grazing/near-horizon viewing angles that
+// trilinear mipmapping alone leaves behind (see the GL_TEXTURE_MAX_ANISOTROPY_EXT
+// call site below for why). Applied uniformly in Texture's own constructor
+// (not a per-call-site opt-in) so every texture this engine creates gets it,
+// including through ResourceManager's cache.
+//
 // Result of a one-time (per process) check for GL_EXT_texture_filter_anisotropic
 // support, cached in queryAnisotropicSupport() below -- the answer can't
 // change for the lifetime of a given GL context, so there's no reason to

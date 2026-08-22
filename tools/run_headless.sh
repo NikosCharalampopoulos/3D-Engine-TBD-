@@ -101,8 +101,16 @@ for _ in $(seq 1 40); do
 done
 
 # Hard timeout so a hung app can never leave this script (or the headless
-# verification calling it) hanging.
-MAX_WAIT_ITERS=75  # 75 * 0.2s = 15s
+# verification calling it) hanging. This was 75 iters (15s) through Phase
+# 13a; by Phase 13g's cumulative Debug-build cost -- CSM's 3 depth passes,
+# clustered lighting's compute dispatch, SSAO's 3 screen-space passes,
+# bloom's ping-ponged blur, and the SSR compositing pass, all stacked on the
+# same 60-frame headless run, on this project's llvmpipe software
+# rasterizer -- a legitimate, non-hung run of a Debug build routinely takes
+# ~20s wall-clock (measured directly: 60 frames, ~18.4s of that inside the
+# main loop alone, plus IBLProbe's one-time startup convolution). 300 iters
+# (60s) restores real headroom above that instead of racing it.
+MAX_WAIT_ITERS=300  # 300 * 0.2s = 60s
 iters=0
 while kill -0 "${APP_PID}" 2>/dev/null; do
     if (( iters >= MAX_WAIT_ITERS )); then

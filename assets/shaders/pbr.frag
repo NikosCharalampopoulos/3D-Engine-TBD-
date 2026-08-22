@@ -46,9 +46,12 @@ uniform sampler2D uORMMap;
 uniform int uUseORMMap;
 
 // --- Directional light (the one shadow-casting light) ---
+// (no uAmbientColor here -- Phase 10 replaced this shader's flat ambient
+// placeholder with real image-based lighting; see uIrradianceMap/
+// uPrefilterMap/uBrdfLUT below and this file's own Phase 10 comment. basic.frag
+// still has its own uAmbientColor for the unrelated Blinn-Phong path.)
 uniform vec3 uLightDirection;
 uniform vec3 uLightColor;
-uniform vec3 uAmbientColor;
 uniform vec3 uViewPos;
 
 // Phase 13c: Cascaded Shadow Maps -- see basic.frag's identical comment on
