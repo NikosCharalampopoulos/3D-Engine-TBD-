@@ -1,0 +1,120 @@
+#version 430 core
+
+// Phase 13d: for every cluster, tests every active point/spot light's
+// view-space position + effective culling radius (both computed on the CPU
+// -- see ClusterLightCuller::cullLights()) against that cluster's own
+// view-space AABB (built once by cluster_aabb.comp), writing the indices of
+// the lights that actually intersect it into that cluster's own fixed-size
+// slot in the light-list SSBO. Runs every frame -- see
+// engine::ClusterLightCuller's header comment for why (the view matrix,
+// unlike the projection matrix the AABBs depend on, changes whenever the
+// camera moves).
+layout(local_size_x = 256) in;
+
+// Must match ClusterLightCuller::kGridX/Y/Z and basic.frag/pbr.frag's own
+// copies -- see cluster_aabb.comp's identical comment.
+const uint kGridX = 12u;
+const uint kGridY = 8u;
+const uint kGridZ = 24u;
+const uint kClusterCount = kGridX * kGridY * kGridZ;
+
+// Must match ClusterLightCuller::kMaxPointLights/kMaxSpotLights and
+// basic.frag/pbr.frag's MAX_POINT_LIGHTS/MAX_SPOT_LIGHTS.
+#define MAX_POINT_LIGHTS 8
+#define MAX_SPOT_LIGHTS 4
+
+struct ClusterAABB {
+    vec4 minPoint;
+    vec4 maxPoint;
+};
+
+layout(std430, binding = 0) readonly buffer ClusterAABBBuffer {
+    ClusterAABB clusters[];
+};
+
+// Per-cluster light index list -- a fixed-capacity ("simple, obviously
+// correct" -- see the phase brief's own suggestion of this as an
+// acceptable first-cut design over a compacted offset+flat-list scheme)
+// array of indices into basic.frag/pbr.frag's own uPointLights[]/
+// uSpotLights[] uniform arrays, not a second copy of each light's actual
+// data -- this compute shader only ever needs a light's *test* inputs
+// (uPointLightsView[i]/uSpotLightsView[i] below), never its color/
+// attenuation/cone angle, which stay exactly where basic.frag/pbr.frag
+// already keep them.
+struct ClusterLightList {
+    uint pointCount;
+    uint pointIndices[MAX_POINT_LIGHTS];
+    uint spotCount;
+    uint spotIndices[MAX_SPOT_LIGHTS];
+};
+
+layout(std430, binding = 1) writeonly buffer ClusterLightListBuffer {
+    ClusterLightList lightLists[];
+};
+
+// One light's test-relevant data: its position already transformed to view
+// space (by the CPU, once per light per frame -- see cullLights()) and an
+// effective culling radius (computeLightRadius(), also CPU-side --
+// LearnOpenGL's color-and-attenuation-aware "light volume" formula). Plain
+// (non-block) uniform struct arrays, exactly like basic.frag/pbr.frag's own
+// uPointLights[]/uSpotLights[] -- no std140/std430 interface-block layout
+// rules apply to these (they aren't inside a uniform block), just ordinary
+// per-field uniform locations the same way every other uniform struct array
+// in this engine already works.
+struct PointLightView {
+    vec3 viewPosition;
+    float radius;
+};
+struct SpotLightView {
+    vec3 viewPosition;
+    float radius;
+};
+
+uniform int uNumPointLights;
+uniform PointLightView uPointLightsView[MAX_POINT_LIGHTS];
+uniform int uNumSpotLights;
+uniform SpotLightView uSpotLightsView[MAX_SPOT_LIGHTS];
+
+// Standard closest-point-on-AABB-to-sphere-center squared distance -- zero
+// if the point is already inside the box.
+float sqDistPointAABB(vec3 point, vec3 aabbMin, vec3 aabbMax) {
+    vec3 closest = clamp(point, aabbMin, aabbMax);
+    vec3 delta = closest - point;
+    return dot(delta, delta);
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= kClusterCount) {
+        // Defensive -- see cluster_aabb.comp's identical guard comment;
+        // kClusterCount is an exact multiple of this shader's own
+        // local_size_x (256), so this never actually triggers with the
+        // current grid dimensions.
+        return;
+    }
+
+    vec3 aabbMin = clusters[index].minPoint.xyz;
+    vec3 aabbMax = clusters[index].maxPoint.xyz;
+
+    uint pointCount = 0u;
+    for (int i = 0; i < uNumPointLights && pointCount < uint(MAX_POINT_LIGHTS); ++i) {
+        float distSq = sqDistPointAABB(uPointLightsView[i].viewPosition, aabbMin, aabbMax);
+        float r = uPointLightsView[i].radius;
+        if (distSq <= r * r) {
+            lightLists[index].pointIndices[pointCount] = uint(i);
+            pointCount++;
+        }
+    }
+    lightLists[index].pointCount = pointCount;
+
+    uint spotCount = 0u;
+    for (int i = 0; i < uNumSpotLights && spotCount < uint(MAX_SPOT_LIGHTS); ++i) {
+        float distSq = sqDistPointAABB(uSpotLightsView[i].viewPosition, aabbMin, aabbMax);
+        float r = uSpotLightsView[i].radius;
+        if (distSq <= r * r) {
+            lightLists[index].spotIndices[spotCount] = uint(i);
+            spotCount++;
+        }
+    }
+    lightLists[index].spotCount = spotCount;
+}

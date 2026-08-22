@@ -52,6 +52,7 @@ PFNGLGENBUFFERSPROC glad_glGenBuffers = NULL;
 PFNGLBINDBUFFERPROC glad_glBindBuffer = NULL;
 PFNGLBUFFERDATAPROC glad_glBufferData = NULL;
 PFNGLBUFFERSUBDATAPROC glad_glBufferSubData = NULL;
+PFNGLGETBUFFERSUBDATAPROC glad_glGetBufferSubData = NULL;
 PFNGLDELETEBUFFERSPROC glad_glDeleteBuffers = NULL;
 PFNGLGENVERTEXARRAYSPROC glad_glGenVertexArrays = NULL;
 PFNGLBINDVERTEXARRAYPROC glad_glBindVertexArray = NULL;
@@ -84,6 +85,9 @@ PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers = NULL;
 PFNGLTEXIMAGE2DMULTISAMPLEPROC glad_glTexImage2DMultisample = NULL;
 PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC glad_glRenderbufferStorageMultisample = NULL;
 PFNGLBLITFRAMEBUFFERPROC glad_glBlitFramebuffer = NULL;
+PFNGLDISPATCHCOMPUTEPROC glad_glDispatchCompute = NULL;
+PFNGLMEMORYBARRIERPROC glad_glMemoryBarrier = NULL;
+PFNGLBINDBUFFERBASEPROC glad_glBindBufferBase = NULL;
 
 static void* load_required(GLADloadproc load, const char* name, int* ok) {
     void* ptr = load(name);
@@ -151,6 +155,7 @@ int gladLoadGLLoader(GLADloadproc load) {
     LOAD(glad_glBindBuffer, "glBindBuffer");
     LOAD(glad_glBufferData, "glBufferData");
     LOAD(glad_glBufferSubData, "glBufferSubData");
+    LOAD(glad_glGetBufferSubData, "glGetBufferSubData");
     LOAD(glad_glDeleteBuffers, "glDeleteBuffers");
     LOAD(glad_glGenVertexArrays, "glGenVertexArrays");
     LOAD(glad_glBindVertexArray, "glBindVertexArray");
@@ -183,6 +188,9 @@ int gladLoadGLLoader(GLADloadproc load) {
     LOAD(glad_glTexImage2DMultisample, "glTexImage2DMultisample");
     LOAD(glad_glRenderbufferStorageMultisample, "glRenderbufferStorageMultisample");
     LOAD(glad_glBlitFramebuffer, "glBlitFramebuffer");
+    LOAD(glad_glDispatchCompute, "glDispatchCompute");
+    LOAD(glad_glMemoryBarrier, "glMemoryBarrier");
+    LOAD(glad_glBindBufferBase, "glBindBufferBase");
 
 #undef LOAD
 

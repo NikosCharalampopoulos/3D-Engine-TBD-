@@ -14,10 +14,14 @@ diffuse irradiance cubemap, a GGX-prefiltered mipmapped specular cubemap, and
 a split-sum BRDF LUT, all convolved once at startup from the existing skybox
 -- replacing that PBR path's flat placeholder ambient term with a real,
 direction- and roughness-aware one --, (Phase 11) textured PBR materials plus
-tonemap-aware bloom, and (Phase 12) a GL 4.3 core foundation bump laying the
-groundwork for upcoming compute-shader clustered lighting, built up from
-bare-metal OpenGL, and verified at every step by a headless Xvfb+Mesa
-run/screenshot harness (no GPU or display required). See "Architecture
+tonemap-aware bloom, (Phase 12) a GL 4.3 core foundation bump laying the
+groundwork for compute-shader clustered lighting, and (Phase 13d) GPU
+compute-shader clustered forward light culling -- replacing the old
+brute-force per-fragment light loop with a 3D grid of view-frustum
+"clusters", each with its own GPU-built list of which lights actually
+reach it -- built up from bare-metal OpenGL, and verified at every step by
+a headless Xvfb+Mesa run/screenshot harness (no GPU or display required).
+See "Architecture
 overview" right below for what the finished whole looks like today, or
 "Development history" further down for how it got built, phase by phase
 (this repo was built incrementally across many phases, each independently
@@ -113,19 +117,33 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   engine -- the scene's shader, the scene's model, every material's diffuse
   texture including the shared checker-texture fallback -- goes through it,
   so nothing is loaded from disk or re-uploaded to the GPU more than once.
+- **`ComputeShader`** (`compute_shader.hpp`/`.cpp`, see "Phase 13d" below) --
+  a small RAII sibling to `Shader` for a compute-only GL program (one
+  `GL_COMPUTE_SHADER` stage, no vertex/fragment pipeline at all).
+- **`ClusterLightCuller`** (`cluster_light_culler.hpp`/`.cpp`, see
+  "Phase 13d" below) -- GPU compute-shader clustered forward light culling:
+  divides the camera's view frustum into a 3D grid of "clusters", builds
+  each cluster's view-space AABB once at startup, and re-culls every
+  point/spot light against those AABBs every frame, so `basic.frag`/
+  `pbr.frag` can loop over just the handful of lights that actually reach
+  a given fragment's cluster instead of every light in the scene.
 
 One frame, in short: `Application::run()` polls GLFW events and an
-`InputState`, feeds it to `camera_`, then `render()` (1) renders the whole
-scene depth-only into `shadowMap_` from the directional light's point of
-view, (2) restores the window's real viewport and binds `hdrFramebuffer_`,
-uploads view/projection/light-space/lighting uniforms once, and iterates
-`entities_` calling `model->draw(shader, entity.transform.getModelMatrix())`
-(which recurses the model's node tree drawing each mesh with its own
-material) plus the hand-built ground plane, each fragment sampling
-`shadowMap_` and any bound normal map as it shades, (3) draws `skybox_` last
-into that same HDR framebuffer as the background, and (4) resolves
-`hdrFramebuffer_`'s color buffer to the window with one fullscreen
-tonemap/gamma-correct pass (`postProcessShader_` + `postProcessQuad_`).
+`InputState`, feeds it to `camera_`, then `render()` (1) re-culls every
+light against `clusterLightCuller_`'s per-cluster AABBs for this frame's
+camera view (a compute-shader dispatch + memory barrier -- see "Phase 13d"
+below), (2) renders the whole scene depth-only into `shadowMap_` from the
+directional light's point of view, (3) restores the window's real viewport
+and binds `hdrFramebuffer_`, uploads view/projection/light-space/lighting
+uniforms once, and iterates `entities_` calling
+`model->draw(shader, entity.transform.getModelMatrix())` (which recurses
+the model's node tree drawing each mesh with its own material) plus the
+hand-built ground plane, each fragment sampling `shadowMap_`, any bound
+normal map, and its own cluster's culled light list as it shades, (4) draws
+`skybox_` last into that same HDR framebuffer as the background, and
+(5) resolves `hdrFramebuffer_`'s color buffer to the window with one
+fullscreen tonemap/gamma-correct pass (`postProcessShader_` +
+`postProcessQuad_`).
 
 ## Directory layout
 
@@ -134,19 +152,21 @@ CMakeLists.txt        Root build: fetches deps (incl. Assimp), builds engine_app
 src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
                        shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp,
                        input.cpp, resource_manager.cpp, shadow_map.cpp,
-                       framebuffer.cpp, skybox.cpp, ibl_probe.cpp)
+                       framebuffer.cpp, skybox.cpp, ibl_probe.cpp,
+                       compute_shader.cpp, cluster_light_culler.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, entity, input,
                        resource_manager, shadow_map, framebuffer, skybox,
-                       ibl_probe)
+                       ibl_probe, compute_shader, cluster_light_culler)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
                        cubemap_capture.vert, irradiance_convolution.frag,
-                       prefilter.frag, brdf_lut.frag), textures
-                       (checker.png, normal_bump.png, skybox/ -- 6 cubemap
-                       faces), models (scene.obj + scene.mtl)
+                       prefilter.frag, brdf_lut.frag, cluster_aabb.comp,
+                       cluster_cull.comp), textures (checker.png,
+                       normal_bump.png, skybox/ -- 6 cubemap faces),
+                       models (scene.obj + scene.mtl)
 tools/                 Build/run/screenshot scripts
 tests/                 Placeholder for later phases (empty CMakeLists)
 ```
@@ -1303,6 +1323,102 @@ special-cased hack for this one.
   anisotropic-filtered textures, skybox, HDR/tonemap, and the Blinn-Phong
   table/box/pyramid/ground) still renders pixel-for-pixel identically --
   nothing visible is incorrectly culled at this camera's default framing.
+
+### Phase 13d: GPU compute-shader clustered forward lighting
+
+Phase 13d replaces `basic.frag`/`pbr.frag`'s brute-force "loop over every
+point/spot light for every fragment, unconditionally" with the standard
+clustered forward shading technique (Olsson & Assarsson; the same
+logarithmic-Z-slicing scheme Doom (2016) and Angry Birds' clustered
+renderers popularized) -- an architecture change for when this engine's
+light count grows into dozens, not a fix for an actual bottleneck at this
+scene's current handful of lights.
+
+- **GLAD gained its first GL 4.3-specific entry points**
+  (`external/glad/`): `glDispatchCompute`, `glMemoryBarrier`,
+  `glBindBufferBase`, `glGetBufferSubData` (for the debug occupancy
+  read-back only), plus the `GL_COMPUTE_SHADER`/`GL_SHADER_STORAGE_BUFFER`/
+  `GL_SHADER_STORAGE_BARRIER_BIT` enums -- the context has requested GL 4.3
+  core since Phase 12 specifically so this phase could add these once
+  something actually called them.
+- **`engine::ComputeShader`** (`compute_shader.hpp`/`.cpp`) -- a small RAII
+  sibling to `Shader`: one `GL_COMPUTE_SHADER` stage instead of a linked
+  vertex+fragment pair (a compute program is a fundamentally different kind
+  of GL object, not an overload of `Shader`'s own one-vertex-one-fragment
+  contract), same move-only/no-uniform-caching shape.
+- **`engine::ClusterLightCuller`** (`cluster_light_culler.hpp`/`.cpp`) owns
+  the whole technique: a **12x8x24 = 2304** cluster grid (12x8 screen tiles
+  matching this engine's fixed 800x600/4:3 window; 24 logarithmic Z-slices,
+  the same slice count Doom 2016's published grid uses) and two SSBOs --
+  a per-cluster view-space AABB and a per-cluster **fixed-capacity light
+  index list** (`pointCount` + up to `MAX_POINT_LIGHTS` (8) indices,
+  `spotCount` + up to `MAX_SPOT_LIGHTS` (4) indices -- chosen over a
+  compacted offset+flat-list scheme because with this engine's own light
+  count topping out at 12 total, a fixed-size array is just as cheap and
+  categorically simpler to get right: no atomic-counter compaction pass to
+  review for races). Each light's actual color/attenuation/cone data stays
+  exactly where it always lived, `basic.frag`/`pbr.frag`'s own
+  `uPointLights[]`/`uSpotLights[]` uniform arrays -- clustering only changes
+  *which* and *how many* of those entries a fragment loops over.
+  - `computeClusterAABBs()` (`cluster_aabb.comp`, `local_size = 4x4x4`,
+    dispatched as `3x2x6` groups) builds every cluster's AABB from the
+    projection matrix alone (screen-tile corners unprojected via the
+    inverse projection, intersected against each cluster's near/far
+    Z-plane -- the standard line-through-origin trick). Run **exactly
+    once**, in the constructor -- a cluster's view-space AABB is a pure
+    function of the projection matrix and window size, neither of which
+    this engine ever changes after startup, so it never needs
+    recomputing.
+  - `cullLights()` (`cluster_cull.comp`, `local_size_x = 256`, dispatched
+    as 9 groups) sphere-vs-AABB tests every light (view-space position,
+    computed on the CPU each frame from `view * worldPosition`; effective
+    radius from LearnOpenGL's color-and-attenuation-aware "light volume"
+    cutoff -- deliberately generous, since an over-generous radius only
+    costs a few wasted tests while a too-small one would silently drop a
+    light from a cluster it still visibly lights) against every cluster,
+    writing the surviving indices. Run **every frame** -- unlike the AABBs,
+    this depends on the *view* matrix, which changes whenever the camera
+    moves (this engine's own lights are static world-space constants and
+    never move, but the camera does, in both free-fly and the scripted
+    demo path, so re-culling every frame is the actually-correct choice,
+    not a conservative default).
+  - Both dispatches are followed by `glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)`
+    before anything reads their SSBO writes (the light-culling dispatch
+    itself, and every subsequent fragment-shader draw call this frame,
+    respectively).
+- **`basic.frag`/`pbr.frag`** each compute which cluster the current
+  fragment falls into (`computeClusterIndex()`: `gl_FragCoord.xy` for the
+  screen tile, `vViewSpaceDepth` -- already computed for CSM's own cascade
+  selection -- through the identical logarithmic-Z formula the AABB compute
+  shader solved in the opposite direction) and loop only over that
+  cluster's own light list (`layout(std430, binding = 1) readonly buffer`)
+  instead of every light unconditionally. Bumped from `#version 330 core`
+  to `430 core` (both `.vert` and `.frag` of each pair) -- SSBOs require
+  GLSL 4.30.
+- **`ENGINE_CLUSTER_DEBUG=1`** (same getenv-gated pattern as
+  `ENGINE_CAMERA_DEMO`/`ENGINE_FRUSTUM_CULL_DEMO`) blends a heat-map tint
+  (red = more lights, blue = fewer) keyed by each fragment's own cluster's
+  light count into the lit color -- visible proof the per-cluster lists
+  vary spatially, not just that this code compiles.
+- **Proving it isn't a no-op**: a periodic log line (same
+  `kCullLogFrameInterval` cadence as Phase 13b's frustum-culling summary,
+  reading the light-list SSBO back via `glGetBufferSubData` -- deliberately
+  not every frame, to avoid a GPU->CPU stall on the hot path) reports e.g.
+  `Clustered lighting: 2136/2304 clusters occupied, avg 3.565543
+  lights/occupied cluster` -- not all 2304 (some clusters, e.g. ones behind
+  every light's culling sphere, are correctly empty) and not a flat "every
+  cluster sees every light" either.
+- **No visual regression**: `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh
+  build/engine_app <out.png>` was run once against the pre-Phase-13d build
+  and once against this phase's build; `compare -metric AE`/`RMSE` between
+  the two PNGs both report `0`, and the two PNGs are byte-identical
+  (matching MD5 sums) -- every light that reached a surface before
+  clustering still reaches it after, confirming clustering is a pure
+  optimization/architecture change with zero effect on the lit result.
+  Verified with a `Debug` build (`GL_CHECK` draining `glGetError()` after
+  every call, including the new compute dispatch/SSBO/barrier calls) --
+  zero GL errors across a normal run, `ENGINE_CLUSTER_DEBUG=1`,
+  `ENGINE_CAMERA_DEMO=1`, and `ENGINE_FRUSTUM_CULL_DEMO=1`.
 
 ## Libraries used and why
 

@@ -239,6 +239,29 @@
 //     (brightFramebuffer_/pingpongFramebuffer0_/1_, which already only ever
 //     read/write hdrFramebuffer_'s -- now hdrResolveFramebuffer_'s --
 //     resolved color, never its raw multisample buffer) are unaffected.
+//
+// Phase 13d replaces basic.frag/pbr.frag's brute-force "loop over every
+// point/spot light for every fragment" with GPU compute-shader clustered
+// forward shading (see cluster_light_culler.hpp for the full technique):
+//   - clusterLightCuller_ owns two compute passes: one that builds every
+//     cluster's view-space AABB (run exactly once, in this constructor --
+//     it depends only on the fixed projection matrix/window size, never the
+//     view matrix, so it never needs recomputing after startup) and one
+//     that culls every light against those AABBs to build a per-cluster
+//     light index list (run every frame in render(), since the *view*
+//     matrix changes whenever the camera moves even though this engine's
+//     own lights never do).
+//   - basic.frag/pbr.frag each compute which cluster the current fragment
+//     falls into (from its screen position + view-space depth, the exact
+//     same logarithmic-Z formula the AABB pass used) and loop only over
+//     that cluster's own culled light list (read from an SSBO) instead of
+//     every light unconditionally -- each light's own position/color/
+//     attenuation/cone-angle data is untouched, still the same
+//     uPointLights[]/uSpotLights[] uniform arrays Phase 7a introduced.
+//   - clusterDebugMode_ (ENGINE_CLUSTER_DEBUG, same getenv-gated pattern as
+//     cameraDemoMode_/frustumCullDemoMode_) tints each fragment by its own
+//     cluster's light count, proving the per-cluster lists actually vary
+//     rather than only compiling.
 
 #include <glm/glm.hpp>
 
@@ -249,6 +272,7 @@
 #include <vector>
 
 #include "engine/camera.hpp"
+#include "engine/cluster_light_culler.hpp"
 #include "engine/entity.hpp"
 #include "engine/framebuffer.hpp"
 #include "engine/ibl_probe.hpp"
@@ -385,6 +409,14 @@ private:
     std::shared_ptr<Shader> irradianceShader_;
     std::shared_ptr<Shader> prefilterShader_;
     std::shared_ptr<Shader> brdfShader_;
+    // Phase 13d: clustered light culling's two compute passes + the two
+    // SSBOs they build (see cluster_light_culler.hpp) -- constructed
+    // directly (not through resources_) since exactly one instance ever
+    // exists and nothing else in this engine would share it, the same
+    // "direct member, no ResourceManager" choice shadowCascades_ already
+    // makes for the same reason. Only needs window_ (a live GL context)
+    // constructed first, like every other GL-handle-owning member here.
+    ClusterLightCuller clusterLightCuller_;
     // Phase 7a: the directional light's depth-only render target. Fixed
     // resolution (see application.cpp's kShadowMapWidth/Height), independent
     // of the window's own framebuffer size.
@@ -493,6 +525,15 @@ private:
     // stops a caller from setting both env vars, so update() picks one
     // deterministically rather than letting them race each frame.
     bool frustumCullDemoMode_ = false;
+
+    // Phase 13d: set from ENGINE_CLUSTER_DEBUG -- true tints every fragment
+    // by its own cluster's total (point + spot) light count instead of (on
+    // top of, see basic.frag/pbr.frag's main()) its ordinarily-lit color,
+    // so a headless run can visually confirm the per-cluster light lists
+    // actually vary across the screen/depth. Same getenv-gated pattern as
+    // cameraDemoMode_/frustumCullDemoMode_ above; independent of both (a
+    // debug visualization, not an alternate camera path).
+    bool clusterDebugMode_ = false;
 };
 
 }  // namespace engine

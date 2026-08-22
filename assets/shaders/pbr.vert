@@ -1,5 +1,8 @@
-#version 330 core
+#version 430 core
 
+// Phase 13d: bumped from #version 330 core to 430 core, matching pbr.frag's
+// own bump -- see that file's comment.
+//
 // Phase 9: the PBR pass's vertex stage. Identical vertex contract to
 // basic.vert (same attribute layout, same uniform names, same varyings) --
 // the metallic/roughness Cook-Torrance BRDF this pass drives (see pbr.frag)

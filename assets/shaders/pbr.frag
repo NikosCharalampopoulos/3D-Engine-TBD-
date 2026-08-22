@@ -1,5 +1,9 @@
-#version 330 core
+#version 430 core
 
+// Phase 13d: bumped from #version 330 core to 430 core -- see basic.frag's
+// identical comment (clustered lighting's per-cluster light-list SSBO
+// requires GLSL 4.30's Shader Storage Buffer Objects).
+//
 // Phase 9: metallic/roughness Cook-Torrance PBR, replacing basic.frag's
 // Blinn-Phong model for whatever's drawn with this program (this phase: the
 // new sphere test-grid -- see Application's sphereMaterials_/sphereMesh_).
@@ -107,6 +111,45 @@ uniform int uNumPointLights;
 uniform PointLight uPointLights[MAX_POINT_LIGHTS];
 uniform int uNumSpotLights;
 uniform SpotLight uSpotLights[MAX_SPOT_LIGHTS];
+
+// Phase 13d: clustered light culling -- identical mechanism to basic.frag's
+// own copy of this same block (same duplication-by-design rationale as
+// every other reused block in this file, see this file's own header
+// comment). Each light's data stays in uPointLights[]/uSpotLights[] above,
+// unchanged; only which/how many of those entries a fragment loops over
+// changes -- see computeClusterIndex()/main() below.
+#define CLUSTER_GRID_X 12
+#define CLUSTER_GRID_Y 8
+#define CLUSTER_GRID_Z 24
+
+struct ClusterLightList {
+    uint pointCount;
+    uint pointIndices[MAX_POINT_LIGHTS];
+    uint spotCount;
+    uint spotIndices[MAX_SPOT_LIGHTS];
+};
+
+layout(std430, binding = 1) readonly buffer ClusterLightListBuffer {
+    ClusterLightList lightLists[];
+};
+
+uniform vec2 uScreenSize;
+uniform float uClusterNearPlane;
+uniform float uClusterFarPlane;
+uniform int uClusterDebug;
+
+uint computeClusterIndex() {
+    vec2 tileSize = uScreenSize / vec2(float(CLUSTER_GRID_X), float(CLUSTER_GRID_Y));
+    uint clusterX = uint(clamp(gl_FragCoord.x / tileSize.x, 0.0, float(CLUSTER_GRID_X - 1)));
+    uint clusterY = uint(clamp(gl_FragCoord.y / tileSize.y, 0.0, float(CLUSTER_GRID_Y - 1)));
+
+    float depth = max(vViewSpaceDepth, uClusterNearPlane);
+    float zRatio =
+        log(depth / uClusterNearPlane) * (float(CLUSTER_GRID_Z) / log(uClusterFarPlane / uClusterNearPlane));
+    uint clusterZ = uint(clamp(floor(zRatio), 0.0, float(CLUSTER_GRID_Z - 1)));
+
+    return clusterX + clusterY * uint(CLUSTER_GRID_X) + clusterZ * uint(CLUSTER_GRID_X) * uint(CLUSTER_GRID_Y);
+}
 
 const float PI = 3.14159265359;
 
@@ -354,8 +397,15 @@ void main() {
         Lo += shadeDirectLight(N, V, L, radiance, albedo, metallic, roughness, F0);
     }
 
-    // --- Point lights (unshadowed) ---
-    for (int i = 0; i < uNumPointLights; ++i) {
+    // Phase 13d: this fragment's own cluster + its culled point/spot light
+    // counts -- see basic.frag's identical comment.
+    uint clusterIndex = computeClusterIndex();
+    uint clusterPointCount = lightLists[clusterIndex].pointCount;
+    uint clusterSpotCount = lightLists[clusterIndex].spotCount;
+
+    // --- Point lights (unshadowed), culled to this fragment's own cluster ---
+    for (uint li = 0u; li < clusterPointCount; ++li) {
+        uint i = lightLists[clusterIndex].pointIndices[li];
         vec3 toLight = uPointLights[i].position - vFragPos;
         float distance = length(toLight);
         vec3 L = normalize(toLight);
@@ -367,8 +417,9 @@ void main() {
         Lo += shadeDirectLight(N, V, L, radiance, albedo, metallic, roughness, F0);
     }
 
-    // --- Spot lights (unshadowed) ---
-    for (int i = 0; i < uNumSpotLights; ++i) {
+    // --- Spot lights (unshadowed), culled to this fragment's own cluster ---
+    for (uint li = 0u; li < clusterSpotCount; ++li) {
+        uint i = lightLists[clusterIndex].spotIndices[li];
         vec3 toLight = uSpotLights[i].position - vFragPos;
         float distance = length(toLight);
         vec3 L = normalize(toLight);
@@ -425,5 +476,16 @@ void main() {
 
     vec3 ambient = (kD * diffuseIBL + specularIBL) * ao;
 
-    FragColor = vec4(ambient + Lo, 1.0);
+    vec3 finalColor = ambient + Lo;
+
+    // Phase 13d debug visualization (ENGINE_CLUSTER_DEBUG=1) -- identical to
+    // basic.frag's own version, see that shader's comment.
+    if (uClusterDebug != 0) {
+        float totalCount = float(clusterPointCount + clusterSpotCount);
+        float maxCount = float(MAX_POINT_LIGHTS + MAX_SPOT_LIGHTS);
+        vec3 heat = vec3(totalCount / maxCount, 0.15, 1.0 - totalCount / maxCount);
+        finalColor = mix(finalColor, heat, 0.5);
+    }
+
+    FragColor = vec4(finalColor, 1.0);
 }

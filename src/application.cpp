@@ -16,6 +16,7 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 #include "engine/frustum.hpp"
@@ -81,6 +82,10 @@ const std::string kIrradianceFragmentShaderPath =
     resolveAssetPath("assets/shaders/irradiance_convolution.frag");
 const std::string kPrefilterFragmentShaderPath = resolveAssetPath("assets/shaders/prefilter.frag");
 const std::string kBrdfLutFragmentShaderPath = resolveAssetPath("assets/shaders/brdf_lut.frag");
+// Phase 13d: clustered lighting's two compute passes (see
+// cluster_light_culler.hpp/ClusterLightCuller).
+const std::string kClusterAABBComputeShaderPath = resolveAssetPath("assets/shaders/cluster_aabb.comp");
+const std::string kClusterCullComputeShaderPath = resolveAssetPath("assets/shaders/cluster_cull.comp");
 // Phase 5's hand-authored test scene: three separate objects (a pyramid, a
 // table, and a small box sitting on top of the table) at different
 // positions, proving Model's node hierarchy + transform composition places
@@ -712,6 +717,29 @@ bool frustumCullDemoModeFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 13d: same getenv-gated-behavior pattern -- see clusterDebugMode_'s
+// own comment in application.hpp for what this flag does.
+bool clusterDebugModeFromEnv() {
+    const char* value = std::getenv("ENGINE_CLUSTER_DEBUG");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+// Phase 13d: converts this file's own kPointLights/kSpotLights tables (see
+// their own comment above) into the plain world-position/color/attenuation
+// form ClusterLightCuller::cullLights() needs -- it doesn't care about a
+// spot light's direction/cone angle (only basic.frag/pbr.frag's actual
+// shading math does, unchanged from before this phase), just enough to
+// test a light's position/reach against each cluster's AABB.
+template <typename LightTable>
+std::array<ClusterLightInput, std::tuple_size<LightTable>::value> toClusterLightInputs(const LightTable& lights) {
+    std::array<ClusterLightInput, std::tuple_size<LightTable>::value> inputs{};
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        inputs[i] = ClusterLightInput{lights[i].position, lights[i].color, lights[i].constant, lights[i].linear,
+                                       lights[i].quadratic};
+    }
+    return inputs;
+}
+
 // Phase 13b: render() logs one combined "N/M culled" line every this-many
 // frames (not every frame) -- frequent enough to see the count actually
 // change as ENGINE_CAMERA_DEMO's waypoints step (every 20 frames, see
@@ -733,6 +761,11 @@ Application::Application(int width, int height, const std::string& title, std::u
       irradianceShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kIrradianceFragmentShaderPath)),
       prefilterShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kPrefilterFragmentShaderPath)),
       brdfShader_(resources_.getShader(kPostProcessVertexShaderPath, kBrdfLutFragmentShaderPath)),
+      // Phase 13d: constructed directly from its two compute shader source
+      // paths (not through resources_ -- see this member's own
+      // application.hpp comment); only needs window_'s GL context to
+      // exist, already true by this point in the initializer list.
+      clusterLightCuller_(kClusterAABBComputeShaderPath, kClusterCullComputeShaderPath),
       // Phase 13c: kCascadeCount independent ShadowMap instances, all the
       // same fixed resolution (see kShadowMapWidth/Height's own Phase 13c
       // comment) -- std::array<ShadowMap, N>'s usual aggregate
@@ -796,7 +829,8 @@ Application::Application(int width, int height, const std::string& title, std::u
       camera_(kDefaultCameraPosition),
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()),
-      frustumCullDemoMode_(frustumCullDemoModeFromEnv()) {
+      frustumCullDemoMode_(frustumCullDemoModeFromEnv()),
+      clusterDebugMode_(clusterDebugModeFromEnv()) {
     // No depth buffer testing existed in Phase 1 (nothing but a flat clear
     // needed it); real 3D geometry does, so faces occlude each other
     // correctly instead of painting in draw-call order.
@@ -816,6 +850,21 @@ Application::Application(int width, int height, const std::string& title, std::u
         LOG_INFO("ENGINE_FRUSTUM_CULL_DEMO set: camera faces away from the scene to prove culling drops the draw count");
     } else {
         camera_.setPositionLookingAt(kDefaultCameraPosition, kSceneCenter);
+    }
+
+    // Phase 13d: build every cluster's view-space AABB exactly once, here,
+    // rather than every frame in render() -- see clusterLightCuller_'s own
+    // application.hpp comment for why that's correct (a cluster's AABB is a
+    // pure function of the projection matrix + window size, neither of
+    // which this engine ever changes after this constructor runs; only
+    // light *culling* against those fixed AABBs needs to happen every
+    // frame, since the view matrix changes whenever the camera moves).
+    {
+        const auto [fbWidth, fbHeight] = window_.getSize();
+        const float aspect = fbHeight != 0 ? static_cast<float>(fbWidth) / static_cast<float>(fbHeight) : 1.0f;
+        const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
+        clusterLightCuller_.computeClusterAABBs(
+            projection, camera_.nearPlane(), glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
     }
 
     // The scene is one Entity wrapping the same Phase 5 model
@@ -936,6 +985,12 @@ Application::Application(int width, int height, const std::string& title, std::u
 
     if (cameraDemoMode_) {
         LOG_INFO("ENGINE_CAMERA_DEMO set: driving the camera through a scripted orbit instead of live input");
+    }
+
+    if (clusterDebugMode_) {
+        LOG_INFO(
+            "ENGINE_CLUSTER_DEBUG set: tinting fragments by their cluster's light count to visualize clustered "
+            "light culling");
     }
 
     // Phase 13c: log the practical-split-scheme's actual resulting cascade
@@ -1096,6 +1151,37 @@ void Application::render() {
     const glm::mat4 view = camera_.getViewMatrix();
     const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
 
+    // Phase 13d: re-cull every light against every cluster's (already-built,
+    // see the constructor) AABB using this frame's own view matrix --
+    // must run every frame the camera might have moved (effectively always
+    // in this engine, see clusterLightCuller_'s own header comment), even
+    // though kPointLights/kSpotLights themselves are fixed world-space
+    // constants that never move. The two light tables are converted to
+    // ClusterLightCuller's plain (position/color/attenuation) input form
+    // once (function-local static -- kPointLights/kSpotLights never
+    // change, so there's no reason to redo this conversion every frame)
+    // rather than every call.
+    {
+        static const std::array<ClusterLightInput, kPointLights.size()> kPointLightInputs =
+            toClusterLightInputs(kPointLights);
+        static const std::array<ClusterLightInput, kSpotLights.size()> kSpotLightInputs =
+            toClusterLightInputs(kSpotLights);
+        clusterLightCuller_.cullLights(view, kPointLightInputs.data(), kPointLightInputs.size(),
+                                        kSpotLightInputs.data(), kSpotLightInputs.size());
+
+        // Phase 13d: periodic proof (not every frame -- a GPU->CPU
+        // read-back is exactly the kind of stall a real per-frame hot path
+        // should avoid) that the per-cluster light lists cullLights() just
+        // built are actually varied, non-trivial data -- same log
+        // frequency as Phase 13b's own frustum-culling summary line.
+        if (frameCount_ % kCullLogFrameInterval == 0) {
+            const ClusterOccupancyStats stats = clusterLightCuller_.readOccupancyStats();
+            LOG_INFO("Clustered lighting: " + std::to_string(stats.occupiedClusters) + "/" +
+                      std::to_string(stats.totalClusters) + " clusters occupied, avg " +
+                      std::to_string(stats.averageLightsPerOccupiedCluster) + " lights/occupied cluster");
+        }
+    }
+
     // Phase 13b: the frustum is derived fresh from this frame's own view/
     // projection (never cached across frames -- matching Camera's own "no
     // premature caching" style, see camera.hpp) and shared by every
@@ -1123,6 +1209,17 @@ void Application::render() {
     shader_->setVec3("uLightColor", kLightColor);
     shader_->setVec3("uAmbientColor", kAmbientColor);
     shader_->setVec3("uViewPos", camera_.position());
+
+    // Phase 13d: clustered lighting's own per-frame uniforms -- basic.frag's
+    // computeClusterIndex() needs the same screen size/near/far the compute
+    // shaders built the cluster grid against (see
+    // clusterLightCuller_.computeClusterAABBs()'s call site in the
+    // constructor) to pick the same cluster for a given fragment that its
+    // light list was actually culled against.
+    shader_->setVec2("uScreenSize", glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
+    shader_->setFloat("uClusterNearPlane", camera_.nearPlane());
+    shader_->setFloat("uClusterFarPlane", ClusterLightCuller::kClusterFarDistance);
+    shader_->setInt("uClusterDebug", clusterDebugMode_ ? 1 : 0);
 
     // Phase 7a: point/spot lights, uploaded as a live count + a fixed-size
     // array each frame (see basic.frag's uNumPointLights/uPointLights and
@@ -1222,6 +1319,12 @@ void Application::render() {
     pbrShader_->setVec3("uLightColor", kLightColor);
     pbrShader_->setVec3("uAmbientColor", kAmbientColor);
     pbrShader_->setVec3("uViewPos", camera_.position());
+
+    // Phase 13d: see shader_'s identical upload above.
+    pbrShader_->setVec2("uScreenSize", glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
+    pbrShader_->setFloat("uClusterNearPlane", camera_.nearPlane());
+    pbrShader_->setFloat("uClusterFarPlane", ClusterLightCuller::kClusterFarDistance);
+    pbrShader_->setInt("uClusterDebug", clusterDebugMode_ ? 1 : 0);
 
     pbrShader_->setInt("uNumPointLights", static_cast<int>(kPointLights.size()));
     for (std::size_t i = 0; i < kPointLights.size(); ++i) {

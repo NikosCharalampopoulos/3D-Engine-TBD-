@@ -139,6 +139,8 @@ add_executable(engine_app
     src/skybox.cpp
     src/ibl_probe.cpp
     src/paths.cpp
+    src/compute_shader.cpp
+    src/cluster_light_culler.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

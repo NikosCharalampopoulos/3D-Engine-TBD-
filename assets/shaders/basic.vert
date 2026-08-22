@@ -1,5 +1,13 @@
-#version 330 core
+#version 430 core
 
+// Phase 13d: bumped from #version 330 core to 430 core purely to match
+// basic.frag's own version bump (SSBO support, needed for clustered
+// lighting's per-cluster light list -- see that file's comment); a linked
+// program's stages don't strictly have to share one #version, but keeping
+// them matched avoids depending on driver-specific leniency about mixed
+// versions within one program. Nothing in this file's own language usage
+// changes behavior between 330 and 430 core.
+//
 // Phase 4: full position/normal/texCoord vertex input, now that Mesh wires
 // up all three attributes (see mesh.cpp). Model/view/projection are passed
 // as three separate matrices instead of Phase 2-3's single combined uMVP,

@@ -1,5 +1,15 @@
-#version 330 core
+#version 430 core
 
+// Phase 13d: bumped from #version 330 core to 430 core -- Shader Storage
+// Buffer Objects (the `layout(std430, binding = ...) buffer` block below,
+// clustered lighting's per-cluster light list) require GLSL 4.30 (or the
+// GL_ARB_shader_storage_buffer_object extension on an older version); this
+// engine's GL context has been 4.3 core since Phase 12 specifically to
+// support this, so there's no reason to reach for the extension form
+// instead of just declaring the real version this shader now needs.
+// Nothing else in this file's language usage changes behavior between 330
+// and 430 core.
+//
 // Phase 4: textured Blinn-Phong lighting, replacing Phase 2-3's flat
 // per-draw-call uColor.
 //
@@ -122,6 +132,80 @@ uniform int uNumPointLights;
 uniform PointLight uPointLights[MAX_POINT_LIGHTS];
 uniform int uNumSpotLights;
 uniform SpotLight uSpotLights[MAX_SPOT_LIGHTS];
+
+// Phase 13d: clustered light culling. Each light's own data stays right
+// above (uPointLights[]/uSpotLights[], completely unchanged by this phase)
+// -- what changes is which and how many of those array entries a given
+// fragment actually loops over: instead of `for i in [0, uNumPointLights)`
+// unconditionally, main() below looks up this fragment's own cluster (from
+// its screen position + view-space depth, computeClusterIndex()) and only
+// loops over that cluster's own light index list, built once per frame by
+// cluster_cull.comp -- see engine::ClusterLightCuller's header comment for
+// the full technique.
+//
+// Grid dimensions duplicated by hand from ClusterLightCuller::kGridX/Y/Z
+// (cluster_light_culler.hpp) -- same "no #include across GLSL/C++" reason
+// MAX_POINT_LIGHTS/MAX_SPOT_LIGHTS above are already duplicated from
+// application.cpp.
+#define CLUSTER_GRID_X 12
+#define CLUSTER_GRID_Y 8
+#define CLUSTER_GRID_Z 24
+
+struct ClusterLightList {
+    uint pointCount;
+    uint pointIndices[MAX_POINT_LIGHTS];
+    uint spotCount;
+    uint spotIndices[MAX_SPOT_LIGHTS];
+};
+
+// binding = 1 matches ClusterLightCuller::kClusterLightListBinding --
+// written by cluster_cull.comp, read-only from here (a fragment shader
+// never needs to write this buffer).
+layout(std430, binding = 1) readonly buffer ClusterLightListBuffer {
+    ClusterLightList lightLists[];
+};
+
+// The real framebuffer size in pixels -- must match the same uScreenSize
+// cluster_aabb.comp/cluster_cull.comp were built against, so this
+// fragment's own tile assignment lines up with the AABB its cluster's
+// light list was actually culled against.
+uniform vec2 uScreenSize;
+uniform float uClusterNearPlane;
+// ClusterLightCuller::kClusterFarDistance.
+uniform float uClusterFarPlane;
+// ENGINE_CLUSTER_DEBUG=1 (see Application) -- tints this fragment by its
+// own cluster's total (point + spot) light count instead of (well, on top
+// of, see main()) its ordinarily-lit color, so a headless screenshot can
+// show the per-cluster light lists actually varying across the screen/
+// depth rather than only "compiles and doesn't crash."
+uniform int uClusterDebug;
+
+// Picks which of the CLUSTER_GRID_X x CLUSTER_GRID_Y x CLUSTER_GRID_Z
+// clusters this fragment falls into, from its screen-space tile
+// (gl_FragCoord.xy, the same pixel coordinates cluster_aabb.comp's own
+// tiling is built from) and its view-space depth (vViewSpaceDepth, already
+// computed by basic.vert for CSM's own cascade selection above) via the
+// same logarithmic Z-slicing formula cluster_aabb.comp solves in the
+// opposite direction (slice index -> depth range, here: depth ->
+// slice index) -- both must use the identical formula for a fragment's
+// cluster assignment to match the cluster its own AABB/light list was
+// actually built for.
+uint computeClusterIndex() {
+    vec2 tileSize = uScreenSize / vec2(float(CLUSTER_GRID_X), float(CLUSTER_GRID_Y));
+    uint clusterX = uint(clamp(gl_FragCoord.x / tileSize.x, 0.0, float(CLUSTER_GRID_X - 1)));
+    uint clusterY = uint(clamp(gl_FragCoord.y / tileSize.y, 0.0, float(CLUSTER_GRID_Y - 1)));
+
+    // Guard against depth <= uClusterNearPlane (log() of <= 0 is undefined)
+    // -- shouldn't happen for a real rasterized fragment (everything drawn
+    // is beyond the near plane by definition), but cheap insurance against
+    // NaN propagating into clusterZ below.
+    float depth = max(vViewSpaceDepth, uClusterNearPlane);
+    float zRatio =
+        log(depth / uClusterNearPlane) * (float(CLUSTER_GRID_Z) / log(uClusterFarPlane / uClusterNearPlane));
+    uint clusterZ = uint(clamp(floor(zRatio), 0.0, float(CLUSTER_GRID_Z - 1)));
+
+    return clusterX + clusterY * uint(CLUSTER_GRID_X) + clusterZ * uint(CLUSTER_GRID_X) * uint(CLUSTER_GRID_Y);
+}
 
 // Standard inverse-square-ish distance falloff (the classic "point light
 // range" formula from Ogre3D/LearnOpenGL, not physically exact inverse-
@@ -293,8 +377,21 @@ void main() {
         specularSum += lit * spec * uLightColor;
     }
 
-    // --- Point lights (unshadowed) ---
-    for (int i = 0; i < uNumPointLights; ++i) {
+    // Phase 13d: which cluster this fragment falls into, and that
+    // cluster's own culled point/spot light counts -- looked up once and
+    // reused by both loops below and the debug visualization at the end of
+    // main().
+    uint clusterIndex = computeClusterIndex();
+    uint clusterPointCount = lightLists[clusterIndex].pointCount;
+    uint clusterSpotCount = lightLists[clusterIndex].spotCount;
+
+    // --- Point lights (unshadowed), culled to this fragment's own cluster
+    // --- identical per-light math to the old "loop every light"
+    // version -- only the loop bound (this cluster's own count) and the
+    // index it reads (this cluster's own indices, not 0..uNumPointLights-1
+    // in order) changed.
+    for (uint li = 0u; li < clusterPointCount; ++li) {
+        uint i = lightLists[clusterIndex].pointIndices[li];
         vec3 toLight = uPointLights[i].position - vFragPos;
         float distance = length(toLight);
         vec3 lightDir = normalize(toLight);
@@ -310,8 +407,9 @@ void main() {
         specularSum += atten * spec * uPointLights[i].color;
     }
 
-    // --- Spot lights (unshadowed) ---
-    for (int i = 0; i < uNumSpotLights; ++i) {
+    // --- Spot lights (unshadowed), culled to this fragment's own cluster ---
+    for (uint li = 0u; li < clusterSpotCount; ++li) {
+        uint i = lightLists[clusterIndex].spotIndices[li];
         vec3 toLight = uSpotLights[i].position - vFragPos;
         float distance = length(toLight);
         vec3 lightDir = normalize(toLight);
@@ -345,5 +443,20 @@ void main() {
     // the texture, the usual approximation for a non-metallic/dielectric
     // surface -- unchanged from Phase 4, just summed over more lights now.
     vec3 litColor = (uAmbientColor + diffuseSum) * baseColor + specularSum;
+
+    // Phase 13d debug visualization (ENGINE_CLUSTER_DEBUG=1): blends in a
+    // heat-map color (red = more lights, blue = fewer) keyed by this
+    // fragment's own cluster's total light count, proving the per-cluster
+    // light lists actually vary across the screen/depth -- not just that
+    // this code path compiles and doesn't crash. A 50/50 blend (not an
+    // outright replace) so the underlying lit scene stays recognizable
+    // underneath the tint.
+    if (uClusterDebug != 0) {
+        float totalCount = float(clusterPointCount + clusterSpotCount);
+        float maxCount = float(MAX_POINT_LIGHTS + MAX_SPOT_LIGHTS);
+        vec3 heat = vec3(totalCount / maxCount, 0.15, 1.0 - totalCount / maxCount);
+        litColor = mix(litColor, heat, 0.5);
+    }
+
     FragColor = vec4(litColor, texColor.a);
 }

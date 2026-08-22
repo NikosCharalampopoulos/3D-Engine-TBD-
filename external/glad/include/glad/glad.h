@@ -254,6 +254,20 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_DEPTH24_STENCIL8 0x88F0
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 
+// Phase 13d: GL 4.3 compute shaders + Shader Storage Buffer Objects
+// (clustered lighting's cluster-AABB-build and light-culling compute
+// passes -- see engine::ClusterLightCuller). This project's GL context has
+// requested 4.3 core since Phase 12 specifically to make these available;
+// nothing before this phase actually called any of them.
+#define GL_COMPUTE_SHADER 0x91B9
+#define GL_SHADER_STORAGE_BUFFER 0x90D2
+// The one barrier bit this phase actually needs: SSBO writes from a compute
+// dispatch must be flushed/visible before a later draw call's fragment
+// shader (or a later compute dispatch) reads the same buffer -- see
+// ClusterLightCuller::computeClusterAABBs()/cullLights()'s
+// glMemoryBarrier() calls.
+#define GL_SHADER_STORAGE_BARRIER_BIT 0x00002000
+
 /* ---- function pointer typedefs ----------------------------------------- */
 
 typedef void (APIENTRY* PFNGLVIEWPORTPROC)(GLint, GLint, GLsizei, GLsizei);
@@ -311,6 +325,11 @@ typedef void (APIENTRY* PFNGLGENBUFFERSPROC)(GLsizei, GLuint*);
 typedef void (APIENTRY* PFNGLBINDBUFFERPROC)(GLenum, GLuint);
 typedef void (APIENTRY* PFNGLBUFFERDATAPROC)(GLenum, GLsizeiptr, const void*, GLenum);
 typedef void (APIENTRY* PFNGLBUFFERSUBDATAPROC)(GLenum, GLintptr, GLsizeiptr, const void*);
+// Phase 13d: the read-back counterpart to glBufferSubData above -- used
+// only for ClusterLightCuller's periodic occupancy logging (reading the
+// light-list SSBO back to the CPU to report "N/M clusters occupied", never
+// on every frame's hot path -- see that class's readOccupancyStats()).
+typedef void (APIENTRY* PFNGLGETBUFFERSUBDATAPROC)(GLenum, GLintptr, GLsizeiptr, void*);
 typedef void (APIENTRY* PFNGLDELETEBUFFERSPROC)(GLsizei, const GLuint*);
 typedef void (APIENTRY* PFNGLGENVERTEXARRAYSPROC)(GLsizei, GLuint*);
 typedef void (APIENTRY* PFNGLBINDVERTEXARRAYPROC)(GLuint);
@@ -352,6 +371,15 @@ typedef void (APIENTRY* PFNGLTEXIMAGE2DMULTISAMPLEPROC)(GLenum, GLsizei, GLenum,
 typedef void (APIENTRY* PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
 typedef void (APIENTRY* PFNGLBLITFRAMEBUFFERPROC)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield,
                                                     GLenum);
+// Phase 13d: compute dispatch, the cross-stage memory-visibility barrier,
+// and binding a buffer to an indexed target (glBindBufferBase -- how an
+// SSBO's layout(std430, binding = N) block in GLSL is wired to an actual GL
+// buffer object; unlike a plain glBindBuffer, this binds to one of several
+// numbered slots a shader can name, the same role glActiveTexture + a
+// texture unit index plays for samplers).
+typedef void (APIENTRY* PFNGLDISPATCHCOMPUTEPROC)(GLuint, GLuint, GLuint);
+typedef void (APIENTRY* PFNGLMEMORYBARRIERPROC)(GLbitfield);
+typedef void (APIENTRY* PFNGLBINDBUFFERBASEPROC)(GLenum, GLuint, GLuint);
 
 /* ---- function pointer storage (defined in glad.c) ---------------------- */
 
@@ -405,6 +433,7 @@ GLAPI PFNGLGENBUFFERSPROC glad_glGenBuffers;
 GLAPI PFNGLBINDBUFFERPROC glad_glBindBuffer;
 GLAPI PFNGLBUFFERDATAPROC glad_glBufferData;
 GLAPI PFNGLBUFFERSUBDATAPROC glad_glBufferSubData;
+GLAPI PFNGLGETBUFFERSUBDATAPROC glad_glGetBufferSubData;
 GLAPI PFNGLDELETEBUFFERSPROC glad_glDeleteBuffers;
 GLAPI PFNGLGENVERTEXARRAYSPROC glad_glGenVertexArrays;
 GLAPI PFNGLBINDVERTEXARRAYPROC glad_glBindVertexArray;
@@ -437,6 +466,9 @@ GLAPI PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers;
 GLAPI PFNGLTEXIMAGE2DMULTISAMPLEPROC glad_glTexImage2DMultisample;
 GLAPI PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC glad_glRenderbufferStorageMultisample;
 GLAPI PFNGLBLITFRAMEBUFFERPROC glad_glBlitFramebuffer;
+GLAPI PFNGLDISPATCHCOMPUTEPROC glad_glDispatchCompute;
+GLAPI PFNGLMEMORYBARRIERPROC glad_glMemoryBarrier;
+GLAPI PFNGLBINDBUFFERBASEPROC glad_glBindBufferBase;
 
 /* ---- gl* macros, so call sites read like normal OpenGL code ------------ */
 
@@ -490,6 +522,7 @@ GLAPI PFNGLBLITFRAMEBUFFERPROC glad_glBlitFramebuffer;
 #define glBindBuffer glad_glBindBuffer
 #define glBufferData glad_glBufferData
 #define glBufferSubData glad_glBufferSubData
+#define glGetBufferSubData glad_glGetBufferSubData
 #define glDeleteBuffers glad_glDeleteBuffers
 #define glGenVertexArrays glad_glGenVertexArrays
 #define glBindVertexArray glad_glBindVertexArray
@@ -522,6 +555,9 @@ GLAPI PFNGLBLITFRAMEBUFFERPROC glad_glBlitFramebuffer;
 #define glTexImage2DMultisample glad_glTexImage2DMultisample
 #define glRenderbufferStorageMultisample glad_glRenderbufferStorageMultisample
 #define glBlitFramebuffer glad_glBlitFramebuffer
+#define glDispatchCompute glad_glDispatchCompute
+#define glMemoryBarrier glad_glMemoryBarrier
+#define glBindBufferBase glad_glBindBufferBase
 
 /* ---- loader entry points ------------------------------------------------ */
 
