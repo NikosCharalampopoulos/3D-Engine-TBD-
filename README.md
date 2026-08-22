@@ -1180,6 +1180,22 @@ exactly the version the next phase's known requirements call for, not more.
     phase's Linux-only EGL/GLX discussion); this headless container's
     llvmpipe software rasterizer is the only rendering target actually
     re-verified for this phase.
+  - **macOS is the one platform that genuinely can't take a flat 4.3
+    request**, not just an unverified one: Apple's OpenGL implementation
+    (deprecated in favor of Metal since macOS 10.14, frozen since) has
+    never shipped a core profile above 4.1 -- no driver or hardware
+    changes that ceiling. An initial version of this phase requested 4.3
+    unconditionally on every platform, which would have made
+    `glfwCreateWindow` fail outright on every Mac (per the hard-fail
+    contract just above) despite this codebase already carrying explicit
+    macOS support (the `GLFW_OPENGL_FORWARD_COMPAT` hint right after the
+    version hints, plus `paths.cpp`'s and `log.hpp`'s own `_WIN32`
+    branches for the other non-Linux target). Fixed by requesting 4.1 on
+    `__APPLE__` and 4.3 everywhere else (`src/window.cpp`) -- whatever in
+    Phase 13 actually ends up needing compute shaders will need its own
+    macOS story then (feature-gated off, or reworked), not a context that
+    silently stops existing today for a phase that doesn't call anything
+    4.3-specific yet.
 - **GLAD loader** (`external/glad/`) -- left unchanged. Requesting a higher
   context version at creation time needs no new GL entry points by itself;
   nothing in *this* phase calls anything GL-4.3-specific (compute shaders

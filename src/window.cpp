@@ -67,8 +67,28 @@ Window::Window(int width, int height, const std::string& title) : width_(width),
     // environment's Mesa (25.2.8) reports GL 4.5 core available, comfortably
     // above 4.3, via both the EGL and GLX (ENGINE_DISABLE_EGL_CONTEXT=1)
     // context-creation paths below.
+    //
+    // Apple is a real exception to that "just request 4.3" plan, not merely
+    // an untested one: macOS's OpenGL implementation (deprecated by Apple in
+    // favor of Metal since 10.14, frozen since) has never shipped a core
+    // profile above 4.1, full stop -- there is no driver update or hardware
+    // that changes that ceiling. Requesting 4.3 there wouldn't risk a lower
+    // context the way an untested Linux/Windows driver might; it would fail
+    // glfwCreateWindow on literally every Mac, unconditionally, breaking a
+    // platform this codebase already carries explicit support for (see the
+    // GLFW_OPENGL_FORWARD_COMPAT hint right below, plus paths.cpp's and
+    // log.hpp's own _WIN32 branches for the other non-Linux target) -- for
+    // a phase that doesn't call anything version-4.3-specific yet. Request
+    // the real ceiling macOS can grant instead of Phase 13's future floor;
+    // whatever in Phase 13 actually needs compute shaders will need its own
+    // macOS story then (feature-gated off, or reworked), not a context that
+    // silently stops existing today.
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+#else
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+#endif
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 #ifdef __APPLE__
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);

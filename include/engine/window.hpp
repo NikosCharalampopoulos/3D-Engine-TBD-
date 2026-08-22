@@ -1,9 +1,12 @@
 #ifndef ENGINE_WINDOW_HPP
 #define ENGINE_WINDOW_HPP
 
-// RAII wrapper around a GLFW window + OpenGL 4.3 core context (bumped from
-// 3.3 in Phase 12 as a foundation change for Phase 13's compute-shader
-// clustered lighting -- see README.md's Phase 12 section).
+// RAII wrapper around a GLFW window + OpenGL 4.3 core context on
+// Linux/Windows (bumped from 3.3 in Phase 12 as a foundation change for
+// Phase 13's compute-shader clustered lighting -- see README.md's Phase 12
+// section). macOS requests 4.1 instead, the highest core profile Apple's
+// (deprecated, frozen) OpenGL implementation has ever shipped -- requesting
+// 4.3 there would fail context creation outright on every Mac.
 //
 // The constructor does all setup (glfwInit, window/context creation, GLAD
 // function loading) and throws std::runtime_error on the first failure,
