@@ -53,6 +53,15 @@
 // so it doesn't need to coexist with live camera control in the one
 // environment (headless verification) this repo's own tooling actually
 // exercises every commit.
+//
+// Phase 8d adds setEnabled() (see its own comment below) so
+// InputAction::ToggleDebugUI (default F1 -- see input_action_map.hpp and
+// application.cpp) can flip the overlay on/off at runtime, on top of
+// ENGINE_SHOW_DEBUG_UI's existing constructor-time `enabled` -- the env
+// var now just sets the INITIAL state and F1 toggles from there, the same
+// "env-var-initialized, then runtime-mutable" combination
+// ssaoDisabled_/ssrDisabled_ already use (Phase 13d/13g's env vars +
+// Phase 8c's own checkboxes over them).
 struct GLFWwindow;
 
 namespace engine {
@@ -60,9 +69,12 @@ namespace engine {
 class DebugUI {
 public:
     // `window` must already have a current GL context (see Window's own
-    // constructor) -- ImGui_ImplOpenGL3_Init() below creates GL objects
-    // (a shader program, the font atlas texture) immediately. Does nothing
-    // at all if `enabled` is false; see this file's own header comment.
+    // constructor). If `enabled` is true, ImGui_ImplOpenGL3_Init() creates
+    // GL objects (a shader program, the font atlas texture) immediately;
+    // see this file's own header comment for why `enabled=false` (the
+    // default, unless ENGINE_SHOW_DEBUG_UI is set) instead does nothing at
+    // all here -- that GL-object creation is deferred until setEnabled(true)
+    // is first called, if ever.
     DebugUI(GLFWwindow* window, bool enabled);
     ~DebugUI();
 
@@ -72,6 +84,23 @@ public:
     DebugUI& operator=(DebugUI&&) = delete;
 
     bool enabled() const { return enabled_; }
+
+    // Phase 8d: flips whether the overlay is shown/updated from here on.
+    // A no-op if `enabled` already matches the current state. Turning it
+    // on for the FIRST time on an object originally constructed with
+    // enabled=false lazily performs the same ImGui context/backend
+    // creation the constructor would have done had it started enabled --
+    // deferred rather than done unconditionally at construction, so a run
+    // that starts disabled and is never toggled on (every headless
+    // verification run today, since Xvfb has no real F1 keypress to
+    // trigger it) still calls zero ImGui functions across its whole
+    // lifetime, preserving this class's original guarantee for that
+    // unchanged default path. Once created, the ImGui context is kept
+    // alive (not torn down) across later off->on->off transitions within
+    // the same DebugUI's lifetime -- only newFrame()/render() below start
+    // no-op'ing again -- since destroying and recreating ImGui's GL
+    // objects on every toggle would be needless churn for a debug overlay.
+    void setEnabled(bool enabled);
 
     // Starts a new ImGui frame (ImGui_ImplOpenGL3_NewFrame() +
     // ImGui_ImplGlfw_NewFrame() + ImGui::NewFrame()) -- call once per frame,
@@ -87,7 +116,21 @@ public:
     void render();
 
 private:
+    // Factored out of the constructor so setEnabled(true) can lazily run
+    // the exact same ImGui context/backend setup the constructor runs
+    // immediately when starting enabled.
+    void initializeImGuiContext();
+
+    GLFWwindow* window_;
     bool enabled_;
+    // Separate from enabled_: tracks whether the ImGui context/backends
+    // have EVER been created for this object, so setEnabled()/the
+    // destructor know whether there's anything to tear down/re-toggle
+    // versus lazily create, independent of the CURRENT enabled_ value
+    // (e.g. constructed enabled, then toggled off: initialized_ stays
+    // true, enabled_ goes false, and no re-init is needed if toggled back
+    // on).
+    bool initialized_ = false;
 };
 
 }  // namespace engine

@@ -214,6 +214,7 @@ add_executable(engine_app
     src/texture.cpp
     src/model.cpp
     src/input.cpp
+    src/input_action_map.cpp
     src/resource_manager.cpp
     src/shadow_map.cpp
     src/framebuffer.cpp

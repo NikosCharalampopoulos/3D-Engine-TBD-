@@ -792,11 +792,23 @@ private:
     // EntityId, rather than as two fixed fields per vector element.
     EntityRegistry registry_;
     Camera camera_;
+    // Phase 8d: the data-driven key-binding table pollInputState() now
+    // consults each frame (see input.hpp/input_action_map.hpp) -- owned
+    // here (not a local temporary in run()) specifically so it persists
+    // across frames, which edge-triggered actions (InputAction::
+    // ToggleDebugUI) need in order to compare this frame's key state
+    // against the previous frame's. No GL/window dependency at all, so
+    // its position among these members is unconstrained; grouped next to
+    // camera_ since both are per-frame input-consuming state.
+    InputActionMap inputActionMap_;
     // Phase 8c: owns the ImGui context + GLFW/OpenGL3 backend lifecycle --
     // see debug_ui.hpp and this header's own Phase 8c comment above. Only
     // needs window_.handle() (a live GL context + GLFW window), so its
     // position here (after every GL-resource member above) is unconstrained
-    // beyond "after window_", same as camera_.
+    // beyond "after window_", same as camera_. Phase 8d: toggled at
+    // runtime via setEnabled() from InputAction::ToggleDebugUI (default
+    // F1) -- see update()'s definition and debug_ui.hpp's own Phase 8d
+    // comment.
     DebugUI debugUI_;
     std::uint64_t maxFrames_;
     std::uint64_t frameCount_ = 0;

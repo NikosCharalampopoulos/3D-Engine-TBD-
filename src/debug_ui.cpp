@@ -26,11 +26,15 @@ const char* glslVersionString() {
 
 }  // namespace
 
-DebugUI::DebugUI(GLFWwindow* window, bool enabled) : enabled_(enabled) {
+DebugUI::DebugUI(GLFWwindow* window, bool enabled) : window_(window), enabled_(enabled) {
     if (!enabled_) {
         return;
     }
+    initializeImGuiContext();
+    LOG_INFO("Debug UI enabled (ENGINE_SHOW_DEBUG_UI)");
+}
 
+void DebugUI::initializeImGuiContext() {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
@@ -48,14 +52,25 @@ DebugUI::DebugUI(GLFWwindow* window, bool enabled) : enabled_(enabled) {
     // key/mouse/cursor/scroll callbacks -- safe here specifically because
     // this engine has never registered any of its own (see this class's own
     // header comment on why InputState's poll-based reads are unaffected).
-    ImGui_ImplGlfw_InitForOpenGL(window, /*install_callbacks=*/true);
+    ImGui_ImplGlfw_InitForOpenGL(window_, /*install_callbacks=*/true);
     ImGui_ImplOpenGL3_Init(glslVersionString());
 
-    LOG_INFO("Debug UI enabled (ENGINE_SHOW_DEBUG_UI)");
+    initialized_ = true;
+}
+
+void DebugUI::setEnabled(bool enabled) {
+    if (enabled == enabled_) {
+        return;
+    }
+    if (enabled && !initialized_) {
+        initializeImGuiContext();
+    }
+    LOG_INFO(enabled ? "Debug UI shown (F1)" : "Debug UI hidden (F1)");
+    enabled_ = enabled;
 }
 
 DebugUI::~DebugUI() {
-    if (!enabled_) {
+    if (!initialized_) {
         return;
     }
     ImGui_ImplOpenGL3_Shutdown();

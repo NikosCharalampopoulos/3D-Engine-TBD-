@@ -259,14 +259,15 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        framebuffer.cpp, skybox.cpp, ibl_probe.cpp,
                        hdri_loader.cpp, compute_shader.cpp,
                        cluster_light_culler.cpp, ssao.cpp,
-                       scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp)
+                       scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp,
+                       input_action_map.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
                        resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
-                       scene_serialization, debug_ui)
+                       scene_serialization, debug_ui, input_action_map)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -282,7 +283,8 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        PBR materials), models (scene.obj + scene.mtl),
                        scenes/default.json -- Phase 8b's serialized scene
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
-tests/                 scene_serialization_test.cpp (Phase 8b) + its own
+tests/                 scene_serialization_test.cpp (Phase 8b),
+                       input_action_map_test.cpp (Phase 8d) + its own
                        CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
@@ -792,8 +794,10 @@ plus one genuinely new rendering capability (MSAA).
   `Camera::processKeyboard(const Window&, float)` (Phase 3-5) became
   `Camera::processMovement(const InputState&, float)`; `Camera` no longer
   includes `<GLFW/glfw3.h>` or `window.hpp` at all. Not a general
-  action-mapping/rebinding system -- just the concrete fields this phase's
-  `Camera` reads.
+  action-mapping/rebinding system as of this phase -- just the concrete
+  fields this phase's `Camera` reads (Phase 8d later adds a real, data-driven
+  binding table underneath `pollInputState()`, without changing `InputState`'s
+  fields or `Camera`'s interface at all -- see that phase's own section).
 - **Delta-time**: unchanged from Phase 1 (`glfwGetTime()`-based), now
   threaded through `Application::update(double deltaTime, const
   InputState& input)` alongside the polled input rather than a second time
@@ -2593,6 +2597,118 @@ overlay, drawn last in the frame, straight onto the window.
   capture well past the harness's own early-frame quirk described above),
   showing the Frame Stats/Render Passes/Scene Entities panel exactly as
   designed, correctly positioned and styled.
+
+### Phase 8d: an input action-mapping layer
+
+Through Phase 8c, `input.hpp`'s own header comment said `InputState` was
+deliberately *not* a general action-mapping/input-binding system -- just the
+concrete fields `Camera` reads, filled by `pollInputState()` hardcoding one
+`window.isKeyPressed(GLFW_KEY_*)` check per key in `input.cpp`. Phase 8d is
+that later phase: a real, data-driven binding table now sits underneath
+`pollInputState()`, and `Camera`'s own interface -- and `InputState`'s
+existing fields -- are completely unchanged by the refactor.
+
+- **`InputAction` + `InputActionMap`** (`include/engine/input_action_map.hpp`/
+  `src/input_action_map.cpp`, new files): `InputAction` is a plain
+  `enum class` (`MoveForward`, `MoveBackward`, `MoveLeft`, `MoveRight`,
+  `MoveUp`, `MoveDown`, `Quit`, `ToggleDebugUI`). `InputActionMap` maps each
+  action to a `std::vector<int>` of GLFW_KEY_* constants (`bindings_`) --
+  `MoveUp`/`MoveDown` each get two entries (Space-or-E, LeftShift-or-Q),
+  replacing what used to be a hardcoded `||` of two `isKeyPressed()` calls.
+  Reassigning a binding is now a `setBinding()`/`addBinding()` call, not an
+  edit to an `if` inside `pollInputState()` -- even though nothing yet
+  exposes a runtime rebinding *UI* for it (see "What NOT to do" below).
+  Deliberately narrow, matching Phase 8b's scene-schema "extensible shape,
+  not speculative handlers" convention: a binding is a plain `int`, not an
+  invented device-agnostic key/button type -- this engine still reads from
+  exactly one input device (keyboard), so abstracting over a second
+  (gamepad) that doesn't exist yet would be speculative.
+- **Level- vs. edge-triggered actions, and why both exist**: `InputActionMap`
+  tracks each action's down/up state across polls (`ActionState{down,
+  wasDown}`), giving two query methods:
+  - `isDown(action)` -- true if any bound key is *currently* held. Correct
+    for movement (`MoveForward` etc.) and for `Quit`: holding Escape should
+    keep reading as "down" every frame, and `Application::run()`'s
+    `if (input.escapePressed) break;` is idempotent whether checked once or
+    every frame while held, so level-triggering was never actually a bug for
+    Quit -- just not the right choice for a *toggle*.
+  - `justPressed(action)` -- true only on the single poll where the action
+    transitions from not-down to down, false on every subsequent poll while
+    the same key stays held. `ToggleDebugUI` needs this: a level-triggered
+    read would flip the debug overlay on then instantly back off every
+    single frame F1 is held down, rather than toggling it once per physical
+    press. `update(isKeyDown)` re-samples every bound action once per call
+    and rolls the previous "current" into "previous" -- so getting
+    edge-triggering right just requires `InputActionMap` staying the SAME
+    object across frames (it's an `Application` member, not a per-frame
+    local), not any new machinery in `Window`/GLFW (which only ever offered
+    current-state polling in the first place).
+- **`InputState` stays Camera's stable interface**: `pollInputState()`
+  (`input.cpp`) now takes `(const Window&, InputActionMap&)`, calls
+  `actionMap.update(...)` once, then fills the exact same
+  `moveForward`/`moveBackward`/.../`escapePressed`/`cursorX`/`cursorY`
+  fields as before -- from `actionMap.isDown(InputAction::MoveForward)`
+  etc. instead of a direct `GLFW_KEY_W` check. One new field,
+  `toggleDebugUIPressed` (from `actionMap.justPressed(InputAction::
+  ToggleDebugUI)`), was added for `Application` to read -- `Camera` never
+  looks at it, so its own interface (`processMovement`/`processMouseInput`)
+  is byte-for-byte unchanged from Phase 8c.
+- **Wiring `ToggleDebugUI` into `DebugUI`**: `DebugUI`'s constructor used to
+  be the *only* place its ImGui context could ever come into existence --
+  gated entirely on `ENGINE_SHOW_DEBUG_UI` at startup, with no way to turn
+  it on later. Phase 8d adds `DebugUI::setEnabled(bool)`: flips `enabled_`,
+  and if this is the FIRST transition into `enabled=true` for an object that
+  started disabled, lazily runs the same ImGui context/GLFW/OpenGL3 backend
+  setup the constructor would have run immediately had it started enabled.
+  `Application::update()` calls `debugUI_.setEnabled(!debugUI_.enabled())`
+  whenever `input.toggleDebugUIPressed` is true -- so `ENGINE_SHOW_DEBUG_UI`
+  now just sets the *initial* state and F1 toggles from there, the same
+  "env-var-initialized, then runtime-mutable" combination
+  `ssaoDisabled_`/`ssrDisabled_` already use (Phase 13d/13g's env vars, made
+  live-toggleable by Phase 8c's own checkboxes). Critically, a run that
+  starts disabled and is never toggled on -- every headless verification run
+  today, since Xvfb has no real F1 keypress to trigger it -- still never
+  calls a single ImGui function across its whole lifetime, so this phase
+  doesn't weaken Phase 8c's own "off means truly zero ImGui calls" guarantee
+  for the one path this repo's own tooling actually exercises every commit.
+- **Bonus: a read-only "Input Bindings" panel** under the existing debug
+  overlay, listing each `InputAction` and its current bound key(s) by name
+  (e.g. `Move Up: Space or E`) straight from `inputActionMap_.bindingsFor()`
+  -- so the binding table is genuinely inspectable at runtime, not just in
+  source. No editing here; a full rebinding *menu* is explicitly out of
+  scope for this phase (see below), so this is read-only.
+- **What NOT to do (per this phase's own scope)**: no serializable rebinding
+  config file or settings UI -- "configurable keys", not "a key-rebinding
+  menu"; `setBinding()`/`addBinding()` make rebinding *possible*
+  programmatically, which is enough. No gamepad/joystick support. No change
+  to `Camera`'s public interface or to any of `InputState`'s pre-existing
+  field names/meanings.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with zero
+  new warnings under `-Wall -Wextra`. A new test,
+  `tests/input_action_map_test.cpp`, follows Phase 8b's
+  `scene_serialization_test` pattern exactly -- a plain executable
+  registered via `add_test()`, linking only `src/input_action_map.cpp` (no
+  `Window`/GL dependency at all) plus the already-fetched `glfw` target for
+  its `GLFW_KEY_*` constants, so it needs no live window/GL context/GPU. It
+  checks: the defaults match this engine's pre-Phase-8d hardcoded bindings
+  exactly; a multi-key action (`MoveUp`) reads down via *either* bound key;
+  `isDown()` stays level-triggered (true across repeated polls with a key
+  held, false once released); and `justPressed()` fires exactly once across
+  polls with the same key held down throughout, then fires again on a fresh
+  press after a release -- a fake `isKeyDown` callable (a closure over a
+  plain `std::vector<int>` of "these keys are down this poll") stands in for
+  `Window::isKeyPressed()`. `ctest` reports both `scene_serialization_test`
+  and `input_action_map_test` passing. Headless verification
+  (`ENGINE_MAX_FRAMES=60 bash tools/run_headless.sh`) was run in both the
+  default configuration and `ENGINE_CAMERA_DEMO=1` (the scripted camera
+  orbit, since Xvfb has no real keyboard/mouse to drive free-fly input or
+  F1), and both screenshots were pixel-diffed against a from-scratch rebuild
+  of the pre-Phase-8d commit (`ea77312`) in a separate `git worktree`:
+  **0 differing pixels in either mode, with matching MD5 sums** -- proving
+  this refactor changes nothing about the rendered frame, confirmed by
+  direct visual inspection of both screenshots as well (the same checkered
+  ground/spheres/pyramid/cube scene, and the same four-waypoint orbit, as
+  every prior phase's own screenshots).
 
 ## Libraries used and why
 

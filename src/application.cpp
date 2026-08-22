@@ -895,6 +895,54 @@ bool showDebugUIFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 8d: display-only helpers for renderDebugUI()'s "Input Bindings"
+// readout below -- not used anywhere rebinding actually happens (there is
+// no rebinding UI in this phase; see README.md's own Phase 8d section for
+// why). GLFW has no single "name this key" API that covers every key this
+// engine binds by default (glfwGetKeyName() returns null for non-printable
+// keys like Escape/Space/Shift/F1, which is exactly the set this engine's
+// own defaults lean on), so this is a small explicit table over just the
+// keys InputActionMap's default bindings actually use, falling back to
+// glfwGetKeyName() for anything else a future rebind might introduce.
+const char* keyName(int glfwKey) {
+    switch (glfwKey) {
+        case GLFW_KEY_SPACE:
+            return "Space";
+        case GLFW_KEY_ESCAPE:
+            return "Escape";
+        case GLFW_KEY_LEFT_SHIFT:
+            return "Left Shift";
+        case GLFW_KEY_F1:
+            return "F1";
+        default:
+            break;
+    }
+    const char* name = glfwGetKeyName(glfwKey, 0);
+    return name != nullptr ? name : "?";
+}
+
+const char* actionName(InputAction action) {
+    switch (action) {
+        case InputAction::MoveForward:
+            return "Move Forward";
+        case InputAction::MoveBackward:
+            return "Move Backward";
+        case InputAction::MoveLeft:
+            return "Move Left";
+        case InputAction::MoveRight:
+            return "Move Right";
+        case InputAction::MoveUp:
+            return "Move Up";
+        case InputAction::MoveDown:
+            return "Move Down";
+        case InputAction::Quit:
+            return "Quit";
+        case InputAction::ToggleDebugUI:
+            return "Toggle Debug UI";
+    }
+    return "?";
+}
+
 // Phase 13e: builds skybox_ from either the new HDRI (default) or the old
 // 6-PNG procedural cubemap (ENGINE_USE_PROCEDURAL_SKYBOX), returning it by
 // value (Skybox is move-only, not copyable -- see skybox.hpp) so this can
@@ -1295,6 +1343,20 @@ Application::Application(int width, int height, const std::string& title, std::u
 
 void Application::update(double deltaTime, const InputState& input) {
     totalTime_ += deltaTime;
+
+    // Phase 8d: InputAction::ToggleDebugUI (default F1), handled up front
+    // and independent of the demo-mode branches below -- the overlay
+    // should be toggleable regardless of which camera-driving path is
+    // active. toggleDebugUIPressed is edge-triggered (see input.hpp/
+    // input_action_map.hpp), so this fires exactly once per physical F1
+    // press rather than flipping back and forth every frame the key
+    // happens to be held; under headless Xvfb there's no real keypress,
+    // so this is always false there and debugUI_'s state never changes
+    // from whatever ENGINE_SHOW_DEBUG_UI set at construction -- the
+    // existing headless verification path is unaffected.
+    if (input.toggleDebugUIPressed) {
+        debugUI_.setEnabled(!debugUI_.enabled());
+    }
 
     if (frustumCullDemoMode_) {
         // Phase 13b: the camera's fixed "facing away from the scene" pose
@@ -2137,6 +2199,28 @@ void Application::renderDebugUI() {
         ImGui::Checkbox("Cluster light-count debug view", &clusterDebugMode_);
     }
 
+    // Phase 8d: read-only -- shows inputActionMap_'s actual current
+    // bindings (rather than restating the defaults in a comment somewhere)
+    // so the binding table is genuinely inspectable, matching this
+    // phase's own "data-driven, not hardcoded ifs" goal. No editing here;
+    // a rebinding UI is out of scope for this phase (see README.md).
+    if (ImGui::CollapsingHeader("Input Bindings")) {
+        constexpr std::array<InputAction, 8> kAllActions = {
+            InputAction::MoveForward, InputAction::MoveBackward, InputAction::MoveLeft,       InputAction::MoveRight,
+            InputAction::MoveUp,      InputAction::MoveDown,     InputAction::ToggleDebugUI,  InputAction::Quit,
+        };
+        for (InputAction action : kAllActions) {
+            std::string keys;
+            for (int key : inputActionMap_.bindingsFor(action)) {
+                if (!keys.empty()) {
+                    keys += " or ";
+                }
+                keys += keyName(key);
+            }
+            ImGui::Text("%s: %s", actionName(action), keys.empty() ? "(unbound)" : keys.c_str());
+        }
+    }
+
     if (ImGui::CollapsingHeader("Scene Entities", ImGuiTreeNodeFlags_DefaultOpen)) {
         registry_.each<Transform>([&](EntityId id, Transform& transform) {
             const NameComponent* nameComponent = registry_.getComponent<NameComponent>(id);
@@ -2205,7 +2289,7 @@ void Application::run() {
         // Application -- like Camera since Phase 6 -- never reaches into
         // Window/GLFW key constants itself; InputState is the one place that
         // does.
-        const InputState input = pollInputState(window_);
+        const InputState input = pollInputState(window_, inputActionMap_);
         if (input.escapePressed) {
             LOG_INFO("ESC pressed, exiting main loop");
             break;
