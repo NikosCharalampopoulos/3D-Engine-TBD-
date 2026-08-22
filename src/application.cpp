@@ -745,7 +745,20 @@ Application::Application(int width, int height, const std::string& title, std::u
       // comment) rather than the constructor's width/height parameters
       // directly, so this stays correct even on a HiDPI display where the
       // framebuffer is larger than the window's requested size.
-      hdrFramebuffer_(window_.getSize().first, window_.getSize().second),
+      //
+      // MSAA HDR framebuffer bug fix: constructed multisampled now, at
+      // engine::kRequestedMsaaSamples (window.hpp) -- the same count
+      // Window requests for the default framebuffer, for consistency (see
+      // application.hpp's own MSAA bug-fix comment) -- rather than the
+      // default (0, single-sample) every other Framebuffer in this class
+      // still uses. Framebuffer itself clamps this to what the driver
+      // actually grants and logs both values (see framebuffer.cpp).
+      hdrFramebuffer_(window_.getSize().first, window_.getSize().second, kRequestedMsaaSamples),
+      // MSAA HDR framebuffer bug fix: a same-size, single-sample sibling
+      // hdrFramebuffer_ resolves into every frame (see render()) -- default
+      // (0) sample count, same as every pre-existing Framebuffer instance
+      // below.
+      hdrResolveFramebuffer_(window_.getSize().first, window_.getSize().second),
       // Phase 11: bloom's own off-screen targets, sized at
       // 1/kBloomDownsampleFactor of the window's real framebuffer
       // resolution -- see this header's Phase 11 comment on
@@ -1283,24 +1296,36 @@ void Application::render() {
     // painting over the table/box/pyramid/ground.
     skybox_.draw(*skyboxShader_, view, projection);
 
+    // MSAA HDR framebuffer bug fix: hdrFramebuffer_'s color attachment is
+    // now multisample (see application.hpp/framebuffer.hpp's own MSAA
+    // bug-fix comments), so it can no longer be sampled directly by
+    // anything below (bloom extraction, the final tonemap pass) the way a
+    // plain sampler2D reads a single-sample texture. Resolve it into
+    // hdrResolveFramebuffer_ -- a same-size, single-sample sibling -- via
+    // one glBlitFramebuffer right here, once per frame, immediately after
+    // the scene+skybox color pass above finishes and before anything reads
+    // this frame's HDR color. Everything from here on reads
+    // hdrResolveFramebuffer_ instead of hdrFramebuffer_ directly.
+    hdrFramebuffer_.resolveTo(hdrResolveFramebuffer_);
+
     // Phase 11: bloom -- entirely screen-space passes against
-    // hdrFramebuffer_'s now-finished HDR color buffer (scene + skybox),
-    // before that buffer is resolved to the window below. See this class's
-    // Phase 11 header comment for the overall shape (bright-pass extract ->
-    // ping-ponged separable blur -> additive composite in the final resolve
-    // pass).
+    // hdrResolveFramebuffer_'s now-finished (and now-resolved) HDR color
+    // buffer (scene + skybox), before that buffer is resolved to the window
+    // below. See this class's Phase 11 header comment for the overall shape
+    // (bright-pass extract -> ping-ponged separable blur -> additive
+    // composite in the final resolve pass).
     {
-        // Bright-pass extraction: hdrFramebuffer_ (full res) ->
+        // Bright-pass extraction: hdrResolveFramebuffer_ (full res) ->
         // brightFramebuffer_ (half res -- see kBloomDownsampleFactor).
         // Downsampling and thresholding happen in the same draw call for
         // free: this pass's own (smaller) target resolution decides how
         // many texels get sampled, and Framebuffer's GL_LINEAR minification
-        // filter does the actual averaging as hdrFramebuffer_'s full-res
-        // texture is sampled down into it.
+        // filter does the actual averaging as hdrResolveFramebuffer_'s
+        // full-res texture is sampled down into it.
         brightFramebuffer_.bindForWriting();
         GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
         bloomExtractShader_->use();
-        hdrFramebuffer_.bindColorTexture(0);
+        hdrResolveFramebuffer_.bindColorTexture(0);
         bloomExtractShader_->setInt("uHdrBuffer", 0);
         bloomExtractShader_->setFloat("uThreshold", kBloomThreshold);
         postProcessQuad_.bind();
@@ -1342,21 +1367,25 @@ void Application::render() {
         // reads now lives.
     }
 
-    // Phase 7b: resolve hdrFramebuffer_'s HDR color buffer to the window's
-    // real (default) framebuffer via one fullscreen tonemap + gamma-correct
-    // pass -- see assets/shaders/postprocess.vert/.frag. Both buffers are
-    // cleared first (color: nothing else draws here so any prior frame's
-    // leftover pixels must go; depth: this pass's own fullscreen quad is
-    // depth-tested against whatever the default framebuffer's depth buffer
-    // last held, which is otherwise stale/unrelated to this frame) so this
-    // draw can't be silently rejected by a leftover depth value from a
-    // previous frame.
+    // Phase 7b: resolve hdrResolveFramebuffer_'s HDR color buffer to the
+    // window's real (default) framebuffer via one fullscreen tonemap +
+    // gamma-correct pass -- see assets/shaders/postprocess.vert/.frag. Both
+    // buffers are cleared first (color: nothing else draws here so any
+    // prior frame's leftover pixels must go; depth: this pass's own
+    // fullscreen quad is depth-tested against whatever the default
+    // framebuffer's depth buffer last held, which is otherwise
+    // stale/unrelated to this frame) so this draw can't be silently
+    // rejected by a leftover depth value from a previous frame.
+    //
+    // MSAA HDR framebuffer bug fix: reads hdrResolveFramebuffer_ (this
+    // frame's already-resolved, single-sample HDR color) rather than
+    // hdrFramebuffer_ directly -- see the resolveTo() call above.
     GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
     GL_CHECK(glViewport(0, 0, fbWidth, fbHeight));
     GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
 
     postProcessShader_->use();
-    hdrFramebuffer_.bindColorTexture(0);
+    hdrResolveFramebuffer_.bindColorTexture(0);
     postProcessShader_->setInt("uHdrBuffer", 0);
     // Phase 11: the bloom pipeline's final blurred output (see the bloom
     // block above) -- additively blended with uHdrBuffer before Reinhard

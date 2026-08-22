@@ -182,6 +182,23 @@ typedef void* (*GLADloadproc)(const char* name);
 #define GL_TEXTURE3 0x84C3
 
 #define GL_TEXTURE_2D 0x0DE1
+// MSAA HDR framebuffer bug fix (post-Phase-13c): a multisample 2D texture
+// target (used for the main HDR color pass's now-multisample color
+// attachment, see Framebuffer) plus the two driver-limit queries
+// (glGetIntegerv) that cap how many samples such a texture/its paired
+// multisample depth renderbuffer can actually request -- GL_MAX_SAMPLES is
+// the renderbuffer-side cap, GL_MAX_COLOR_TEXTURE_SAMPLES the color-texture-
+// side one; both attachments in one FBO must share a single sample count, so
+// Framebuffer clamps to the smaller of the two (see framebuffer.cpp).
+#define GL_TEXTURE_2D_MULTISAMPLE 0x9100
+#define GL_MAX_SAMPLES 0x8D57
+#define GL_MAX_COLOR_TEXTURE_SAMPLES 0x910E
+// The two non-default framebuffer targets glBlitFramebuffer's resolve step
+// needs (read from the multisample HDR FBO, draw into the single-sample
+// resolve FBO) -- distinct from the plain GL_FRAMEBUFFER target already
+// above, which binds both read and draw simultaneously.
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
 // Phase 7b: cubemap texture target + its 6 individual face targets (see
 // Skybox) -- glTexImage2D/glTexParameteri/glBindTexture all already loaded
 // above accept these as their target/pname enum regardless, since a
@@ -325,6 +342,16 @@ typedef void (APIENTRY* PFNGLBINDRENDERBUFFERPROC)(GLenum, GLuint);
 typedef void (APIENTRY* PFNGLRENDERBUFFERSTORAGEPROC)(GLenum, GLenum, GLsizei, GLsizei);
 typedef void (APIENTRY* PFNGLFRAMEBUFFERRENDERBUFFERPROC)(GLenum, GLenum, GLenum, GLuint);
 typedef void (APIENTRY* PFNGLDELETERENDERBUFFERSPROC)(GLsizei, const GLuint*);
+// MSAA HDR framebuffer bug fix: the multisample-texture-storage and
+// multisample-renderbuffer-storage allocation calls (Framebuffer's
+// multisample color texture / depth renderbuffer attachments), and
+// glBlitFramebuffer (the explicit resolve-to-single-sample step, see
+// Framebuffer::resolveTo()) -- all GL 3.2+ core, just not previously needed
+// by any earlier phase's single-sample-only render targets.
+typedef void (APIENTRY* PFNGLTEXIMAGE2DMULTISAMPLEPROC)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLboolean);
+typedef void (APIENTRY* PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+typedef void (APIENTRY* PFNGLBLITFRAMEBUFFERPROC)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield,
+                                                    GLenum);
 
 /* ---- function pointer storage (defined in glad.c) ---------------------- */
 
@@ -407,6 +434,9 @@ GLAPI PFNGLBINDRENDERBUFFERPROC glad_glBindRenderbuffer;
 GLAPI PFNGLRENDERBUFFERSTORAGEPROC glad_glRenderbufferStorage;
 GLAPI PFNGLFRAMEBUFFERRENDERBUFFERPROC glad_glFramebufferRenderbuffer;
 GLAPI PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers;
+GLAPI PFNGLTEXIMAGE2DMULTISAMPLEPROC glad_glTexImage2DMultisample;
+GLAPI PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC glad_glRenderbufferStorageMultisample;
+GLAPI PFNGLBLITFRAMEBUFFERPROC glad_glBlitFramebuffer;
 
 /* ---- gl* macros, so call sites read like normal OpenGL code ------------ */
 
@@ -489,6 +519,9 @@ GLAPI PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers;
 #define glRenderbufferStorage glad_glRenderbufferStorage
 #define glFramebufferRenderbuffer glad_glFramebufferRenderbuffer
 #define glDeleteRenderbuffers glad_glDeleteRenderbuffers
+#define glTexImage2DMultisample glad_glTexImage2DMultisample
+#define glRenderbufferStorageMultisample glad_glRenderbufferStorageMultisample
+#define glBlitFramebuffer glad_glBlitFramebuffer
 
 /* ---- loader entry points ------------------------------------------------ */
 

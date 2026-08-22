@@ -211,6 +211,34 @@
 //     band near each split rather than a hard cutoff (see those shaders'
 //     own Phase 13c comments) to avoid a visible seam where shadow
 //     resolution/aliasing changes abruptly between cascades.
+//
+// MSAA HDR framebuffer bug fix (post-Phase-13c): Window has requested a
+// multisampled default framebuffer since Phase 6, but every phase from 7b
+// onward actually renders the real 3D scene into hdrFramebuffer_ instead --
+// a plain single-sample GL_TEXTURE_2D + GL_RENDERBUFFER target, not
+// multisample-capable at all. The window's own MSAA setting was therefore
+// only ever antialiasing the final fullscreen tonemap/bloom-composite quad
+// (a flat rectangle with no geometric edges), i.e. doing nothing for the
+// jagged edges MSAA exists to fix. Fixed by:
+//   - hdrFramebuffer_ is now constructed with a real sample count (see
+//     engine::kRequestedMsaaSamples in window.hpp, the same count Window
+//     requests for the default framebuffer, for consistency) -- see
+//     framebuffer.hpp's own MSAA bug-fix comment for how Framebuffer itself
+//     grew multisample support.
+//   - hdrResolveFramebuffer_ (new member, below) is a same-size,
+//     single-sample Framebuffer. render() now resolves hdrFramebuffer_'s
+//     multisample color buffer into it (Framebuffer::resolveTo(), a
+//     glBlitFramebuffer) once per frame, right after the scene+skybox color
+//     pass finishes and before bloom extraction/the final tonemap pass --
+//     both of which now read hdrResolveFramebuffer_ instead of
+//     hdrFramebuffer_ directly, since a multisample color texture isn't
+//     sampler2D-compatible (see framebuffer.hpp).
+//   - Nothing else changes: renderShadowPass()/shadowCascades_ (a separate,
+//     already-single-sample depth-only pass, never part of this bug) and
+//     the bloom bright-pass/blur pipeline's own Framebuffer instances
+//     (brightFramebuffer_/pingpongFramebuffer0_/1_, which already only ever
+//     read/write hdrFramebuffer_'s -- now hdrResolveFramebuffer_'s --
+//     resolved color, never its raw multisample buffer) are unaffected.
 
 #include <glm/glm.hpp>
 
@@ -303,10 +331,11 @@ private:
     // *shader_), and each resulting Model's per-mesh Materials (plus
     // groundMaterial_, built directly against shader_ rather than through
     // Model) hold a pointer into that same shader_, so shader_ must
-    // outlive all of them. hdrFramebuffer_ is sized from window_.getSize()
-    // in its own initializer, so it too must come after window_ (anywhere
-    // after is fine -- it has no other dependency). camera_ does no GL
-    // work so its position relative to the above is unconstrained.
+    // outlive all of them. hdrFramebuffer_/hdrResolveFramebuffer_ are sized
+    // from window_.getSize() in their own initializers, so they too must
+    // come after window_ (anywhere after is fine -- neither has any other
+    // dependency). camera_ does no GL work so its position relative to the
+    // above is unconstrained.
     // iblProbe_ (Phase 10) must come after skybox_ (it convolves skybox_'s
     // own cubemap, via skybox_.textureId()) and after irradianceShader_/
     // prefilterShader_/brdfShader_ (its constructor uses all three, once).
@@ -376,7 +405,23 @@ private:
     // resize callback/event of its own for this to react to (see
     // window.hpp), so -- like every other fixed-at-construction GL
     // resource in this engine -- this only ever needs to be sized once.
+    //
+    // MSAA HDR framebuffer bug fix: now constructed multisampled (see this
+    // header's own MSAA bug-fix comment above and framebuffer.hpp) instead
+    // of the single-sample target it used to be -- render() can no longer
+    // sample its color directly (a multisample texture isn't
+    // sampler2D-compatible); hdrResolveFramebuffer_ right below is what
+    // bloom extraction/the final tonemap pass actually read.
     Framebuffer hdrFramebuffer_;
+    // MSAA HDR framebuffer bug fix: a same-size, single-sample sibling of
+    // hdrFramebuffer_ above -- render() resolves hdrFramebuffer_'s
+    // multisample color buffer into this one (Framebuffer::resolveTo(), a
+    // glBlitFramebuffer) once per frame, right after the scene+skybox color
+    // pass finishes, so bloom extraction and the final tonemap/gamma pass
+    // can keep reading an ordinary sampler2D-compatible HDR color buffer
+    // exactly as they did before this bug fix -- neither needed to change
+    // *how* they sample, only *which* Framebuffer they sample from.
+    Framebuffer hdrResolveFramebuffer_;
     // Phase 11: bloom's own off-screen targets, all the same Framebuffer
     // class as hdrFramebuffer_ above (deliberately reused rather than a new
     // one-off FBO type -- see this class's Phase 11 header comment), each

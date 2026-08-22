@@ -81,6 +81,9 @@ PFNGLBINDRENDERBUFFERPROC glad_glBindRenderbuffer = NULL;
 PFNGLRENDERBUFFERSTORAGEPROC glad_glRenderbufferStorage = NULL;
 PFNGLFRAMEBUFFERRENDERBUFFERPROC glad_glFramebufferRenderbuffer = NULL;
 PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers = NULL;
+PFNGLTEXIMAGE2DMULTISAMPLEPROC glad_glTexImage2DMultisample = NULL;
+PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC glad_glRenderbufferStorageMultisample = NULL;
+PFNGLBLITFRAMEBUFFERPROC glad_glBlitFramebuffer = NULL;
 
 static void* load_required(GLADloadproc load, const char* name, int* ok) {
     void* ptr = load(name);
@@ -177,6 +180,9 @@ int gladLoadGLLoader(GLADloadproc load) {
     LOAD(glad_glRenderbufferStorage, "glRenderbufferStorage");
     LOAD(glad_glFramebufferRenderbuffer, "glFramebufferRenderbuffer");
     LOAD(glad_glDeleteRenderbuffers, "glDeleteRenderbuffers");
+    LOAD(glad_glTexImage2DMultisample, "glTexImage2DMultisample");
+    LOAD(glad_glRenderbufferStorageMultisample, "glRenderbufferStorageMultisample");
+    LOAD(glad_glBlitFramebuffer, "glBlitFramebuffer");
 
 #undef LOAD
 

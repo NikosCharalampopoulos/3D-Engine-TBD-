@@ -39,6 +39,30 @@ struct GLFWwindow;
 
 namespace engine {
 
+// Requested multisample sample count for the window's own default
+// framebuffer (see Window's constructor for the GLFW_SAMPLES hint / real
+// GL_SAMPLES verification this feeds). Declared here (not window.cpp-local)
+// so Application can request the *same* count for its own multisample HDR
+// framebuffer (see application.cpp's MSAA HDR framebuffer bug-fix comment
+// and framebuffer.hpp) -- one shared source of truth for "how much MSAA
+// this engine asks for" rather than two independently-maintained constants
+// that could drift apart. Bumped from 4x to 16x at the project owner's
+// request for smoother edges (an intermediate 8x request was tried first,
+// still didn't clear this environment's own cap -- see below). Still just a
+// hint (see the class comment and the GL_SAMPLES verification below) --
+// this environment's own EGL config probe (see the EGL-context-creation
+// note below) previously found configs with up to 4 samples on this
+// specific Mesa/llvmpipe stack, so a 16x request here is expected to still
+// only be granted at 4x on this particular software renderer; a real GPU
+// (e.g. the project owner's own machine) is expected to grant a much higher
+// count (commonly up to 8x or 16x depending on the driver) without issue.
+// The actual granted value is always logged from the real GL_SAMPLES query
+// (for the window's own default framebuffer) or Framebuffer's own
+// GL_MAX_SAMPLES/GL_MAX_COLOR_TEXTURE_SAMPLES-clamped query (for
+// Application's multisample HDR framebuffer), never assumed from this
+// request.
+inline constexpr int kRequestedMsaaSamples = 16;
+
 class Window {
 public:
     // Throws std::runtime_error if GLFW fails to initialize, the window/GL
