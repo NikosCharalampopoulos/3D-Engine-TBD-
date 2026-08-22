@@ -121,6 +121,65 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(nlohmann_json)
 
+# --- Dear ImGui: debug UI overlay (Phase 8c) ------------------------------
+# Fetched the same way as GLFW/GLM/Assimp/nlohmann_json above (an ordinary
+# tagged git dependency), not hand-vendored like GLAD/stb_image -- see
+# README.md's Phase 8b note on that same GLAD-vendoring-precedent question
+# for nlohmann_json, which applies identically here: Dear ImGui is an
+# actively-maintained library with tagged releases, not a code generator
+# with no canonical pre-generated file to pull a tag for.
+#
+# Unlike every other FetchContent'd dependency above, though, Dear ImGui
+# ships no CMakeLists.txt of its own at all -- by upstream design, it's meant
+# to be compiled directly into whatever project embeds it (see its own
+# docs/README's "Getting Started" section), not consumed as a pre-built
+# library with its own build system. So instead of
+# FetchContent_MakeAvailable() handing back ready-made targets the way
+# glfw/glm/assimp/nlohmann_json do, this only fetches the source tree
+# (FetchContent_Populate-via-MakeAvailable still works for that -- it just
+# has no CMakeLists.txt to add_subdirectory() into) and the `imgui` target
+# right below builds its core sources + the GLFW/OpenGL3 backend files
+# itself, the same "small first-party add_library() target" shape this
+# file's own `glad` target below already uses for the same underlying
+# reason (a dependency with no ready-made CMake target of its own).
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.92.9b
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(imgui)
+
+# Core widget/draw-list sources plus the two backend files this engine
+# actually needs: imgui_impl_glfw (this project's own windowing library,
+# already a dependency above) and imgui_impl_opengl3 (a GL3-core-profile
+# renderer backend, matching this engine's own GL 4.3/4.1 core context --
+# see window.hpp). imgui_demo.cpp is deliberately NOT included: nothing in
+# this engine ever calls ImGui::ShowDemoWindow(), so compiling it would only
+# add build time for code no code path reaches.
+add_library(imgui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+)
+target_include_directories(imgui PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+# IMGUI_IMPL_OPENGL_LOADER_GLAD tells imgui_impl_opengl3.cpp to #include
+# <glad/glad.h> for its GL function pointers/enums instead of bundling its
+# own generated loader (imgui_impl_opengl3_loader.h, its default) -- this
+# engine already loads every GL entry point through glad (see window.cpp),
+# so reusing that one loader avoids two independently-generated sets of GL
+# function pointers/typedefs existing in the same binary. PRIVATE: only
+# imgui_impl_opengl3.cpp's own compilation needs to see this macro, not
+# anything that merely links against the `imgui` target.
+target_compile_definitions(imgui PRIVATE IMGUI_IMPL_OPENGL_LOADER_GLAD)
+target_link_libraries(imgui PUBLIC glfw glad)
+
 # --- GLAD (OpenGL 3.3 core loader) ----------------------------------------
 # Vendored as plain source files rather than fetched: GLAD is a code
 # generator, not a library with a stable git tag/CMake target, so a
@@ -167,6 +226,7 @@ add_executable(engine_app
     src/ssao.cpp
     src/scene_serialization.cpp
     src/scene_loader.cpp
+    src/debug_ui.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)
@@ -182,6 +242,7 @@ target_link_libraries(engine_app PRIVATE
     stb_image
     assimp
     nlohmann_json::nlohmann_json
+    imgui
 )
 
 if(UNIX AND NOT APPLE)

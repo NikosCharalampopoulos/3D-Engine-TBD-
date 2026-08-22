@@ -8,6 +8,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <imgui.h>
+
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -883,6 +885,16 @@ bool legacySceneFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 8c: same getenv-gated-behavior pattern as every env var above --
+// unset by default (debug UI off), so the default headless run's rendered
+// screenshot stays pixel-identical to every prior phase's own (see
+// DebugUI's own header comment on why "off" means debugUI_ never calls a
+// single ImGui function, not just an invisible window).
+bool showDebugUIFromEnv() {
+    const char* value = std::getenv("ENGINE_SHOW_DEBUG_UI");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 // Phase 13e: builds skybox_ from either the new HDRI (default) or the old
 // 6-PNG procedural cubemap (ENGINE_USE_PROCEDURAL_SKYBOX), returning it by
 // value (Skybox is move-only, not copyable -- see skybox.hpp) so this can
@@ -1044,6 +1056,11 @@ Application::Application(int width, int height, const std::string& title, std::u
       // header note on declaration order).
       sphereMesh_(makeUVSphere(32, 32, kSphereRadius)),
       camera_(kDefaultCameraPosition),
+      // Phase 8c: window_.handle() already exists (window_ is the first
+      // member constructed) -- see this header's own Phase 8c comment for
+      // why "enabled=false" (the default) means this constructor does
+      // nothing at all, not just "creates an invisible window".
+      debugUI_(window_.handle(), showDebugUIFromEnv()),
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()),
       frustumCullDemoMode_(frustumCullDemoModeFromEnv()),
@@ -2045,6 +2062,118 @@ void Application::render() {
     postProcessShader_->setInt("uSSAODebug", ssaoDebugMode_ ? 1 : 0);
     postProcessQuad_.bind();
     postProcessQuad_.draw();
+
+    // Phase 8c: last thing render() does, after the tonemap/bloom
+    // postprocess pass right above has already resolved onto the default
+    // framebuffer (still bound from that pass, at the window's own
+    // viewport) -- see this class's own Phase 8c header comment for why
+    // ImGui draws straight onto the final tonemapped image rather than
+    // through the HDR/bloom/SSR pipeline. A no-op unless ENGINE_SHOW_DEBUG_UI
+    // was set at startup.
+    renderDebugUI();
+}
+
+// Phase 8c: builds and draws the debug overlay -- see this class's own
+// Phase 8c header comment for the overall design and debug_ui.hpp for the
+// ImGui context/backend lifecycle this wraps. A no-op (via
+// debugUI_.enabled()) unless ENGINE_SHOW_DEBUG_UI was set at startup, so a
+// default headless run never reaches a single ImGui:: call below.
+//
+// Panel contents, deliberately modest (see this phase's own "What NOT to
+// do" scope notes):
+//   - Frame Stats: frame count + ImGui's own smoothed frame time/FPS
+//     (io.Framerate -- an exponential moving average ImGui itself
+//     maintains from ImGui::GetIO().DeltaTime each NewFrame(), not
+//     something this engine needs to compute separately).
+//   - Render Passes: checkboxes bound directly to the existing
+//     ssaoDisabled_/ssaoDebugMode_/ssrDisabled_/clusterDebugMode_ members
+//     (Phase 13d/13f/13g) -- these were already plain bool members render()
+//     re-reads every frame (see those phases' own comments above), so an
+//     ImGui::Checkbox bound to one of them (by address) makes it
+//     live-toggleable with no further plumbing: no getter/setter needed,
+//     no conversion from a getenv-once flag to a "real" runtime one, since
+//     they already were runtime-mutable state, just previously only ever
+//     set once (from an env var) rather than from a UI too.
+//   - Scene Entities: a minimal inspector over registry_.each<Transform>(...)
+//     -- every entity with a Transform (not just ones with a Model, since a
+//     future entity might reasonably have one without the other -- see
+//     ecs.hpp's own "components are opt-in" design), labeled by its
+//     NameComponent when present (falling back to a bare "entity N" label
+//     otherwise, since NameComponent is itself opt-in -- see ecs.hpp), with
+//     position/rotation/scale editable via ImGui::DragFloat3. Rotation is
+//     shown/edited as Euler degrees (glm::eulerAngles/glm::radians convert
+//     to and from the stored glm::quat) purely because that's what a human
+//     can drag meaningfully in a debug UI -- Transform's own storage stays
+//     quaternion-based (see transform.hpp's own header comment on why),
+//     this just converts at the UI boundary each frame rather than
+//     changing what's actually stored.
+void Application::renderDebugUI() {
+    if (!debugUI_.enabled()) {
+        return;
+    }
+
+    debugUI_.newFrame();
+
+    // ImGuiCond_FirstUseEver: places the window at a sane on-screen default
+    // the first time it ever appears (this engine disables imgui.ini
+    // persistence -- see DebugUI's own constructor comment -- so "first
+    // use" really means "every run"), while still leaving it free to be
+    // dragged/resized afterward in an interactive session, unlike
+    // ImGuiCond_Always (which would re-snap it back here every single frame
+    // and fight the user's own repositioning).
+    ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Engine Debug");
+
+    if (ImGui::CollapsingHeader("Frame Stats", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const ImGuiIO& io = ImGui::GetIO();
+        ImGui::Text("Frame: %llu", static_cast<unsigned long long>(frameCount_));
+        ImGui::Text("%.2f ms/frame (%.1f FPS)", io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f, io.Framerate);
+    }
+
+    if (ImGui::CollapsingHeader("Render Passes", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Disable SSAO (ENGINE_SSAO_DISABLE)", &ssaoDisabled_);
+        ImGui::Checkbox("SSAO debug view: raw occlusion buffer", &ssaoDebugMode_);
+        ImGui::Checkbox("Disable SSR (ENGINE_SSR_DISABLE)", &ssrDisabled_);
+        ImGui::Checkbox("Cluster light-count debug view", &clusterDebugMode_);
+    }
+
+    if (ImGui::CollapsingHeader("Scene Entities", ImGuiTreeNodeFlags_DefaultOpen)) {
+        registry_.each<Transform>([&](EntityId id, Transform& transform) {
+            const NameComponent* nameComponent = registry_.getComponent<NameComponent>(id);
+            const std::string label =
+                nameComponent != nullptr ? nameComponent->name : ("entity " + std::to_string(id.index()));
+
+            ImGui::PushID(static_cast<int>(id.index()));
+            if (ImGui::TreeNode(label.c_str())) {
+                glm::vec3 position = transform.position();
+                if (ImGui::DragFloat3("Position", &position.x, 0.01f)) {
+                    transform.setPosition(position);
+                }
+
+                glm::vec3 rotationDeg = glm::degrees(glm::eulerAngles(transform.rotation()));
+                if (ImGui::DragFloat3("Rotation (deg)", &rotationDeg.x, 0.5f)) {
+                    transform.setRotation(glm::quat(glm::radians(rotationDeg)));
+                }
+
+                glm::vec3 scale = transform.scale();
+                if (ImGui::DragFloat3("Scale", &scale.x, 0.01f, 0.01f, 100.0f)) {
+                    transform.setScale(scale);
+                }
+
+                const ModelComponent* modelComponent = registry_.getComponent<ModelComponent>(id);
+                if (modelComponent != nullptr) {
+                    ImGui::TextDisabled("Model: %s", modelComponent->path.c_str());
+                }
+
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        });
+    }
+
+    ImGui::End();
+
+    debugUI_.render();
 }
 
 void Application::run() {

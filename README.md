@@ -28,11 +28,14 @@ into both the sky background and the existing IBL pipeline in place of the
 old flat procedural skybox (which stays available as a fallback/reference)
 --, (Phase 13f) Screen-Space Ambient Occlusion, (Phase 13g) Screen-Space
 Reflections -- refining the PBR sphere grid's IBL-only specular term with a
-real ray-marched reflection of the actual nearby scene --, and (Phase 8a) a
+real ray-marched reflection of the actual nearby scene --, (Phase 8a) a
 small but genuine component-based ECS (entities as opaque IDs, components in
-typed per-type pools) replacing the earlier Phase 6 `Entity` struct -- built
-up from bare-metal OpenGL, and verified at every step by a headless
-Xvfb+Mesa run/screenshot harness (no GPU or display required).
+typed per-type pools) replacing the earlier Phase 6 `Entity` struct, (Phase
+8b) JSON scene serialization/level loading, and (Phase 8c) a Dear ImGui
+debug overlay (entity inspector, render-pass toggles, frame stats) drawn
+last onto the final tonemapped image -- built up from bare-metal OpenGL, and
+verified at every step by a headless Xvfb+Mesa run/screenshot harness (no
+GPU or display required).
 See "Architecture
 overview" right below for what the finished whole looks like today, or
 "Development history" further down for how it got built, phase by phase
@@ -242,6 +245,9 @@ to `camera_`, then `render()`:
 8. Resolves the final image to the window with one fullscreen tonemap/
    gamma-correct/bloom-composite pass (`postProcessShader_` +
    `postProcessQuad_`).
+9. Unless `ENGINE_SHOW_DEBUG_UI` is set, stops here. Otherwise draws the
+   Phase 8c Dear ImGui debug overlay (`renderDebugUI()`) straight onto the
+   default framebuffer, on top of the now-final tonemapped image.
 
 ## Directory layout
 
@@ -253,14 +259,14 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        framebuffer.cpp, skybox.cpp, ibl_probe.cpp,
                        hdri_loader.cpp, compute_shader.cpp,
                        cluster_light_culler.cpp, ssao.cpp,
-                       scene_serialization.cpp, scene_loader.cpp)
+                       scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
                        resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
-                       scene_serialization)
+                       scene_serialization, debug_ui)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -2441,6 +2447,153 @@ and a rebuild for every scene edit.
   exited with status 1 and a clean `Window destroyed, GLFW terminated` --
   no crash, no hang, no silently-empty scene.
 
+### Phase 8c: a Dear ImGui debug overlay
+
+Phase 8a/8b gave `registry_` real components and a real file format; Phase
+8c adds the first actual *tool* for looking at/poking a running scene while
+it renders, instead of only ever reading log lines or comparing screenshots
+after the fact -- a [Dear ImGui](https://github.com/ocornut/imgui) debug
+overlay, drawn last in the frame, straight onto the window.
+
+- **Vendoring**: Dear ImGui is `FetchContent`'d (git tag `v1.92.9b`) the
+  same way GLFW/GLM/Assimp/nlohmann_json already are -- an ordinary,
+  actively-maintained, tagged dependency, not a code generator with no
+  canonical pre-generated file to pull (see "GL loader" below for why
+  *that* precedent doesn't apply here either). Dear ImGui ships no
+  `CMakeLists.txt` of its own, though -- by upstream design it's meant to be
+  compiled directly into whatever project embeds it -- so `CMakeLists.txt`
+  builds it as a small first-party static library target (`imgui`), the
+  same shape `glad` below already uses for the same underlying reason (a
+  dependency with no ready-made CMake target): `imgui.cpp`/`imgui_draw.cpp`/
+  `imgui_tables.cpp`/`imgui_widgets.cpp` (the core widget/draw-list sources)
+  plus `backends/imgui_impl_glfw.cpp`/`imgui_impl_opengl3.cpp` (this
+  engine's own windowing library and a GL-core-profile renderer backend).
+  `imgui_demo.cpp` is deliberately left out -- nothing here ever calls
+  `ImGui::ShowDemoWindow()`.
+- **Wiring** (`include/engine/debug_ui.hpp`/`src/debug_ui.cpp`): `DebugUI`
+  is a thin RAII wrapper around ImGui's context + its GLFW/OpenGL3 backend
+  lifecycle -- the same "small class owns some GL-adjacent global state"
+  shape `Window`/`Skybox`/`ShadowMap` already establish. Critically, its
+  constructor takes an `enabled` flag (from `ENGINE_SHOW_DEBUG_UI`, unset by
+  default) that gates *everything*: when disabled, no ImGui context is
+  created, no GLFW callbacks are installed, and `newFrame()`/`render()` are
+  no-ops for the object's whole life -- not just "an invisible window", but
+  "never calls a single ImGui function". `Application::renderDebugUI()`
+  (the actual panel-building code, in `application.cpp`) is called last
+  from `render()`, after the tonemap/bloom postprocess pass has already
+  resolved the HDR-lit scene onto the default framebuffer -- so every ImGui
+  widget lands straight on the final, already-tonemapped 8-bit image rather
+  than participating in the HDR/bloom/SSR pipeline (an ImGui draw call
+  going through Reinhard tonemapping would be nonsensical: its colors are
+  already meant for direct display). Shutdown
+  (`ImGui_ImplOpenGL3_Shutdown`/`ImGui_ImplGlfw_Shutdown`/
+  `ImGui::DestroyContext`) happens in `DebugUI`'s destructor, before
+  `window_`'s own GL context goes away (declaration order in
+  `Application` guarantees this).
+- **Why disabled-by-default is "never calls ImGui", not "an invisible
+  window"**: this project's whole headless-verification story rests on
+  comparing rendered screenshots across phases (`compare -metric AE`, see
+  every prior phase's own "Verify" section) -- a debug overlay that's merely
+  *invisible* (alpha 0, or drawn off past the edge) would still touch GL
+  state, still allocate a font atlas texture, still install GLFW callbacks.
+  Gating the whole subsystem behind one `enabled_` bool checked at the top
+  of every `DebugUI` method means the default path is provably identical to
+  a pre-Phase-8c build, not merely "should look the same" -- confirmed
+  below by an actual pixel-diff, not just code inspection.
+- **`ENGINE_SHOW_DEBUG_UI`**: same getenv-gated pattern as every other flag
+  in `Application` (`ENGINE_SSAO_DISABLE`, `ENGINE_CLUSTER_DEBUG`, etc.) --
+  read once at startup, unset by default. No separate "force off" variable
+  exists, since unset already means off.
+- **Why ImGui's GLFW callbacks don't break `InputState`'s polling**:
+  `ImGui_ImplGlfw_InitForOpenGL(window, /*install_callbacks=*/true)`
+  registers GLFW key/mouse/cursor/scroll callbacks -- this engine had
+  registered *zero* of its own before this phase (`input.hpp`'s
+  `InputState` is a per-frame **poll** of `Window::isKeyPressed()`/
+  `getCursorPos()`, never callback-driven, see that header's own comment),
+  so there's nothing for ImGui's callbacks to clobber. Polling and
+  callbacks are independent GLFW mechanisms: `glfwGetCursorPos()` always
+  returns the real, current cursor position regardless of whether ImGui's
+  callbacks also fired for the same event, and regardless of
+  `io.WantCaptureMouse` -- that flag is only a hint for an application to
+  *choose* to ignore input elsewhere, not something that changes what a
+  poll-based query returns. This does mean the camera keeps reading mouse
+  deltas while the cursor is over an ImGui widget (a real, known UX
+  wrinkle for a shipped tool -- gating `Camera`'s own input behind
+  `ImGui::GetIO().WantCaptureMouse` would fix it), but that's out of scope
+  here: seeing this matter at all requires the overlay visible *and* live
+  camera control at the same time, neither of which this repo's own
+  headless-only verification exercises.
+- **The panel itself** (`Application::renderDebugUI()`, deliberately
+  modest -- see this phase's own brief's "What NOT to do"):
+  - **Frame Stats**: frame count plus ImGui's own smoothed frame time/FPS
+    (`io.Framerate`, an exponential moving average ImGui maintains
+    internally -- nothing this engine needs to compute itself).
+  - **Render Passes**: four checkboxes bound directly, by address, to
+    `ssaoDisabled_`/`ssaoDebugMode_`/`ssrDisabled_`/`clusterDebugMode_` --
+    the existing Phase 13d/13f/13g debug/disable flags. These were already
+    plain `bool` members `render()` re-reads every frame (previously only
+    ever set once, from an env var, at startup); an `ImGui::Checkbox`
+    bound to one of them makes it live-toggleable with *no* further
+    plumbing -- no getter/setter, no conversion from a getenv-once flag to
+    a "real" runtime one, since they were already runtime-mutable state.
+  - **Scene Entities**: a minimal inspector over
+    `registry_.each<Transform>(...)` -- every entity with a `Transform`
+    (not only ones with a `Model`, since `ecs.hpp`'s own design makes
+    components opt-in independently), labeled by its `NameComponent` when
+    present (falling back to a bare `"entity N"` label otherwise, since
+    `NameComponent` is itself opt-in), with position/rotation/scale
+    editable via `ImGui::DragFloat3`. Rotation is shown/edited as Euler
+    degrees (`glm::eulerAngles`/`glm::radians` convert to/from the stored
+    `glm::quat` each frame) purely because that's what a human can drag
+    meaningfully -- `Transform`'s own storage stays quaternion-based (see
+    `transform.hpp`'s own header comment on why), only the UI boundary
+    converts.
+  - Deliberately **not** built: scene save/load buttons wired to Phase
+    8b's `saveScene()`/`loadScene()`, gamepad/rebindable-input support
+    (Phase 8d), or physics visualization (Phase 8e doesn't exist yet) --
+    all explicitly out of this phase's scope.
+- **A real bug caught mid-phase, worth recording**: the very first working
+  version of this overlay produced a debug window with perfectly valid
+  draw data (real vertex/index counts, sane on-screen clip rects, zero GL
+  errors) that nonetheless never showed up in `tools/run_headless.sh`'s own
+  screenshot. In-process `glReadPixels` probes (bypassing the external
+  screenshot mechanism entirely) proved the window *was* rendering
+  correctly -- a proper dark ImGui panel with real text -- and a manually
+  captured screenshot (a longer, deliberate delay before the one `xwd`
+  capture, rather than `run_headless.sh`'s own polling loop) confirmed it
+  visually. The actual cause: `run_headless.sh`'s screenshot-polling loop
+  accepts the *first* capture that merely clears a minimum file-size
+  threshold -- which this scene's own 3D content already clears on frame
+  0, before `ImGui::Begin()`'s very first call has even measured its own
+  window size (logged at a placeholder 32x35 before settling to its real
+  size one frame later). So the harness's screenshot almost always lands
+  on a frame that predates the overlay's first real content, independent
+  of whether the overlay is actually working. This is a pre-existing
+  property of the harness's own capture heuristic (documented in its own
+  comments as "first big-enough frame wins"), not something this phase
+  changes or needs to fix -- it doesn't affect the default (hidden)
+  path's own verification at all (see below), and a real interactive
+  session doesn't have this timing quirk in the first place.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with
+  zero new warnings under `-Wall -Wextra` -- including inside the `imgui`
+  target's own compilation, so no narrow warning suppressions were needed
+  there either. `ctest` still reports `scene_serialization_test` passing
+  (unaffected by this phase). Three headless configurations were each run
+  for 60 frames (`ENGINE_MAX_FRAMES=60 bash tools/run_headless.sh`) and all
+  three completed cleanly with zero GL errors: the default (overlay
+  hidden), `ENGINE_SHOW_DEBUG_UI=1` (forced on), and
+  `ENGINE_SHOW_DEBUG_UI=0` (forced off, same as default). The default
+  run's screenshot was pixel-diffed against a from-scratch rebuild of the
+  pre-Phase-8c commit (`7e6eae1`), built in a separate `git worktree`:
+  **0 differing pixels, RMSE 0** -- byte-for-byte identical PNGs
+  (matching MD5 sums), confirming this phase's default behavior changes
+  nothing about the rendered scene every prior phase's own screenshot
+  verification depends on. The overlay's actual rendered content was
+  separately confirmed by direct visual inspection (a manually-timed
+  capture well past the harness's own early-frame quirk described above),
+  showing the Frame Stats/Render Passes/Scene Entities panel exactly as
+  designed, correctly positioned and styled.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -2451,6 +2604,7 @@ and a rebuild for every scene edit.
 | **GL loader** | Hand-written, vendored in `external/glad/` | See below. |
 | **Assimp** | CMake `FetchContent` (git, tag `v5.4.3`) | De facto standard asset-import library; loads Phase 5's OBJ/glTF scenes via one well-known API instead of hand-rolling per-format parsers. Importer scope narrowed to just OBJ + glTF (see "Phase 5" above) to keep build time/scope down. |
 | **nlohmann/json** | CMake `FetchContent` (git, tag `v3.11.3`) | Single-header, MIT-licensed JSON library; Phase 8b's scene file format (see "Phase 8b" above) -- fetched the same way as GLFW/GLM/Assimp (an ordinary tagged git dependency), not hand-vendored like GLAD/stb_image below (see "Phase 8b"'s own writeup on why that precedent doesn't apply to a JSON library). |
+| **Dear ImGui** | CMake `FetchContent` (git, tag `v1.92.9b`), built as a first-party `imgui` static library target (see "Phase 8c" above) | Phase 8c's debug overlay (entity inspector, render-pass toggles, frame stats) -- the de facto standard immediate-mode debug UI library for real-time engines/tools; ships no CMake build of its own by design, so this project compiles its core sources + GLFW/OpenGL3 backend files directly, the same "small first-party target" shape `glad` below already uses. |
 
 ### GL loader: why hand-written instead of a generated GLAD
 

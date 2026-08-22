@@ -408,6 +408,42 @@
 // code), with the old hardcoded construction kept behind
 // ENGINE_LEGACY_SCENE as a documented escape hatch. See this class's own
 // Phase 8b constructor comment (application.cpp) for the full before/after.
+//
+// Phase 8c adds a Dear ImGui debug overlay (see debug_ui.hpp for the
+// context/backend-lifecycle wrapper) without touching the render pipeline
+// above at all -- renderDebugUI() is called from the very end of render(),
+// after the tonemap/bloom postprocess pass has already resolved onto the
+// default framebuffer (see render()'s own tail), so every ImGui widget is
+// drawn straight onto the final, already-tonemapped image rather than
+// participating in the HDR/bloom/SSR pipeline itself (an ImGui draw call
+// going through Reinhard tonemapping would be nonsensical -- its own colors
+// are already meant for an 8-bit display, not a scene-radiance HDR buffer).
+//   - debugUI_ (a DebugUI, see debug_ui.hpp) owns the ImGui context + GLFW/
+//     OpenGL3 backend lifecycle; renderDebugUI() (this class, defined in
+//     application.cpp) owns *what the panel shows* -- it has direct access
+//     to this class's own private state (registry_, ssaoDisabled_,
+//     ssrDisabled_, ssaoDebugMode_, clusterDebugMode_, frameCount_), which
+//     is exactly what a debug inspector needs to read and, for the render-
+//     pass toggles, mutate at runtime.
+//   - ENGINE_SHOW_DEBUG_UI (unset by default) gates the whole thing at
+//     startup, same getenv-gated pattern as every other flag in this class
+//     -- see debugUI_'s own construction in the constructor and DebugUI's
+//     own header comment for why "disabled" means "never calls a single
+//     ImGui function", not just "an invisible window": this project's
+//     headless verification depends on every prior phase's screenshot
+//     staying pixel-identical, so the default (hidden) path leaves the
+//     existing render pipeline completely untouched rather than drawing an
+//     invisible-but-still-composited overlay.
+//   - The panel itself (see renderDebugUI()'s definition in application.cpp)
+//     is deliberately modest: a frame-time/FPS readout, checkboxes for the
+//     existing SSAO/SSR/cluster-debug toggles (ssaoDisabled_ etc. were
+//     already plain bool members render() re-reads every frame -- see
+//     Phase 13f/13g/13d's own comments above -- so wiring an
+//     ImGui::Checkbox directly to one of them makes it live-toggleable with
+//     no further plumbing needed), and an entity inspector
+//     (registry_.each<Transform>(...), editable via ImGui::DragFloat3) --
+//     see "What NOT to do" in this phase's own brief for why scene save/
+//     load buttons, gamepad support, and physics visualization aren't here.
 
 #include <glm/glm.hpp>
 
@@ -419,6 +455,7 @@
 
 #include "engine/camera.hpp"
 #include "engine/cluster_light_culler.hpp"
+#include "engine/debug_ui.hpp"
 #include "engine/ecs.hpp"
 #include "engine/framebuffer.hpp"
 #include "engine/ibl_probe.hpp"
@@ -503,6 +540,15 @@ private:
     // matching renderShadowPass()/renderSSAO()'s own "just the matrices it
     // needs" shape) so a sphere the first pass culled is skipped here too.
     void renderSSRComposite(const glm::mat4& view, const glm::mat4& projection);
+
+    // Phase 8c: builds and draws the debug overlay panel -- see this
+    // header's own Phase 8c comment above and debug_ui.hpp. Called last from
+    // render(), after the tonemap/bloom postprocess pass has already resolved
+    // onto the default framebuffer, so ImGui's own draw calls land straight
+    // on top of the final image rather than participating in the HDR
+    // pipeline. A no-op (via debugUI_.enabled() -- see DebugUI's own header
+    // comment) unless ENGINE_SHOW_DEBUG_UI was set at startup.
+    void renderDebugUI();
 
     // Phase 9: one sphere in the PBR test-grid -- its own placement
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
@@ -746,6 +792,12 @@ private:
     // EntityId, rather than as two fixed fields per vector element.
     EntityRegistry registry_;
     Camera camera_;
+    // Phase 8c: owns the ImGui context + GLFW/OpenGL3 backend lifecycle --
+    // see debug_ui.hpp and this header's own Phase 8c comment above. Only
+    // needs window_.handle() (a live GL context + GLFW window), so its
+    // position here (after every GL-resource member above) is unconstrained
+    // beyond "after window_", same as camera_.
+    DebugUI debugUI_;
     std::uint64_t maxFrames_;
     std::uint64_t frameCount_ = 0;
     double totalTime_ = 0.0;
