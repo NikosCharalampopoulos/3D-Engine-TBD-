@@ -183,6 +183,18 @@ ClusterOccupancyStats ClusterLightCuller::readOccupancyStats() const {
     constexpr std::size_t kUintsPerCluster = 1 + kMaxPointLights + 1 + kMaxSpotLights;
     std::vector<unsigned int> raw(kClusterCount * kUintsPerCluster);
 
+    // Bug-review fix: cullLights()'s own glMemoryBarrier(GL_SHADER_STORAGE_
+    // BARRIER_BIT) only guarantees a *shader* (draw/dispatch) reading this
+    // SSBO afterward sees cullLights()'s writes -- it does NOT cover this
+    // function's own CPU-side glGetBufferSubData read below, which the GL
+    // 4.3 spec instead gates on GL_BUFFER_UPDATE_BARRIER_BIT. Without this,
+    // this read-back is technically unsynchronized against the light-culling
+    // dispatch that (possibly moments ago, see this call's call site in
+    // Application::render()) wrote it -- undefined per spec even though
+    // most desktop GL drivers happen to synchronize broadly enough for this
+    // to not visibly misbehave in practice.
+    GL_CHECK(glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT));
+
     GL_CHECK(glBindBuffer(GL_SHADER_STORAGE_BUFFER, lightListBuffer_));
     GL_CHECK(glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                                  static_cast<GLsizeiptr>(raw.size() * sizeof(unsigned int)), raw.data()));

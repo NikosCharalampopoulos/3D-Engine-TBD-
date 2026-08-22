@@ -261,12 +261,23 @@ typedef void* (*GLADloadproc)(const char* name);
 // nothing before this phase actually called any of them.
 #define GL_COMPUTE_SHADER 0x91B9
 #define GL_SHADER_STORAGE_BUFFER 0x90D2
-// The one barrier bit this phase actually needs: SSBO writes from a compute
-// dispatch must be flushed/visible before a later draw call's fragment
-// shader (or a later compute dispatch) reads the same buffer -- see
-// ClusterLightCuller::computeClusterAABBs()/cullLights()'s
-// glMemoryBarrier() calls.
+// SSBO writes from a compute dispatch must be flushed/visible before a
+// later draw call's fragment shader (or a later compute dispatch) reads
+// the same buffer -- see ClusterLightCuller::computeClusterAABBs()/
+// cullLights()'s glMemoryBarrier() calls.
 #define GL_SHADER_STORAGE_BARRIER_BIT 0x00002000
+// Phase 13d bug-review fix: GL_SHADER_STORAGE_BARRIER_BIT alone only
+// synchronizes subsequent *shader* accesses via the GL_SHADER_STORAGE_BUFFER
+// binding (e.g. a later dispatch/draw call reading the SSBO from GLSL) --
+// per the GL 4.3 spec's glMemoryBarrier() table, a CPU-side readback via
+// glGetBufferSubData (ClusterLightCuller::readOccupancyStats()) is only
+// guaranteed to observe a prior compute dispatch's writes once this bit is
+// also included in the barrier. Missing this is exactly the kind of
+// spec-level undefined-behavior gap this engine's bug-review process
+// doesn't leave latent (see GL_CHECK's own rationale) even though most
+// desktop drivers happen to synchronize broadly enough not to visibly
+// break on it.
+#define GL_BUFFER_UPDATE_BARRIER_BIT 0x00000200
 
 /* ---- function pointer typedefs ----------------------------------------- */
 
