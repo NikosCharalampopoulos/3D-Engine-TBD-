@@ -529,6 +529,68 @@ vec3 shadeDirectLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float 
 // SSR pass) and the same before/after luminance comparison bug review #2
 // used on its own previously-broken sphere (unchanged, confirming that fix
 // itself still holds).
+//
+// Phase 13g bug review #4: bug review #3's re-verification above was itself
+// incomplete -- a full headless screenshot of the 8-sphere grid (not just
+// the two individual spheres bug reviews #2/#3 had each separately been
+// chasing) showed 4 of the 8 spheres (every one smooth/metallic enough that
+// roughnessFade and a low diffuse contribution -- see shadeDirectLight's own
+// `kD` -- don't mask a wrong specular term) with a bizarre swirling/donut-
+// shaped distortion centered on the sphere, nothing like a reflection,
+// confirmed SSR-specific by ENGINE_SSR_DISABLE=1 rendering all 8 cleanly.
+// A debug build visualizing raw hitUV directly (this file's own established
+// technique, extended with an out parameter for the coarse crossing's own
+// step index and view-space position) showed the actual bug: nearly EVERY
+// fragment on EVERY sphere -- not just the 4 visibly-swirling ones --
+// crossed at coarse step i=1 or i=2, with hitUV varying wildly and
+// non-monotonically (a visible vortex in the raw hitUV colors themselves)
+// exactly where the swirl appears in the final shaded image. That is far too
+// early and far too unstable to be this scene's real geometry: kSphereRadius
+// = 0.14 and kSphereColSpacing = 0.6 (see application.cpp) mean a genuine
+// first reflection target is essentially never found within the first
+// couple of ~0.107-unit coarse steps for a ray leaving a sphere's surface in
+// a non-grazing direction.
+//
+// The actual cause was hiding in plain sight in the coarse march loop
+// itself, not in this constant: bug review #3's refactor (splitting
+// "detect a crossing" from "judge a crossing," so kSSRThickness could move
+// to the refined gap) accidentally deleted the crossing test itself along
+// the way. The comment immediately above the coarse loop's crossing-record
+// still describes "the ray has intersected real geometry once it goes
+// behind... the actual surface stored there" -- but the code below it no
+// longer checks that at all; it unconditionally treats the FIRST screen
+// pixel with any non-background depth as a crossing, whether or not
+// `currPos` has actually gone behind that depth yet. Since a reflection
+// ray's very first ~0.107-unit step from a sphere's own surface almost
+// always still projects to a screen pixel showing *some* real geometry
+// (this sphere's own silhouette, the floor right underneath it, a
+// neighboring object), that fires immediately for nearly every fragment.
+// The subsequent bisection then refines between viewPos (the ray's own
+// origin) and that first, essentially-arbitrary step -- a bracket so
+// close to the reflecting fragment's own surface that it converges to a
+// small, stable residual gap almost every time (passing kSSRThickness's
+// tight post-refinement margin, exactly as bug review #3 intended it to for
+// a *real* surface), yielding a confidently-accepted hitUV that is really
+// just wherever that first short, near-tangent step happened to land --
+// hypersensitive to the exact reflect direction per bug review #1's own
+// convex-mirror angular-amplification finding, which is what turns a smooth
+// sweep across a sphere's face into the observed swirl. All 8 spheres run
+// through this same broken march equally; only 4 show it visually because
+// the other 4 sit at a metallic/roughness combination where roughnessFade
+// is already small (fading the wrong result back out) or `kD` is large
+// enough that the correct diffuse term still dominates the final blend
+// (see shadeDirectLight/ambient's own `kD`/`ao`/`ssao` weighting) -- the bug
+// was never confined to 4 spheres, only its visibility was.
+//
+// The fix: restore the missing `currPos.z <= sceneViewZ` crossing test in
+// the coarse loop below (making "keep marching, this step is still in front
+// of whatever's at this screen pixel" possible again, not just "stop
+// immediately"), while keeping bug review #3's own, still-correct insight of
+// judging kSSRThickness against the refined gap rather than the coarse one.
+// Re-verified with the same raw-hitUV debug build (now a smooth, monotonic
+// gradient across every sphere's face, no vortex on any of the 8) and a full
+// 8-sphere headless screenshot (all 4 previously-swirling spheres clean, the
+// other 4 and bug review #2's own previously-fixed sphere unchanged).
 const int kSSRMaxSteps = 28;
 const float kSSRMaxDistance = 3.0;
 const int kSSRRefineSteps = 4;
@@ -566,6 +628,13 @@ bool traceSSR(vec3 viewPos, vec3 viewReflectDir, out vec2 hitUV) {
     // view-space Z there) without judging it yet -- kSSRThickness is no
     // longer applied at this coarse resolution at all, see that constant's
     // own bug review #3 comment for why.
+    //
+    // Phase 13g bug review #4: see kSSRThickness's own bug review #4 comment
+    // for the full story -- the crossing test below (`currPos.z <=
+    // sceneViewZ`) is not optional bookkeeping, it is what makes this a
+    // *crossing* at all. Losing it (review #3's actual regression) turns
+    // this loop into "accept the first screen pixel with any foreground
+    // depth at all," true at i==1 for almost every fragment in this scene.
     vec2 crossingUV = vec2(0.0);
     float crossingSceneViewZ = 0.0;
 
@@ -596,13 +665,27 @@ bool traceSSR(vec3 viewPos, vec3 viewReflectDir, out vec2 hitUV) {
         // negative with distance (this engine's usual convention, see
         // pbr.vert's vViewSpaceDepth comment) -- the ray has intersected
         // real geometry once it goes behind (a more-negative Z than) the
-        // actual surface stored there. Just record the crossing and stop
-        // marching -- see kSSRThickness's bug review #3 comment for why
-        // accepting/rejecting it happens later, after refinement, not here.
-        crossed = true;
-        crossingUV = uv;
-        crossingSceneViewZ = sceneViewZ;
-        break;
+        // actual surface stored there.
+        //
+        // Phase 13g bug review #4: this `if` is the crossing test itself --
+        // see kSSRThickness's own bug review #4 comment for why it must gate
+        // whether the loop even treats this step as a crossing, not just
+        // whether marching continues. Record the crossing and stop marching
+        // once it fires -- see kSSRThickness's bug review #3 comment for why
+        // accepting/rejecting *this* crossing is still deferred to after
+        // refinement, not done here.
+        if (currPos.z <= sceneViewZ) {
+            crossed = true;
+            crossingUV = uv;
+            crossingSceneViewZ = sceneViewZ;
+            break;
+        }
+        // Still in front of the recorded surface at this screen position --
+        // real, unrelated geometry the ray hasn't reached yet (e.g. this
+        // same sphere's own nearby silhouette, or another object entirely).
+        // Keep marching rather than stopping here (bug review #4's fix --
+        // see that comment for what stopping unconditionally, as this loop
+        // used to, actually broke).
     }
 
     if (!crossed) {

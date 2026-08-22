@@ -1769,6 +1769,64 @@ SSR now can.
   at all), and a Debug build's `GL_CHECK` drains zero GL errors across a
   full headless run with the fix in place.
 
+- **Bug found in independent re-review (#4): the #3 fix above introduced a
+  new, more visible swirling/donut-shaped reflection distortion on 4 of the
+  8 spheres.** A full headless screenshot of the whole sphere grid (not just
+  the one sphere each of #2/#3's own investigations had separately zoomed
+  in on) showed every sphere smooth/metallic enough that a wrong specular
+  term isn't masked by diffuse or `roughnessFade` displaying a bizarre
+  spiraling, warped copy of the checkerboard floor centered on the sphere --
+  nothing like a reflection, and confirmed SSR-specific by
+  `ENGINE_SSR_DISABLE=1` rendering all 8 spheres cleanly. A debug build
+  extending the raw-hitUV visualization #1/#2 already established (adding an
+  out-parameter for the coarse crossing's own step index and view-space
+  position) showed nearly *every* fragment on *every* sphere -- not just the
+  4 visibly-swirling ones -- crossed at coarse step 1 or 2, with `hitUV`
+  varying wildly and non-monotonically (a visible vortex in the raw hitUV
+  colors themselves) exactly where the swirl shows up in the final shaded
+  image. That's far too early to be this scene's real geometry
+  (`kSphereRadius` = 0.14, `kSphereColSpacing` = 0.6 -- a genuine reflection
+  target is essentially never found within the first couple of ~0.107-unit
+  steps off a non-grazing sphere surface). The actual cause turned out to be
+  hiding in the coarse march loop itself, not in `kSSRThickness`: #3's
+  refactor (splitting "detect a crossing" from "judge a crossing," so
+  `kSSRThickness` could move to the refined gap) accidentally deleted the
+  crossing test itself along the way -- the loop's own comment still
+  described "the ray has intersected real geometry once it goes behind...
+  the actual surface stored there," but the code below it no longer checked
+  that at all, unconditionally treating the *first* screen pixel with any
+  non-background depth as a crossing whether or not the ray had actually
+  gone behind it yet. Since a reflection ray's very first ~0.107-unit step
+  off a sphere's surface almost always still projects to a screen pixel
+  showing *some* real geometry (that same sphere's own silhouette, the floor
+  right underneath it), this fired immediately for nearly every fragment;
+  the subsequent bisection then refined between the ray's own origin and
+  that first, essentially-arbitrary step -- a bracket so close to the
+  reflecting fragment's own surface that it converged to a small, stable
+  residual gap almost every time (passing `kSSRThickness`'s tight
+  post-refinement margin exactly as #3 intended it to for a *real* surface),
+  confidently accepting a hitUV that was really just wherever that first
+  short, near-tangent step happened to land -- hypersensitive to the exact
+  reflect direction per #1's own convex-mirror angular-amplification
+  finding, which is what turns a smooth sweep across a sphere's face into a
+  swirl. All 8 spheres ran through this same broken march equally; only 4
+  showed it visually because the other 4 sit at a metallic/roughness
+  combination where `roughnessFade` was already small or the diffuse term
+  (`kD`) large enough to keep dominating the final blend regardless -- the
+  bug was never confined to 4 spheres, only its visibility was. The fix:
+  restore the missing `currPos.z <= sceneViewZ` crossing test in the coarse
+  loop (so a step that's still in front of whatever's at its screen pixel
+  goes back to being marched past, rather than accepted outright), while
+  keeping #3's own still-correct insight of judging `kSSRThickness` against
+  the refined gap rather than the coarse one. Verified with the same
+  raw-hitUV debug build (now a smooth, monotonic gradient across every
+  sphere's face, no vortex on any of the 8) and a full 8-sphere headless
+  screenshot, cropped per-sphere: all 4 previously-swirling spheres are
+  clean, the other 4 and #2's own previously-fixed sphere are unchanged, and
+  `ENGINE_SSR_DISABLE=1` renders pixel-identical (RMSE 0) to the pre-fix
+  disabled render. A Debug build's `GL_CHECK` drains zero GL errors across a
+  full headless run with the fix in place.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
