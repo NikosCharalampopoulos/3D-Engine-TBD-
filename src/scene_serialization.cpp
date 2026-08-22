@@ -22,6 +22,28 @@ namespace {
 
 using json = nlohmann::json;
 
+// Bug-review fix (post-8b): readVec3()/readQuat() below used to check only
+// value.is_array() && value.size() == N before calling each element's
+// .get<float>() -- so an element that's array-shaped-but-not-a-number (a
+// string, bool, null, nested array/object) made .get<float>() throw
+// nlohmann's own json::type_error straight out of parseSceneRecords(),
+// un-LOG_ERROR'd and NOT a std::runtime_error, breaking both halves of this
+// header's own documented contract ("Throws std::runtime_error (after
+// LOG_ERROR'ing...) for every malformed-input case", explicitly including
+// "a vector field that isn't a 3- or 4-element array of numbers" -- an
+// array of non-numbers is exactly that case, just not one the original
+// element-count-only check actually caught). Checking is_number() per
+// element here, before any .get<float>() call, closes that gap the same
+// way the sibling is_array()/size() checks already do.
+bool allElementsAreNumbers(const json& array) {
+    for (const json& element : array) {
+        if (!element.is_number()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Reads a 3-element JSON array of numbers as a glm::vec3, or returns
 // fallback unchanged if `key` isn't present in `obj` at all -- see this
 // file's header comment on why every transform field is optional
@@ -34,7 +56,7 @@ glm::vec3 readVec3(const json& obj, const char* key, const glm::vec3& fallback, 
         return fallback;
     }
     const json& value = obj.at(key);
-    if (!value.is_array() || value.size() != 3) {
+    if (!value.is_array() || value.size() != 3 || !allElementsAreNumbers(value)) {
         throw std::runtime_error(context + ": \"" + key + "\" must be a 3-element array of numbers");
     }
     return glm::vec3(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
@@ -48,7 +70,7 @@ glm::quat readQuat(const json& obj, const char* key, const glm::quat& fallback, 
         return fallback;
     }
     const json& value = obj.at(key);
-    if (!value.is_array() || value.size() != 4) {
+    if (!value.is_array() || value.size() != 4 || !allElementsAreNumbers(value)) {
         throw std::runtime_error(context + ": \"" + key + "\" must be a 4-element [w, x, y, z] array of numbers");
     }
     return glm::quat(value[0].get<float>(), value[1].get<float>(), value[2].get<float>(), value[3].get<float>());
@@ -70,12 +92,21 @@ std::vector<SceneEntityRecord> parseSceneRecords(const std::string& path) {
     json root;
     try {
         file >> root;
-    } catch (const json::parse_error& e) {
-        // nlohmann's own parse_error::what() already names the byte offset
-        // and a human-readable reason (e.g. "unexpected character") --
-        // relayed verbatim rather than re-worded, since it's already the
-        // specific, actionable detail this boundary check exists to
-        // surface (see scene_serialization.hpp's malformed-input comment).
+    } catch (const json::exception& e) {
+        // Bug-review fix (post-8b): this used to catch only
+        // json::parse_error, but nlohmann's own parser throws other
+        // json::exception subclasses directly out of `file >> root` too --
+        // e.g. json::out_of_range ("number overflow parsing '1e400'") for a
+        // numeric literal too large to represent, which is syntactically
+        // valid JSON but not a parse_error in nlohmann's own taxonomy. Both
+        // are "this file's contents aren't valid JSON [this parser can
+        // represent]" from this function's caller's point of view, so both
+        // get the same std::runtime_error-after-LOG_ERROR treatment this
+        // header's own malformed-input contract promises, using
+        // json::exception (the common base of parse_error/out_of_range/
+        // type_error/...) rather than parse_error alone. what() already
+        // names the specific byte offset or reason either way, so it's
+        // relayed verbatim exactly as parse_error's was.
         LOG_ERROR("parseSceneRecords: \"" + path + "\" is not valid JSON: " + e.what());
         throw std::runtime_error("parseSceneRecords: \"" + path + "\" is not valid JSON: " + e.what());
     }

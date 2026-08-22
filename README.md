@@ -2372,6 +2372,36 @@ and a rebuild for every scene edit.
   this; see `log.hpp`'s `LOG_ERROR` and `main.cpp`'s top-level
   `catch (const std::exception&)`), applied to a new kind of external
   input rather than inventing a second error-handling convention for it.
+- **Post-8b bug-review fix**: adversarial testing beyond the schema cases
+  the original `parseSceneRecords()` doc comment enumerated found two gaps
+  in the "throws `std::runtime_error` after `LOG_ERROR`" contract above,
+  both in `scene_serialization.cpp`: (1) a `"position"`/`"rotation"`/
+  `"scale"` array that was the right length but held a non-number element
+  (e.g. `"position": ["a", "b", "c"]`) made `readVec3()`/`readQuat()`'s
+  `.get<float>()` throw a raw, un-`LOG_ERROR`'d `nlohmann::json::type_error`
+  instead -- the length/array-shape check never verified each element was
+  actually numeric before converting it; and (2) a numeric literal too
+  large to represent (e.g. `"position": [1e400, 0, 0]`) makes nlohmann
+  itself throw `json::out_of_range` ("number overflow parsing...")
+  *during* `file >> root`, which is a different exception subclass than
+  `json::parse_error` and so wasn't caught by the `catch` clause wrapping
+  that parse at all -- it escaped `parseSceneRecords()` entirely
+  unwrapped. Neither crashed `engine_app` (`main()`'s top-level
+  `catch (const std::exception&)` still catches both, since every
+  `nlohmann::json::exception` is one), but both broke the documented
+  `std::runtime_error`-with-context contract this phase's own header
+  comment promises, and produced a bare nlohmann diagnostic instead of
+  this file's usual "which file, which entity, which field" message. Fixed
+  by (1) an `allElementsAreNumbers()` check added to both readers before
+  any `.get<float>()` call, and (2) widening the parse-time `catch` from
+  `json::parse_error` to `json::exception` (the common base of both
+  subclasses) so every nlohmann-thrown error at that boundary gets the
+  same wrapped, logged treatment. Verified against a from-scratch
+  adversarial harness exercising both cases (plus the schema/optional-
+  field/multi-entity/special-character cases already listed under
+  "Verify" below) and reconfirmed pixel-identical (`0` AE) headless
+  renders before and after the fix, since it only changes malformed-input
+  handling, not any valid-input code path.
 - **`tests/`**: no longer just the Phase 0 placeholder.
   `tests/scene_serialization_test.cpp` is a plain executable (no
   Catch2/GoogleTest fetched -- one test case doesn't yet justify a real
