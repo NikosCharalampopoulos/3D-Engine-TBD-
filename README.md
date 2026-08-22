@@ -2115,6 +2115,47 @@ existing half-resolution depth texture throughout (that was never the bug;
 own small disagreements with the true surface needed, not to its resolution
 itself).
 
+- **Bug review #5 (cross-phase, found during the Phase 9-13g final review):
+  bloom silently read a stale, pre-SSR mip chain.** #1's fix above gave
+  `hdrResolveFramebuffer_` a real mip chain and rebuilt it
+  (`generateColorMipmaps()`) once every frame, right after that buffer's
+  first `resolveTo()` -- but only *once*: `renderSSRComposite()`'s own
+  second `resolveTo()` a few lines later (needed so `hdrResolveFramebuffer_`
+  reflects SSR's blended output, not just the pre-SSR first pass) only
+  overwrites that texture's base (mip 0) level -- `glBlitFramebuffer` never
+  touches anything past it -- leaving every mip above 0 holding whatever the
+  *first* `generateColorMipmaps()` call built, i.e. this frame's pre-SSR
+  image. Phase 11's bloom-extraction pass reads this same texture next, and
+  is exactly the kind of read that can select a non-zero mip on its own:
+  its target (`brightFramebuffer_`) is half `hdrResolveFramebuffer_`'s
+  resolution (`kBloomDownsampleFactor`), so the fullscreen quad's own
+  screen-space UV derivatives drive GL's implicit LOD selection above 0 --
+  confirmed directly by temporarily stomping mip 1 with solid magenta and
+  rendering with `ENGINE_SSR_DISABLE=1` (so nothing else touches the chain
+  afterward): the *entire* bloomed image came back tinted magenta, proving
+  bloom's downsample does sample non-zero mips in practice, not just in
+  theory. The upshot: a bright SSR reflection (a smooth sphere mirroring a
+  point light or a bright patch of environment) could bloom at its dimmer
+  pre-SSR brightness, or fail to cross `kBloomThreshold` at all, even though
+  the final tonemap pass right after (which samples mip 0 only, at 1:1
+  resolution, so never triggers implicit LOD selection) shows the correct,
+  post-SSR pixel. This project's own current sphere-grid/camera framing
+  doesn't happen to put a strong enough SSR-only highlight in view to make
+  the difference visible by eye (a before/after diff of the actual scene
+  came back within 1/255 rounding noise) -- but the invariant it violates
+  (every consumer of `hdrResolveFramebuffer_` should see the same finished,
+  post-SSR image) is real and scene-independent, exactly the kind of latent
+  bug a different camera angle or light placement would expose. Fixed by
+  calling `generateColorMipmaps()` a second time, right after
+  `renderSSRComposite()`'s own second `resolveTo()`, so the mip chain bloom
+  reads is rebuilt from the same post-SSR base level the tonemap pass
+  already sees. Verified: clean rebuild, zero warnings under `-Wall
+  -Wextra`; headless runs (default, every individual `ENGINE_*` env var
+  above, and a few combinations) all complete without a GL error and render
+  pixel-identical to the pre-fix build in every mode that doesn't touch this
+  code path (`ENGINE_SSR_DISABLE=1` and friends), with only sub-1/255
+  rounding differences in the default (SSR-enabled) render.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

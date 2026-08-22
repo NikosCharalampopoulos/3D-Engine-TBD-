@@ -1863,6 +1863,24 @@ void Application::render() {
     if (!ssrDisabled_) {
         renderSSRComposite(view, projection);
         hdrFramebuffer_.resolveTo(hdrResolveFramebuffer_);
+        // Bug fix: resolveTo() above only overwrites hdrResolveFramebuffer_'s
+        // base mip level (glBlitFramebuffer never touches anything past mip
+        // 0) -- the mip chain generateColorMipmaps() built a few lines above
+        // (right after the FIRST resolveTo(), for traceSSR()'s own textureGrad
+        // reads) is now stale everywhere except mip 0: every mip above it
+        // still holds this frame's PRE-SSR image. bloom extraction below
+        // reads this same texture through ordinary GL_LINEAR_MIPMAP_LINEAR
+        // minification (its target, brightFramebuffer_, is half this
+        // texture's resolution -- see kBloomDownsampleFactor), which is
+        // exactly the kind of read that lets the GPU pick a non-zero implicit
+        // LOD from screen-space derivatives -- so a bright SSR reflection
+        // (e.g. a smooth sphere mirroring a point light or the sun) can
+        // silently fail to bloom, or bloom at its dimmer pre-SSR brightness,
+        // even though the tonemap pass right after (which samples mip 0 only,
+        // at 1:1 resolution with no minification) shows it correctly. Must
+        // rebuild the chain again here so bloom's own downsample sees the
+        // same post-SSR image the rest of this frame does.
+        hdrResolveFramebuffer_.generateColorMipmaps();
     }
 
     // Phase 11: bloom -- entirely screen-space passes against
