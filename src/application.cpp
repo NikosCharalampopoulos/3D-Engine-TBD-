@@ -953,7 +953,17 @@ Application::Application(int width, int height, const std::string& title, std::u
       // hdrFramebuffer_ resolves into every frame (see render()) -- default
       // (0) sample count, same as every pre-existing Framebuffer instance
       // below.
-      hdrResolveFramebuffer_(window_.getSize().first, window_.getSize().second),
+      //
+      // Phase 13g bug fix: mipmappedColor = true (depthAsTexture stays its
+      // default false -- this target's depth renderbuffer is still never
+      // sampled) -- see Framebuffer's own constructor comment on that flag,
+      // and renderSSRComposite()'s comment on the specific aliasing bug this
+      // fixes. No other Framebuffer instance below requests this: SSR's
+      // ray-marched, per-fragment-varying UV is the only reader in this
+      // engine of any Framebuffer's color texture that isn't a fixed,
+      // 1:1-with-the-target fullscreen-quad UV.
+      hdrResolveFramebuffer_(window_.getSize().first, window_.getSize().second, /*samples=*/0,
+                              /*depthAsTexture=*/false, /*mipmappedColor=*/true),
       // Phase 11: bloom's own off-screen targets, sized at
       // 1/kBloomDownsampleFactor of the window's real framebuffer
       // resolution -- see this header's Phase 11 comment on
@@ -1823,6 +1833,14 @@ void Application::render() {
     // this frame's HDR color. Everything from here on reads
     // hdrResolveFramebuffer_ instead of hdrFramebuffer_ directly.
     hdrFramebuffer_.resolveTo(hdrResolveFramebuffer_);
+    // Phase 13g bug fix: rebuilds hdrResolveFramebuffer_'s mip chain from the
+    // base level resolveTo() just wrote, immediately before renderSSRComposite()
+    // below reads this exact texture via a dynamic, per-fragment-varying UV
+    // (see that method's own comment, and Framebuffer::generateColorMipmaps()'s).
+    // Must happen every frame right here, not once at startup: each frame's
+    // resolveTo() overwrites the base level with this frame's own scene, so
+    // last frame's mip chain is stale the instant that happens.
+    hdrResolveFramebuffer_.generateColorMipmaps();
 
     // Phase 13g: Screen-Space Reflections -- see this class's own Phase 13g
     // header comment. Must run after the resolveTo() just above (needs a

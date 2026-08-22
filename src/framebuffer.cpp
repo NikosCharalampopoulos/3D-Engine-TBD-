@@ -42,7 +42,8 @@ int clampMultisampleCount(int requestedSamples) {
 
 }  // namespace
 
-Framebuffer::Framebuffer(int width, int height, int samples, bool depthAsTexture) : width_(width), height_(height) {
+Framebuffer::Framebuffer(int width, int height, int samples, bool depthAsTexture, bool mipmappedColor)
+    : width_(width), height_(height) {
     // samples <= 1 is this class's original single-sample behavior (every
     // pre-existing call site -- brightFramebuffer_/pingpongFramebuffer0_/1_'s
     // bloom targets -- passes no argument here at all, defaulting to 0);
@@ -65,6 +66,17 @@ Framebuffer::Framebuffer(int width, int height, int samples, bool depthAsTexture
         LOG_ERROR("Framebuffer: depthAsTexture is not supported together with multisampling");
         throw std::runtime_error("Framebuffer: depthAsTexture is not supported together with multisampling");
     }
+    // Phase 13g bug fix: same reasoning as the depthAsTexture guard just
+    // above -- a multisample color texture is a GL_TEXTURE_2D_MULTISAMPLE
+    // (see the wantsMultisample branch below), which GL_GENERATE_MIPMAP-style
+    // chains simply don't apply to (only texelFetch/per-sample access is
+    // valid on one), so this can only ever be requested on the single-sample
+    // path.
+    if (wantsMultisample && mipmappedColor) {
+        LOG_ERROR("Framebuffer: mipmappedColor is not supported together with multisampling");
+        throw std::runtime_error("Framebuffer: mipmappedColor is not supported together with multisampling");
+    }
+    mipmappedColor_ = mipmappedColor;
 
     if (wantsMultisample) {
         // Multisample color attachment: GL_TEXTURE_2D_MULTISAMPLE, not the
@@ -104,8 +116,23 @@ Framebuffer::Framebuffer(int width, int height, int samples, bool depthAsTexture
         // GL_NEAREST either. GL_CLAMP_TO_EDGE: the fullscreen quad's texCoords
         // never leave [0,1], so wrapping mode is moot, but clamping is the
         // conventional safe default for a target nothing ever tiles.
-        GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-        GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        //
+        // Phase 13g bug fix: mipmappedColor swaps GL_LINEAR for
+        // GL_LINEAR_MIPMAP_LINEAR and immediately builds the initial chain
+        // (glGenerateMipmap -- harmless on this still-empty texture, just
+        // allocates the mip storage so the FBO/texture is complete from
+        // frame one, before generateColorMipmaps() ever regenerates it from
+        // real content) -- every non-SSR consumer of this same class
+        // (tonemap, bloom) never requests this and keeps the exact original
+        // single-level GL_LINEAR behavior.
+        if (mipmappedColor_) {
+            GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
+            GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+            GL_CHECK(glGenerateMipmap(GL_TEXTURE_2D));
+        } else {
+            GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+            GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        }
         GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
         GL_CHECK(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
         GL_CHECK(glBindTexture(GL_TEXTURE_2D, 0));
@@ -181,7 +208,8 @@ Framebuffer::Framebuffer(int width, int height, int samples, bool depthAsTexture
     LOG_INFO("Framebuffer created: " + std::to_string(width_) + "x" + std::to_string(height_) +
               (wantsMultisample ? (" RGBA16F " + std::to_string(samples_) + "x-multisample color + depth24 target")
                                  : std::string(" RGBA16F color + depth24 target")) +
-              (depthAsTexture ? " (depth as sampled texture)" : ""));
+              (depthAsTexture ? " (depth as sampled texture)" : "") +
+              (mipmappedColor_ ? " (color as mipmap chain)" : ""));
 }
 
 Framebuffer::~Framebuffer() {
@@ -206,7 +234,8 @@ Framebuffer::Framebuffer(Framebuffer&& other) noexcept
       depthTexture_(other.depthTexture_),
       width_(other.width_),
       height_(other.height_),
-      samples_(other.samples_) {
+      samples_(other.samples_),
+      mipmappedColor_(other.mipmappedColor_) {
     other.fbo_ = 0;
     other.colorTexture_ = 0;
     other.depthRenderbuffer_ = 0;
@@ -214,6 +243,7 @@ Framebuffer::Framebuffer(Framebuffer&& other) noexcept
     other.width_ = 0;
     other.height_ = 0;
     other.samples_ = 0;
+    other.mipmappedColor_ = false;
 }
 
 Framebuffer& Framebuffer::operator=(Framebuffer&& other) noexcept {
@@ -238,6 +268,7 @@ Framebuffer& Framebuffer::operator=(Framebuffer&& other) noexcept {
         width_ = other.width_;
         height_ = other.height_;
         samples_ = other.samples_;
+        mipmappedColor_ = other.mipmappedColor_;
 
         other.fbo_ = 0;
         other.colorTexture_ = 0;
@@ -246,6 +277,7 @@ Framebuffer& Framebuffer::operator=(Framebuffer&& other) noexcept {
         other.width_ = 0;
         other.height_ = 0;
         other.samples_ = 0;
+        other.mipmappedColor_ = false;
     }
     return *this;
 }
@@ -272,6 +304,18 @@ void Framebuffer::bindDepthTexture(unsigned int unit) const {
     // instance) is not a texture and was never meant to be sampled.
     GL_CHECK(glActiveTexture(GL_TEXTURE0 + unit));
     GL_CHECK(glBindTexture(GL_TEXTURE_2D, depthTexture_));
+}
+
+void Framebuffer::generateColorMipmaps() const {
+    // Precondition (see this method's header comment): only meaningful on an
+    // instance constructed with mipmappedColor = true -- every other
+    // instance's color texture has just the one GL_LINEAR level the
+    // constructor allocated, and GL_TEXTURE_MIN_FILTER never asks for
+    // anything past it, so regenerating a chain nothing samples from would
+    // be pure wasted work.
+    GL_CHECK(glBindTexture(GL_TEXTURE_2D, colorTexture_));
+    GL_CHECK(glGenerateMipmap(GL_TEXTURE_2D));
+    GL_CHECK(glBindTexture(GL_TEXTURE_2D, 0));
 }
 
 void Framebuffer::resolveTo(const Framebuffer& target) const {

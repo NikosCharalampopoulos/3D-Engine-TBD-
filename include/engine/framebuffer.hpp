@@ -86,7 +86,20 @@ public:
     // own G-buffer pre-pass is deliberately single-sample -- see that pass's
     // own comment in application.cpp) and Framebuffer has no reason to
     // support speculatively.
-    explicit Framebuffer(int width, int height, int samples = 0, bool depthAsTexture = false);
+    //
+    // Phase 13g bug fix: `mipmappedColor` (default false, preserving every
+    // existing call site's original single-mip-level behavior) allocates a
+    // full GL_LINEAR_MIPMAP_LINEAR chain on the color texture instead of a
+    // single GL_LINEAR level, and enables generateColorMipmaps() below.
+    // Needed the first time anything in this engine reads this target's
+    // color texture at a *dynamically computed, per-fragment-varying* UV
+    // rather than the fixed, 1:1 fullscreen-quad UV every earlier consumer
+    // (tonemap, bloom) used -- see Application::renderSSRComposite()'s own
+    // comment on hdrResolveFramebuffer_ for the specific bug this fixes.
+    // Refused together with samples > 1 for the same "nothing downstream
+    // needs it, don't build it speculatively" reason depthAsTexture is.
+    explicit Framebuffer(int width, int height, int samples = 0, bool depthAsTexture = false,
+                          bool mipmappedColor = false);
     ~Framebuffer();
 
     Framebuffer(const Framebuffer&) = delete;
@@ -113,6 +126,17 @@ public:
     // engine; resolveTo() below is the multisample path's own way to reach
     // an ordinary sampler2D-compatible texture.
     void bindColorTexture(unsigned int unit) const;
+
+    // Phase 13g bug fix: regenerates the color texture's mipmap chain from
+    // its current (just-rendered-into) base level -- must be called once
+    // after each frame's draw into this target and before anything samples
+    // it with a non-zero LOD (textureLod/textureGrad/an implicit-LOD
+    // texture() call with large screen-space derivatives), or those reads
+    // see stale mip data from whatever this target held last time it was
+    // populated. Mirrors bindColorTexture()'s "precondition: constructed
+    // with the matching flag" contract -- only valid if this instance was
+    // constructed with mipmappedColor = true.
+    void generateColorMipmaps() const;
 
     // Phase 13f: binds this target's depth texture as a regular 2D texture
     // (for sampling, not writing) on the given unit -- mirrors
@@ -162,6 +186,12 @@ private:
     int width_ = 0;
     int height_ = 0;
     int samples_ = 0;
+    // Phase 13g bug fix: recorded (rather than re-derived from the texture's
+    // own GL_TEXTURE_MIN_FILTER) purely so generateColorMipmaps() has
+    // nothing to precondition-check against but this constructor's own
+    // recorded intent -- mirrors depthTexture_ acting as its own "was this
+    // requested" flag above.
+    bool mipmappedColor_ = false;
 };
 
 }  // namespace engine

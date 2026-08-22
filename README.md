@@ -1556,6 +1556,117 @@ byte-for-byte-format compatibility before ever wiring it into the engine).
   is selected. Clean `rm -rf build && cmake -B build -S . && cmake --build
   build` succeeds with zero warnings under `-Wall -Wextra`.
 
+### Phase 13f: Screen-Space Ambient Occlusion (SSAO)
+
+Phase 13f adds the classic Crysis/John Chapman hemisphere-kernel SSAO
+technique, multiplied into both `basic.frag`'s and `pbr.frag`'s existing
+ambient term alongside their material-authored AO.
+
+- `Framebuffer` gains an optional `depthAsTexture` attachment so a target's
+  depth can be sampled (not just written) -- used by SSAO's own lightweight
+  geometry pre-pass (`gbuffer.vert`/`.frag`: view-space normal + real depth
+  texture), reconstructing view-space position from that depth + the inverse
+  projection matrix rather than a second position render target.
+- `ssao.frag`: a 32-sample tangent-space hemisphere kernel (biased toward the
+  origin), rotated per-pixel by a tiled 4x4 noise texture
+  (`engine::SSAOKernel`, fixed-seed for reproducible headless screenshots),
+  with a range check to avoid halos from unrelated distant geometry.
+- `ssao_blur.frag`: a small box blur (radius = noise tile size / 2) removes
+  the kernel pass's per-pixel noise.
+- All three SSAO targets run at half the window's resolution
+  (`kSSAODownsampleFactor`) -- a pure performance tradeoff for this project's
+  software-rasterizer headless verification target, upsampled back via
+  ordinary `GL_LINEAR` filtering with no visible quality loss.
+- Applied to both `basic.frag` and `pbr.frag` (not left PBR-only): SSAO is a
+  purely screen-space effect independent of which BRDF produced a pixel's
+  color.
+- `ENGINE_SSAO_DISABLE` forces the ambient SSAO factor to 1.0 (verified
+  pixel-identical to the pre-Phase-13f render); `ENGINE_SSAO_DEBUG` shows the
+  raw pre-blur occlusion buffer directly for isolated inspection.
+
+Verified: clean rebuild is warning-free under `-Wall -Wextra`; a headless run
+shows subtle, localized darkening at sphere/box/ground contact points with no
+halos or banding, zero difference in open floor areas, and a pixel-perfect
+match to the pre-SSAO render with `ENGINE_SSAO_DISABLE=1`.
+
+### Phase 13g: Screen-Space Reflections (SSR)
+
+Phase 13g refines `pbr.frag`'s IBL-only specular term (Phase 10's
+prefiltered-environment-cubemap reflection) with a real screen-space
+ray-marched reflection of the actual nearby scene, for the PBR sphere grid's
+smoothest/most metallic spheres -- IBL alone can only ever reflect the
+distant skybox/HDRI, never another nearby object or the ground plane, which
+SSR now can.
+
+- Reuses SSAO's existing geometry pre-pass (`ssaoGBuffer_`'s view-space
+  normal + real depth texture) as the ray march's "what does the scene
+  actually look like" input, rather than building a second, redundant
+  G-buffer.
+- Solves the classic "can't read the color buffer you're still writing"
+  ordering problem with a second, short compositing pass
+  (`Application::renderSSRComposite()`): the ordinary per-frame draw of the
+  whole scene runs unchanged (`uSSREnabled` off, exactly Phase 10's IBL-only
+  behavior), then -- once the resolved opaque scene color
+  (`hdrResolveFramebuffer_`) is available -- the PBR sphere grid alone is
+  redrawn a second time (`GL_LEQUAL` depth test against the same first-pass
+  depth values) with the ray march enabled, blending a real local reflection
+  into the specular term where one is found.
+- Fixed 28-step linear view-space march + a 4-step binary-search refinement
+  (tuned down from the technique's usual 48-64-step reference range -- this
+  project's software-rasterizer headless verification target makes every
+  dependent-texture-fetch loop iteration costly, the same reasoning
+  `kSSAOKernelSize`'s own comment already applies at 32 samples). Fades the
+  SSR contribution back to the existing IBL term at screen edges, grazing
+  view angles, and high roughness.
+- `ENGINE_SSR_DISABLE` forces the ordinary IBL-only path unconditionally, for
+  isolating SSR's own contribution in headless before/after verification,
+  same pattern as `ENGINE_SSAO_DISABLE`.
+
+- **Bug found post-verification: reflections of the checkerboard floor
+  aliased into a mottled/checkered dark patch, not a self-intersection.**
+  A headless screenshot's top-right sphere showed a noisy, blotchy dark patch
+  between its specular highlight and terminator that didn't belong -- gone
+  entirely with `ENGINE_SSR_DISABLE=1`, so clearly SSR's own doing. The
+  initial suspicion was the classic SSR self-intersection artifact (the ray
+  re-striking its own sphere), and a targeted fix for that (excluding hits
+  within the source sphere's own radius of its center) was built and
+  measured -- but it changed nothing visible at any reasonable exclusion
+  radius, which was the tell that the real cause was elsewhere. A debug build
+  that visualized `traceSSR()`'s raw hit UV directly showed a smoothly-varying,
+  perfectly legitimate hit location in the mottled region; decoding those UVs
+  back to screen pixels landed squarely on the reflected floor's own
+  alternating blue/tan checker squares. The actual mechanism: reflection off
+  a convex mirror doubles angular sensitivity relative to the surface itself,
+  so near this sphere's grazing/silhouette angles, `hitUV` shifts by many
+  screen pixels between adjacent fragments even though the surface normal
+  barely changes. Sampling a single mip-0 texel per fragment against that
+  rapidly-shifting UV (the bug's original form) undersampled the floor's
+  sharp, high-frequency squares -- neighboring fragments landing on
+  differently-colored squares reads as noisy/checkered, not a clean
+  gradient -- the textbook reflection-aliasing failure mode, distinct from
+  (and easily mistaken for) self-intersection. (Also independently confirmed
+  self-intersection is geometrically impossible here in the first place: a
+  sphere is strictly convex, so `reflect()`'s own construction guarantees the
+  marched ray immediately enters the *outward* half-space of whatever point
+  it leaves, and a convex surface's own supporting-hyperplane property means
+  it can never re-enter that same half-space again.) Fixed the same way
+  ordinary texture minification is fixed: `hdrResolveFramebuffer_` now
+  carries a real mip chain (`Framebuffer`'s new `mipmappedColor` constructor
+  flag + `generateColorMipmaps()`, called once every frame right after this
+  buffer is resolved, before SSR reads it), and `pbr.frag` samples it with
+  `textureGrad(uSSRColorBuffer, hitUV, dFdx(hitUV), dFdy(hitUV))` instead of a
+  plain `texture()` call -- letting GL average over the actual texel
+  footprint each fragment's reflection spans instead of a single point
+  sample. Verified: the mottled patch is gone (replaced by a clean, smoothly
+  darkening gradient) while the checkerboard reflection on the grid's other,
+  less grazing spheres stays exactly as sharp as before (mip 0 is still what
+  a near-zero derivative selects); `ENGINE_SSR_DISABLE=1` renders within
+  single-digit-of-255 rounding noise of the pre-fix disabled render (RMSE
+  ~2.4/255, well below visibility) -- mipmapping this buffer doesn't perturb
+  the non-SSR path it's also read from. Clean rebuild is warning-free under
+  `-Wall -Wextra`, and a Debug build's `GL_CHECK` drains zero GL errors across
+  a full headless run.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

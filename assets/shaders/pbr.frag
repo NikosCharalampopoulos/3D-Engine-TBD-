@@ -126,6 +126,13 @@ uniform int uSSAOEnabled;
 // same view space the ray march (and SSAO's own depth reconstruction)
 // already operates in, and to re-project each marched step back to screen
 // space to sample uSSRDepthMap/uSSRColorBuffer.
+//
+// Phase 13g bug fix: uSSRColorBuffer's own texture now carries a full mip
+// chain (hdrResolveFramebuffer_ built with mipmappedColor = true, refreshed
+// every frame via Framebuffer::generateColorMipmaps() -- see application.cpp)
+// rather than a single level, sampled below with textureGrad rather than a
+// plain texture() call -- see that call site's own comment for the reflection-
+// aliasing bug this fixes.
 uniform mat4 uView;
 uniform mat4 uProjection;
 uniform sampler2D uSSRColorBuffer;
@@ -718,7 +725,46 @@ void main() {
 
                 float ssrFade = clamp(screenEdgeFade * grazingFade * roughnessFade, 0.0, 1.0);
 
-                vec3 ssrColor = texture(uSSRColorBuffer, hitUV).rgb;
+                // Phase 13g bug fix: textureGrad (not a plain texture()
+                // call) against uSSRColorBuffer's own mip chain (see
+                // Application's hdrResolveFramebuffer_ construction/
+                // generateColorMipmaps() calls), fed this fragment's actual
+                // dFdx/dFdy of hitUV rather than letting GL derive an
+                // implicit LOD from screen-space derivatives of the input
+                // texture coordinate the ordinary way. hitUV isn't an
+                // ordinary interpolated texture coordinate -- it's the
+                // *output* of a per-fragment ray march reflecting off this
+                // curved sphere, and reflection off a convex mirror doubles
+                // angular sensitivity relative to the surface itself (the
+                // textbook "curved mirror" reflection-vector derivative),
+                // so hitUV can shift by many screen pixels between two
+                // adjacent fragments even where the surface normal barely
+                // changes -- worst right at grazing/silhouette angles,
+                // exactly grazingFade's own admitted range. Sampling a
+                // single mip-0 texel per fragment there (this bug's original
+                // form) undersamples the reflected checkerboard ground
+                // plane's own sharp, high-frequency squares -- adjacent
+                // fragments land on wildly different, sometimes differently-
+                // colored squares -- which reads as a mottled/checkered
+                // noisy patch rather than a clean reflected gradient, not
+                // any kind of self-intersection (verified: a sphere is
+                // strictly convex, so reflect()'s own construction
+                // guarantees the marched ray immediately enters the
+                // *outward* half-space of every point it leaves and can
+                // never geometrically reintersect that same convex surface;
+                // a debug build that visualized raw hitUV directly showed a
+                // smoothly-varying hit location here, and decoding it back
+                // to screen pixels landed squarely on the reflected floor's
+                // alternating blue/tan squares, not on this sphere or its
+                // neighbor). textureGrad's explicit derivatives let it
+                // average over exactly the texel footprint this fragment's
+                // reflection actually spans, the same fix ordinary texture
+                // minification gets from mipmapping automatically -- this
+                // buffer just needed the same treatment applied manually,
+                // since its lookup coordinate is computed, not interpolated.
+                vec2 hitUVDx = dFdx(hitUV);
+                vec2 hitUVDy = dFdy(hitUV);
+                vec3 ssrColor = textureGrad(uSSRColorBuffer, hitUV, hitUVDx, hitUVDy).rgb;
                 // Weighted by the same split-sum specular term specularIBL
                 // itself uses (F0 * envBRDF.x + envBRDF.y) -- SSR only
                 // replaces *where the reflected radiance comes from* (the
