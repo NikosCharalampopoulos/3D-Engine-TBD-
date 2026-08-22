@@ -1727,6 +1727,48 @@ SSR now can.
   regardless of how tight this gate is). Clean rebuild is warning-free under
   `-Wall -Wextra`.
 
+- **Bug found in independent re-review (#3): the #2 fix above broke almost
+  every legitimate SSR reflection in the scene, not just the false one it
+  targeted.** Re-deriving `traceSSR()`'s math by hand (rather than trusting
+  the #2 fix's own verification prose) showed `kSSRThickness` gates
+  `sceneViewZ - currPos.z` -- the gap between the ray and the recorded
+  surface *at whichever coarse step first lands behind it* -- and that gap
+  has nothing to do with how "thick" the true surface is; it's simply how
+  far past the true crossing that one ~0.107-unit step happened to overshoot,
+  which for any ray traveling mostly along view-space Z (i.e. most
+  reflections that aren't near-grazing) is routinely several times #2's own
+  ~0.0107-unit margin, even against a perfectly ordinary, flat, correctly-
+  sampled surface. Confirmed empirically with a debug build that colored
+  every `traceSSR()` call site green (hit) or magenta (no hit): every sphere
+  smooth enough for `roughnessFade`/`grazingFade` to even attempt a march
+  came back almost solid magenta, reflecting only a thin ring right at the
+  silhouette rather than the sharp checkerboard/sphere reflections a working
+  SSR pass should show across most of each sphere's face. This also explains
+  why #2's own `ENGINE_SSR_DISABLE=1` diff looked clean: at 0.1 steps'
+  worth, SSR was already contributing almost nothing anywhere on the grid
+  except that same thin silhouette ring, so a "no visible loss elsewhere"
+  full-frame diff was never a meaningful check -- there was barely anything
+  left to lose. The fix: keep the exact same `kSSRThickness` constant, but
+  gate it against the *refined* (post-bisection) gap instead of the coarse
+  one -- `kSSRRefineSteps`'s binary search already narrows the bracket
+  toward wherever the crossing actually flips, and for an ordinary,
+  consistently-sampled surface that drives the residual gap toward zero
+  regardless of how much the initial coarse step overshot, so a tight margin
+  now correctly accepts it. The #2 false-hit case remains correctly rejected:
+  it comes from `uSSRDepthMap` disagreeing with the true surface over a
+  discrete, roughly constant-within-one-low-res-texel span, so bisecting
+  within that span keeps re-reading essentially the same wrong recorded
+  depth while the ray position barely moves -- the residual gap does not
+  collapse toward zero the way a real surface's does, and the tight
+  post-refinement margin still rejects it. Verified with the same green/
+  magenta hit-map (now predominantly green, matching a working SSR pass
+  across the ground plane and every smooth sphere) and by re-running #2's
+  own before/after luminance comparison on its previously-broken sphere
+  (unchanged, confirming that fix still holds). `ENGINE_SSR_DISABLE=1`
+  headless runs are unaffected (the disabled path never calls `traceSSR()`
+  at all), and a Debug build's `GL_CHECK` drains zero GL errors across a
+  full headless run with the fix in place.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

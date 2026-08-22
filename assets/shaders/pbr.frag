@@ -479,18 +479,56 @@ vec3 shadeDirectLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float 
 // "false hit at a silhouette edge" guard) and measured to have *zero*
 // effect here -- confirming this isn't an edge/discontinuity at all, just
 // an otherwise-smooth surface sampled at a slightly wrong position, which a
-// discontinuity check can't see. Tightening kSSRThickness directly is what
-// actually closes the gap: verified across a sweep (2.0/1.0/0.5/0.2/0.15/
-// 0.1/0.05 steps' worth) that the patch's own region converges to within
-// single-digit-of-255 luminance of the ENGINE_SSR_DISABLE=1 render at 0.1
-// and does not measurably improve further below that, while a full-frame
-// diff against the pre-this-fix render at 0.1 shows no visible loss of the
-// legitimate checkerboard reflections elsewhere on the grid (kSSRRefineSteps'
-// binary search, run immediately after any coarse accept, is what actually
-// pins a legitimate hit down to sub-step precision -- this gate's only
-// remaining job is rejecting an implausible crossing outright, which a
-// flat, correctly-sampled surface satisfies trivially regardless of how
-// tight the margin is).
+// discontinuity check can't see. Tightening kSSRThickness directly closes
+// the gap for *this* one sphere/angle -- but see this constant's own bug
+// review #3 comment below for why applying that tight a margin at the
+// *coarse* march step, as this fix originally did, was itself a new bug.
+//
+// Phase 13g bug review #3: kSSRThickness=0.1 steps' worth (~0.0107 units),
+// gating the COARSE march step the way bug review #2 left it, rejects
+// nearly every legitimate hit in the entire scene, not just the false ones
+// that fix targeted -- confirmed with a debug build that colored every
+// traceSSR() call site green/magenta by found/!found (see this file's other
+// Phase 13g comments for the technique): every sphere smooth enough for
+// roughnessFade/grazingFade to even attempt a march came back almost solid
+// magenta, correctly reflecting only a thin ring right at the silhouette
+// (see main()'s own grazingFade) rather than the sharp checkerboard/sphere
+// reflections a working SSR pass should show across most of each sphere's
+// face. The reason: kSSRThickness is a gate on `sceneViewZ - currPos.z`,
+// the gap between the ray and the recorded surface *at the coarse step that
+// first lands behind it* -- and that gap is NOT bounded by anything related
+// to how "thick" the true surface is; it is simply "how far past the true
+// crossing did this one ~0.107-unit step happen to overshoot", which for a
+// ray traveling mostly along view-space Z (the common case for any
+// reflection that isn't near-grazing) is uniformly distributed between 0
+// and nearly a full step's own Z-extent -- routinely several times
+// kSSRThickness's ~0.0107-unit margin. Bug review #2's own sweep (verifying
+// down to 0.1 "does not measurably improve further" and "shows no visible
+// loss of the legitimate checkerboard reflections elsewhere on the grid")
+// evidently never actually rendered anything past the one previously-broken
+// sphere/angle it was chasing -- a full ENGINE_SSR_DISABLE=1 diff (this
+// review's own first check) shows differences only in a thin ring at every
+// sphere's silhouette, exactly where grazingFade below still lets a sliver
+// of SSR through; the debug hit-map above shows why: everywhere else,
+// traceSSR() was simply returning false. The fix: gate the SAME
+// kSSRThickness constant against the REFINED (post-bisection) gap instead
+// of the coarse one -- kSSRRefineSteps' own binary search already narrows
+// the bracket toward wherever `currPos.z <= sceneViewZ` first flips, and for
+// an ordinary, consistently-sampled surface that drives the residual gap
+// toward zero regardless of how much the initial coarse step overshot (the
+// bisection is homing in on the true crossing, not the coarse sample), so a
+// tight margin now correctly accepts it. The original false-hit case this
+// constant exists for is different in kind, not just degree: it comes from
+// uSSRDepthMap disagreeing with the true continuous surface over a
+// *discrete, roughly constant-within-one-low-res-texel* span (see bug
+// review #2's own diagnosis) -- bisecting within that span keeps re-reading
+// essentially the same wrong recorded depth while `mid.z` barely moves, so
+// the residual gap does NOT collapse toward zero the way a real surface's
+// does, and the tight post-refinement margin still rejects it. Re-verified
+// with the same debug hit-map (now predominantly green, matching a working
+// SSR pass) and the same before/after luminance comparison bug review #2
+// used on its own previously-broken sphere (unchanged, confirming that fix
+// itself still holds).
 const int kSSRMaxSteps = 28;
 const float kSSRMaxDistance = 3.0;
 const int kSSRRefineSteps = 4;
@@ -522,7 +560,14 @@ bool traceSSR(vec3 viewPos, vec3 viewReflectDir, out vec2 hitUV) {
     vec3 rayStep = viewReflectDir * (kSSRMaxDistance / float(kSSRMaxSteps));
     vec3 prevPos = viewPos;
     vec3 currPos = viewPos;
-    bool found = false;
+    bool crossed = false;
+    // Phase 13g bug review #3: crossingUV/crossingSceneViewZ record the
+    // coarse march's own crossing sample (screen UV + the recorded surface's
+    // view-space Z there) without judging it yet -- kSSRThickness is no
+    // longer applied at this coarse resolution at all, see that constant's
+    // own bug review #3 comment for why.
+    vec2 crossingUV = vec2(0.0);
+    float crossingSceneViewZ = 0.0;
 
     for (int i = 1; i <= kSSRMaxSteps; ++i) {
         prevPos = currPos;
@@ -551,25 +596,30 @@ bool traceSSR(vec3 viewPos, vec3 viewReflectDir, out vec2 hitUV) {
         // negative with distance (this engine's usual convention, see
         // pbr.vert's vViewSpaceDepth comment) -- the ray has intersected
         // real geometry once it goes behind (a more-negative Z than) the
-        // actual surface stored there.
-        if (currPos.z <= sceneViewZ) {
-            if (sceneViewZ - currPos.z < kSSRThickness) {
-                hitUV = uv;
-                found = true;
-            }
-            break;
-        }
+        // actual surface stored there. Just record the crossing and stop
+        // marching -- see kSSRThickness's bug review #3 comment for why
+        // accepting/rejecting it happens later, after refinement, not here.
+        crossed = true;
+        crossingUV = uv;
+        crossingSceneViewZ = sceneViewZ;
+        break;
     }
 
-    if (!found) {
+    if (!crossed) {
         return false;
     }
 
     // Binary-search refinement between prevPos (the last step still in
     // front of the surface) and currPos (the first step behind it) -- see
-    // kSSRRefineSteps' own comment above for why.
+    // kSSRRefineSteps' own comment above for why. hi/hiUV/hiSceneViewZ track
+    // the closest-known "still behind the surface" sample as the bracket
+    // narrows -- seeded from the coarse crossing itself (crossingUV/
+    // crossingSceneViewZ above), since currPos/crossingSceneViewZ already
+    // *is* that sample before the first halving ever runs.
     vec3 lo = prevPos;
     vec3 hi = currPos;
+    vec2 hiUV = crossingUV;
+    float hiSceneViewZ = crossingSceneViewZ;
     for (int i = 0; i < kSSRRefineSteps; ++i) {
         vec3 mid = 0.5 * (lo + hi);
         vec4 clip = uProjection * vec4(mid, 1.0);
@@ -581,11 +631,24 @@ bool traceSSR(vec3 viewPos, vec3 viewReflectDir, out vec2 hitUV) {
         float sceneViewZ = sceneDepth >= 1.0 ? -1.0e6 : ssrReconstructViewPos(uv, sceneDepth).z;
         if (mid.z <= sceneViewZ) {
             hi = mid;
+            hiUV = uv;
+            hiSceneViewZ = sceneViewZ;
         } else {
             lo = mid;
         }
-        hitUV = uv;
     }
+
+    // Phase 13g bug review #3: kSSRThickness applied HERE, against the
+    // refined/converged gap, rather than at the coarse march step above --
+    // see that constant's own bug review #3 comment for the full story on
+    // why gating the coarse step broke almost every legitimate hit in the
+    // scene, and why this refined gap is the one that actually distinguishes
+    // a real surface (converges toward 0) from the false-hit case this
+    // constant was originally introduced for (does not).
+    if (hiSceneViewZ - hi.z >= kSSRThickness) {
+        return false;
+    }
+    hitUV = hiUV;
     return true;
 }
 
