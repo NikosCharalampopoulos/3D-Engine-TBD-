@@ -16,10 +16,17 @@ void glfwErrorCallback(int error, const char* description) {
     LOG_ERROR(std::string("GLFW error ") + std::to_string(error) + ": " + description);
 }
 
-// Requested multisample sample count -- 4x is the common "looks noticeably
-// smoother, still cheap" default most engines pick; not exposed as a knob
-// anywhere yet since nothing in this phase needs to vary it.
-constexpr int kRequestedMsaaSamples = 4;
+// Requested multisample sample count. Bumped from 4x to 8x at the project
+// owner's request for smoother edges. Still just a hint (see the class
+// comment and the GL_SAMPLES verification below) -- this environment's own
+// EGL config probe (see the EGL-context-creation note below) previously
+// found configs with up to 4 samples on this specific Mesa/llvmpipe stack,
+// so an 8x request here may still only be granted at 4x (or fall back to 0)
+// on this particular software renderer; a real GPU (e.g. the project
+// owner's own machine) is expected to grant 8x without issue. The actual
+// granted value is always logged from the real GL_SAMPLES query, not
+// assumed from this request.
+constexpr int kRequestedMsaaSamples = 8;
 
 // Escape hatch for the Linux EGL-context-creation hint below. It's on by
 // default because it's verified necessary on this project's headless
