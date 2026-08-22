@@ -6,26 +6,31 @@ Phase 12 -- see that section below), multi-light (directional
 + point + spot) Blinn-Phong lighting with tangent-space normal mapping and
 directional shadow mapping, Assimp-based multi-object scene loading with a
 real node hierarchy, MSAA anti-aliasing, a thin entity/resource-cache
-layer, a procedural-sky cubemap background, an HDR + Reinhard-tonemapped
-post-process pipeline, (Phase 9) a real metallic/roughness Cook-Torrance
-PBR material/shader alongside the original Blinn-Phong path, proven out on a
-sphere reference grid, (Phase 10) real-time image-based lighting -- a
-diffuse irradiance cubemap, a GGX-prefiltered mipmapped specular cubemap, and
-a split-sum BRDF LUT, all convolved once at startup from the existing skybox
--- replacing that PBR path's flat placeholder ambient term with a real,
-direction- and roughness-aware one --, (Phase 11) textured PBR materials plus
-tonemap-aware bloom, (Phase 12) a GL 4.3 core foundation bump laying the
-groundwork for compute-shader clustered lighting, (Phase 13d) GPU
-compute-shader clustered forward light culling -- replacing the old
-brute-force per-fragment light loop with a 3D grid of view-frustum
-"clusters", each with its own GPU-built list of which lights actually
-reach it --, and (Phase 13e) a real HDRI (equirectangular Radiance .hdr)
-environment map -- generated procedurally offline, GPU-converted into a
-floating-point cubemap, and fed into both the sky background and the
-existing IBL pipeline in place of the old flat procedural skybox (which
-stays available as a fallback/reference) -- built up from bare-metal
-OpenGL, and verified at every step by a headless Xvfb+Mesa run/screenshot
-harness (no GPU or display required).
+layer, an HDR + Reinhard-tonemapped post-process pipeline, (Phase 9) a real
+metallic/roughness Cook-Torrance PBR material/shader alongside the original
+Blinn-Phong path, proven out on a sphere reference grid, (Phase 10)
+real-time image-based lighting -- a diffuse irradiance cubemap, a
+GGX-prefiltered mipmapped specular cubemap, and a split-sum BRDF LUT, all
+convolved once at startup from the skybox -- replacing that PBR path's flat
+placeholder ambient term with a real, direction- and roughness-aware one --,
+(Phase 11) textured PBR materials plus tonemap-aware bloom, (Phase 12) a
+GL 4.3 core foundation bump laying the groundwork for compute-shader
+clustered lighting, (Phase 13a) anisotropic texture filtering, (Phase 13b)
+frustum culling -- skipping draw calls for geometry entirely outside the
+camera's view --, (Phase 13c) Cascaded Shadow Maps, giving shadow resolution
+near the camera without a bigger shadow map, (Phase 13d) GPU compute-shader
+clustered forward light culling -- replacing the old brute-force
+per-fragment light loop with a 3D grid of view-frustum "clusters", each with
+its own GPU-built list of which lights actually reach it --, (Phase 13e) a
+real HDRI (equirectangular Radiance .hdr) environment map -- generated
+procedurally offline, GPU-converted into a floating-point cubemap, and fed
+into both the sky background and the existing IBL pipeline in place of the
+old flat procedural skybox (which stays available as a fallback/reference)
+--, (Phase 13f) Screen-Space Ambient Occlusion, and (Phase 13g) Screen-Space
+Reflections -- refining the PBR sphere grid's IBL-only specular term with a
+real ray-marched reflection of the actual nearby scene -- built up from
+bare-metal OpenGL, and verified at every step by a headless Xvfb+Mesa
+run/screenshot harness (no GPU or display required).
 See "Architecture
 overview" right below for what the finished whole looks like today, or
 "Development history" further down for how it got built, phase by phase
@@ -52,16 +57,20 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   ESC-to-quit check) reads `Window` key/cursor state directly any more.
 - **`Application`** (`application.hpp`/`.cpp`) -- owns the `Window`, a
   `ResourceManager`, the scene's shared `Shader` (plus a depth-only
-  `shadowShader_`, a `skyboxShader_`, and a `postProcessShader_`), a
-  `ShadowMap`, an off-screen HDR `Framebuffer`, a `Skybox`, a hand-built
-  normal-mapped ground plane (`groundMesh_`/`groundMaterial_`), a fullscreen
-  `postProcessQuad_`, a `std::vector<Entity>`, and a `Camera`; runs the main
-  loop (poll input -> update camera -> render -> swap) until the window
-  closes, ESC is pressed, or `ENGINE_MAX_FRAMES` is reached (headless
-  verification only -- see below). `render()` now does three GL passes per
-  frame: a depth-only shadow pass (`renderShadowPass()`), the normal lit
-  color pass (scene + skybox, into the HDR framebuffer), and a fullscreen
-  tonemap/gamma resolve pass to the window (see "Phase 7b" below).
+  `shadowShader_`, a `skyboxShader_`, a `postProcessShader_`, and every other
+  per-phase program below), `kCascadeCount` (3) `ShadowMap` cascades, a
+  multisampled off-screen HDR `Framebuffer` plus several single-sample ones
+  (resolve/bloom/SSAO targets, see below), a `Skybox`, a `ClusterLightCuller`,
+  an `Ssao` pass, a hand-built normal-mapped ground plane
+  (`groundMesh_`/`groundMaterial_`), the PBR sphere test-grid
+  (`sphereMesh_`/`sphereInstances_`), a fullscreen `postProcessQuad_`, a
+  `std::vector<Entity>`, and a `Camera`; runs the main loop (poll input ->
+  update camera -> render -> swap) until the window closes, ESC is pressed,
+  or `ENGINE_MAX_FRAMES` is reached (headless verification only -- see
+  below). `render()` has grown a step for essentially every phase below --
+  see "One frame, in short" right after this list for its current, full
+  per-frame shape, and each phase's own section further down for why each
+  step exists.
 - **`Camera`** + **`Transform`** (`camera.hpp`/`.cpp`, `transform.hpp`) -- a
   yaw/pitch free-fly camera driven by `InputState` (or a small scripted
   waypoint path under `ENGINE_CAMERA_DEMO`, for headless verification where
@@ -69,32 +78,50 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   bundle used for every object's model matrix.
 - **`Shader`** / **`Mesh`** / **`Texture`** / **`Material`** -- the
   rendering primitives: a linked GL program; an interleaved
-  position/normal/texCoord/tangent VAO+VBO+EBO; a 2D GL texture loaded via
-  stb_image; and a `Shader` + diffuse `Texture` + optional normal-map
-  `Texture` + tint/shininess bundle bound once per draw call.
-  `assets/shaders/basic.vert`/`basic.frag` implement Blinn-Phong lighting
-  for one directional light + a fixed-size array of point/spot lights (see
-  "Phase 7a" below), tangent-space normal mapping, and directional shadow
-  mapping, all with a properly computed (transpose-inverse) normal matrix.
+  position/normal/texCoord/tangent VAO+VBO+EBO (plus its own local-space
+  `BoundingSphere`, computed once at construction -- see "Phase 13b" below);
+  a 2D GL texture loaded via stb_image, with anisotropic filtering applied
+  uniformly when supported (see "Phase 13a" below); and a `Shader` + diffuse
+  `Texture` + optional normal-map `Texture` + tint/shininess bundle bound
+  once per draw call. `assets/shaders/basic.vert`/`basic.frag` implement
+  Blinn-Phong lighting for one directional light + a fixed-size array of
+  point/spot lights (see "Phase 7a" below, and "Phase 13d" for how each
+  fragment now only loops over its own cluster's culled subset of them),
+  tangent-space normal mapping, Cascaded Shadow Map sampling (see "Phase 13c"
+  below), and a screen-space ambient occlusion factor (see "Phase 13f"
+  below), all with a properly computed (transpose-inverse) normal matrix.
 - **`PBRMaterial`** (`pbr_material.hpp`, header-only) -- a second,
   independent material type (see "Phase 9" below) alongside `Material`
-  above: an albedo tint, metallic, roughness, and ambient-occlusion scalar,
-  bound to `assets/shaders/pbr.vert`/`pbr.frag`'s metallic/roughness
-  Cook-Torrance BRDF instead of `basic.frag`'s Blinn-Phong. `Material`/
-  `basic.vert`/`basic.frag` are unchanged and still drive the rest of the
-  scene (the table/box/pyramid/ground) -- Phase 9 adds a second lighting
-  model rather than replacing the first.
+  above: an albedo tint, metallic, roughness, and ambient-occlusion scalar
+  (plus, since Phase 11, an optional packed albedo/ORM texture pair -- see
+  that section below), bound to `assets/shaders/pbr.vert`/`pbr.frag`'s
+  metallic/roughness Cook-Torrance BRDF instead of `basic.frag`'s
+  Blinn-Phong. `Material`/`basic.vert`/`basic.frag` are unchanged and still
+  drive the rest of the scene (the table/box/pyramid/ground) -- Phase 9 adds
+  a second lighting model rather than replacing the first.
 - **`ShadowMap`** (`shadow_map.hpp`/`.cpp`) -- an RAII depth-only FBO +
   texture used to render the scene from the directional light's point of
-  view once per frame; the main pass samples it to shadow that one light's
-  own contribution per fragment.
+  view. Since Phase 13c (see below), `Application` owns `kCascadeCount` (3)
+  independent instances of this class -- Cascaded Shadow Maps -- rather than
+  one covering the whole scene, each rendered from the same directional
+  light but fitted to a different depth slice of the camera's own view
+  frustum; the main pass picks which cascade a given fragment falls into and
+  samples that cascade's own depth texture to shadow the light's
+  contribution.
 - **`Framebuffer`** (`framebuffer.hpp`/`.cpp`) -- an RAII "render target":
-  an FBO with a floating-point (`GL_RGBA16F`) color attachment plus a depth
-  renderbuffer. `Application` renders the whole lit scene (+ skybox) into
-  one of these (`hdrFramebuffer_`) instead of straight to the window, so a
-  light's real intensity can exceed 1.0 without hard-clipping (see "Phase
-  7b" below) -- a small reusable pattern a future bloom pass could extend,
-  though bloom itself isn't built here.
+  an FBO with a floating-point (`GL_RGBA16F`) color attachment (optionally
+  multisampled, a real mip chain, or a real *sampled* depth texture instead
+  of a write-only depth renderbuffer -- see this class's own Phase 13c/13g
+  and Phase 13f comments) plus a depth buffer. `Application` renders the
+  whole lit scene (+ skybox) into a multisampled one of these
+  (`hdrFramebuffer_`) instead of straight to the window, so a light's real
+  intensity can exceed 1.0 without hard-clipping (see "Phase 7b" below), then
+  resolves it into a single-sample `hdrResolveFramebuffer_` every frame.
+  Several more instances of this same class hold Phase 11's bloom
+  bright-pass/ping-pong-blur targets and Phase 13f's SSAO geometry/occlusion
+  targets -- a bloom pass and much more besides turned out to reuse exactly
+  this one small abstraction, not just the "future pass" this bullet used to
+  gesture at speculatively.
 - **`Skybox`** (`skybox.hpp`/`.cpp`) -- a `GL_TEXTURE_CUBE_MAP` rendered as
   the scene's background via its own program
   (`assets/shaders/skybox.vert`/`.frag`), drawn last each frame with a
@@ -113,6 +140,11 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   three dedicated one-time shader passes. `pbr.frag` samples all three every
   frame to drive its ambient term -- replacing Phase 9's flat placeholder
   ambient with real, direction- and roughness-aware image-based lighting.
+  Since Phase 13g (see below), `pbr.frag`'s `traceSSR()` refines that same
+  specular term further for the PBR sphere grid: a real screen-space
+  ray-marched reflection of the actual nearby scene where one is found,
+  fading back to this IBL-only term at screen edges, grazing angles, and
+  high roughness.
 - **`Model`** (`model.hpp`/`.cpp`) -- loads a whole scene via Assimp
   (`assets/models/scene.obj`: a table, a box on the table, and a separate
   pyramid) into a tree of `ModelNode`s, each with its own local transform,
@@ -137,25 +169,64 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   point/spot light against those AABBs every frame, so `basic.frag`/
   `pbr.frag` can loop over just the handful of lights that actually reach
   a given fragment's cluster instead of every light in the scene.
+- **`Frustum`** (`frustum.hpp`, header-only, see "Phase 13b" below) -- the
+  camera's 6 view-frustum planes, extracted once per frame from the combined
+  view-projection matrix (the standard Gribb/Hartmann method), tested
+  against each drawable's own world-space `BoundingSphere` (see `Mesh`
+  above) so `render()` can skip the draw call entirely for anything
+  provably outside the camera's view.
+- **`Ssao`** (`ssao.hpp`/`.cpp`, see "Phase 13f" below) -- Screen-Space
+  Ambient Occlusion: a small lightweight geometry pre-pass (view-space
+  normal + a real, sampled depth texture) feeds a 32-sample hemisphere-kernel
+  occlusion pass and a small box blur, producing a per-pixel occlusion
+  factor `basic.frag`/`pbr.frag` multiply into their ambient term alongside
+  their existing material-authored AO. Its geometry pre-pass's depth texture
+  is also what Phase 13g's SSR ray march tests against, rather than building
+  a second, redundant one.
 
-One frame, in short: `Application::run()` polls GLFW events and an
-`InputState`, feeds it to `camera_`, then `render()` (1) re-culls every
-light against `clusterLightCuller_`'s per-cluster AABBs for this frame's
-camera view (a compute-shader dispatch + memory barrier -- see "Phase 13d"
-below), (2) renders the whole scene depth-only into `shadowMap_` from the
-directional light's point of view, (3) restores the window's real viewport
-and binds `hdrFramebuffer_`, uploads view/projection/light-space/lighting
-uniforms once, and iterates `entities_` calling
-`model->draw(shader, entity.transform.getModelMatrix())` (which recurses
-the model's node tree drawing each mesh with its own material) plus the
-hand-built ground plane, each fragment sampling `shadowMap_`, any bound
-normal map, and its own cluster's culled light list as it shades, (4) draws
-`skybox_` (by default the Phase 13e HDRI-derived cubemap; the Phase 7b
-procedural one under `ENGINE_USE_PROCEDURAL_SKYBOX=1`) last into that same
-HDR framebuffer as the background, and
-(5) resolves `hdrFramebuffer_`'s color buffer to the window with one
-fullscreen tonemap/gamma-correct pass (`postProcessShader_` +
-`postProcessQuad_`).
+One frame, in short (every step below runs unconditionally by default; the
+env vars named along the way turn individual ones off for isolated
+before/after comparison -- see each phase's own section for what each one
+does): `Application::run()` polls GLFW events and an `InputState`, feeds it
+to `camera_`, then `render()`:
+
+1. Builds this frame's `kCascadeCount` (3) cascades from the camera's
+   current pose (`computeCascades()` -- see "Phase 13c"), then renders the
+   whole scene depth-only into each cascade's own `ShadowMap` from the
+   directional light's point of view (`renderShadowPass()`).
+2. Runs SSAO's three screen-space passes (geometry pre-pass, hemisphere-
+   kernel occlusion, box blur -- `renderSSAO()`, "Phase 13f"), producing a
+   blurred occlusion texture the color pass below samples.
+3. Binds `hdrFramebuffer_` (the multisampled off-screen HDR target) and
+   clears it, re-culls every point/spot light against
+   `clusterLightCuller_`'s per-cluster AABBs for this frame's camera view (a
+   compute-shader dispatch + memory barrier -- "Phase 13d"), and builds this
+   frame's view-frustum `Frustum` ("Phase 13b").
+4. Uploads view/projection/cascade/lighting/cluster/SSAO uniforms once, then
+   iterates `entities_` calling
+   `model->draw(shader, entity.transform.getModelMatrix(), frustum, cullStats)`
+   (which recurses the model's node tree, testing each mesh's world-space
+   bounding sphere against `frustum` and skipping the draw call if it's
+   provably out of view) plus the hand-built ground plane and every PBR
+   sphere instance (`pbrShader_`, "Phase 9"), each surviving fragment
+   sampling its own cascade's shadow map, any bound normal/ORM map ("Phase
+   11"), its own cluster's culled light list, the blurred SSAO texture, and
+   -- for the PBR spheres, when enabled -- `IBLProbe`'s convolved maps.
+5. Draws `skybox_` (by default the Phase 13e HDRI-derived cubemap; the
+   Phase 7b procedural one under `ENGINE_USE_PROCEDURAL_SKYBOX=1`) last into
+   that same HDR framebuffer as the background, then resolves it into
+   `hdrResolveFramebuffer_`.
+6. Unless `ENGINE_SSR_DISABLE` is set, redraws just the PBR sphere grid a
+   second time with SSR enabled (`renderSSRComposite()`, "Phase 13g"),
+   ray-marching against SSAO's own depth buffer and blending in a real
+   reflection of `hdrResolveFramebuffer_`'s already-shaded scene where one is
+   found, then re-resolves `hdrFramebuffer_` into `hdrResolveFramebuffer_` a
+   second time so the steps below see this pass's own result.
+7. Runs Phase 11's bloom pipeline against `hdrResolveFramebuffer_`: a
+   bright-pass extraction, then a ping-ponged separable blur.
+8. Resolves the final image to the window with one fullscreen tonemap/
+   gamma-correct/bloom-composite pass (`postProcessShader_` +
+   `postProcessQuad_`).
 
 ## Directory layout
 
@@ -163,25 +234,29 @@ fullscreen tonemap/gamma-correct pass (`postProcessShader_` +
 CMakeLists.txt        Root build: fetches deps (incl. Assimp), builds engine_app
 src/                   Engine .cpp sources (main.cpp, window.cpp, application.cpp,
                        shader.cpp, mesh.cpp, camera.cpp, texture.cpp, model.cpp,
-                       input.cpp, resource_manager.cpp, shadow_map.cpp,
+                       input.cpp, resource_manager.cpp, paths.cpp, shadow_map.cpp,
                        framebuffer.cpp, skybox.cpp, ibl_probe.cpp,
                        hdri_loader.cpp, compute_shader.cpp,
-                       cluster_light_culler.cpp)
+                       cluster_light_culler.cpp, ssao.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, entity, input,
-                       resource_manager, shadow_map, framebuffer, skybox,
+                       resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
-                       cluster_light_culler)
+                       cluster_light_culler, frustum, ssao)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
-                       cubemap_capture.vert, irradiance_convolution.frag,
-                       prefilter.frag, brdf_lut.frag, equirect_to_cubemap.frag,
-                       cluster_aabb.comp, cluster_cull.comp), textures
+                       bloom_extract.frag, blur.frag, cubemap_capture.vert,
+                       irradiance_convolution.frag, prefilter.frag,
+                       brdf_lut.frag, equirect_to_cubemap.frag,
+                       cluster_aabb.comp, cluster_cull.comp, gbuffer.vert/.frag,
+                       ssao.frag, ssao_blur.frag), textures
                        (checker.png, normal_bump.png, skybox/ -- 6 cubemap
-                       faces, hdri/sky.hdr -- Phase 13e's real HDRI), models
-                       (scene.obj + scene.mtl)
+                       faces (Phase 7b/10 procedural fallback), hdri/sky.hdr --
+                       Phase 13e's real HDRI, rusted_metal_albedo/orm.png +
+                       scuffed_plastic_albedo/orm.png -- Phase 11's textured
+                       PBR materials), models (scene.obj + scene.mtl)
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
 tests/                 Placeholder for later phases (empty CMakeLists)
 ```
@@ -994,20 +1069,38 @@ job.
   built as a `(latSegments+1) x (lonSegments+1)` vertex grid so every vertex
   (including the poles) gets its own well-defined texCoord.
 - **The sphere test-grid** (`Application`'s `sphereMesh_`/`sphereInstances_`)
-  -- a 4x4 grid (metallic 0->1 across columns, roughness 0.05->1.0 across
-  rows), one shared albedo (a saturated red-orange) so the metal/dielectric
-  Fresnel distinction is directly comparable across the grid. Built directly
-  in the camera's own image plane (its right/up basis vectors, derived from
-  `kDefaultCameraPosition`/`kSceneCenter`) rather than laid out along world
-  X/Z: an axis-aligned grid recedes away from the camera along a mostly
-  depth-facing direction at this engine's fixed camera angle, foreshortening
-  row spacing so hard that adjacent rows visibly overlapped on screen even
-  with generous world-space spacing -- confirmed by re-projecting sphere
-  centers through the same view/projection matrices `Application` builds. A
-  camera-facing grid instead faces the camera edge-on like a real reference
-  chart, every sphere equidistant from the camera, both axes evenly spaced
-  in screen space. Placed in front of the existing table/box/pyramid scene
-  (closer to the camera) so both the new PBR content and the existing
+  -- two single-axis rows of `kSphereRowLength` (4) spheres each, one shared
+  albedo (a saturated red-orange) so the metal/dielectric Fresnel distinction
+  is directly comparable across both rows: a metallic sweep (0 -> 1 left to
+  right at a fixed low roughness) and a roughness sweep (`kMinPBRRoughness`
+  -> `kMaxPBRRoughness` left to right at fixed metallic = 1). **Bug found and
+  fixed during this phase's own verification**: the original design packed both
+  axes into one 4x4 matrix (metallic across columns, roughness across rows)
+  instead -- varying two BRDF parameters across the same 16-sphere grid at
+  once made it hard to look at any one sphere and tell which axis a visible
+  difference from its neighbor was actually demonstrating, since every
+  sphere differed from its row-neighbor *and* its column-neighbor
+  simultaneously. Splitting it into two separate single-axis rows (one
+  fixed-roughness metallic sweep, one fixed-metallic roughness sweep) fixes
+  that: each row isolates exactly one BRDF parameter, with the other held
+  constant, matching the classic "PBR reference chart" layout this phase
+  models itself on. Built directly in the camera's own image plane (its
+  right/up basis vectors, derived from `kDefaultCameraPosition`/
+  `kSceneCenter`) rather than laid out along world X/Z: an axis-aligned grid
+  recedes away from the camera along a mostly depth-facing direction at this
+  engine's fixed camera angle, foreshortening spacing so hard that adjacent
+  spheres visibly crowded on screen even with generous world-space spacing
+  -- confirmed by re-projecting sphere centers through the same
+  view/projection matrices `Application` builds. A camera-facing layout
+  instead faces the camera edge-on like a real reference chart, every sphere
+  equidistant from the camera, evenly spaced in screen space: columns follow
+  the camera's own (always-horizontal) right vector, while the two rows
+  themselves are stacked along plain world Y rather than the camera's own
+  (pitched) up vector -- an earlier version of this same fix used the
+  camera's up vector for the row offset too, which silently sank the lower
+  row far enough to interpenetrate the ground plane, caught in this same
+  screenshot-driven review. Placed in front of the existing table/box/pyramid
+  scene (closer to the camera) so both the new PBR content and the existing
   Blinn-Phong-lit scene remain visible in the same frame. Both
   `renderShadowPass()` and `render()`'s PBR pass re-upload the same
   view/projection/light-space/light-array/shadow-map uniforms already
@@ -1162,6 +1255,71 @@ single hand-picked ambient constant.
   and the Blinn-Phong table/box/pyramid are all still visible/unchanged in
   the same screenshot.
 
+### Phase 11: textured PBR materials + tonemap-aware bloom
+
+Phase 11 adds two independent features on top of Phase 9/10's "full PBR"
+pipeline: real textured PBR materials (instead of every sphere using a flat
+scalar albedo/metallic/roughness), and an HDR-aware bloom post-process pass.
+
+- **Textured PBR materials** (`PBRMaterial`'s new `metallicRoughnessMap_`,
+  see `pbr_material.hpp`'s Phase 11 comment) -- a third optional texture, a
+  packed "ORM" map (R = ambient occlusion, G = roughness, B = metallic, the
+  common glTF-style packing convention: one texture fetch instead of three).
+  Two of the sphere grid's instances swap their flat scalar metallic/
+  roughness for an albedo + ORM texture pair instead (`kRustedMetalAlbedoPath`/
+  `kRustedMetalORMPath` and `kScuffedPlasticAlbedoPath`/`kScuffedPlasticORMPath`
+  in `application.cpp`, procedurally generated with ImageMagick -- organic
+  blob/noise masks blended between two flat colors, the same "procedural, not
+  sourced/painted" approach `checker.png`/`normal_bump.png`/the skybox faces
+  already used). `pbr.frag` samples the bound ORM map's G/B channels for
+  roughness/metallic instead of the scalar uniforms, and multiplies its R
+  channel by `uAO` (so the scalar AO knob still works as an overall
+  multiplier even with a map bound). Bound at `textureUnit + 2` -- see this
+  class's own header comment for why every scene-level texture unit
+  (shadow map, IBL maps) shifts up by one starting this phase to keep that
+  slot free.
+- **Bloom** -- after the existing lit-scene-+-skybox render into
+  `hdrFramebuffer_`, a bright-pass extraction (`bloomExtractShader_`/
+  `assets/shaders/bloom_extract.frag`, into `brightFramebuffer_`) keeps only
+  pixels whose Rec. 709 luminance exceeds `kBloomThreshold`, zeroing
+  everything else; a ping-ponged separable Gaussian blur
+  (`blurShader_`/`assets/shaders/blur.frag`, alternating horizontal/vertical
+  between `pingpongFramebuffer0_`/`pingpongFramebuffer1_`) softens that mask
+  into a glow; and the final postprocess pass (`postprocess.frag`)
+  additively blends the blurred result onto the HDR color buffer *before*
+  Reinhard tonemapping, so bloom is tonemapped exactly like everything else
+  rather than being a separate hacky overlay pasted on afterward. All three
+  new `Framebuffer`s are sized at half the window's resolution
+  (`kBloomDownsampleFactor`) -- a soft, low-frequency glow, so a half-res
+  blur costs a quarter the per-pixel work of a full-res one with no visible
+  loss of quality.
+  - `kBloomThreshold = 2.0`: a first-principles guess of `1.0` (the
+    brightness Reinhard tonemapping starts compressing hardest) turned out
+    too low in practice -- this scene's point lights are intense enough
+    (`kPointLights[0]`'s `{6.0, 2.1, 0.9}`, `kPointLights[2]`'s
+    `{5.5, 5.2, 4.7}`) that ordinary *diffuse* checker-floor texels near them,
+    not just tight specular highlights, already exceed a raw HDR luminance of
+    `1.0`, so a `1.0` mask included a sizable patch of ordinary floor around
+    the sphere grid, not just highlight dots; blurred and added back, that
+    read as the floor being washed out over a wide area rather than a soft
+    glow localized to each highlight (confirmed by diffing a bloom-off render
+    against this one: at `1.0` the floor between spheres brightened by
+    ~30/255 with zero bloom-strength contribution expected there; at `2.0`
+    that same patch is pixel-identical to the bloom-off render).
+  - `kBloomBlurPasses = 6` (3 full horizontal+vertical pairs, `static_assert`ed
+    even) and `kBloomStrength = 1.0` (postprocess.frag's additive blend
+    multiplier, applied at the blurred texture's own real brightness) are
+    both named, tunable constants rather than magic literals at their call
+    sites.
+
+Verified: clean rebuild is warning-free under `-Wall -Wextra`; a headless
+screenshot shows the two textured spheres with real rust/scuff surface detail
+(not flat color) and a visible soft glow around the sphere grid's brightest
+specular highlights and the brightest point light, fading smoothly rather
+than a hard-edged disc; *no regression* in shadows, ground normal mapping,
+skybox, HDR/tonemap, MSAA, IBL reflections on the untextured spheres, or the
+Blinn-Phong table/box/pyramid.
+
 ### Phase 12: GL 3.3 -> 4.3 core foundation bump
 
 Phase 12 is a deliberately narrow foundation phase, not a rendering-feature
@@ -1268,6 +1426,47 @@ exactly the version the next phase's known requirements call for, not more.
   Blinn-Phong table/box/pyramid) renders pixel-for-pixel identically before
   and after this version bump.
 
+### Phase 13a: anisotropic texture filtering
+
+Phase 13a fixes a specific visual artifact -- the ground plane's checker
+texture shimmering/aliasing at grazing, near-horizon viewing angles -- that
+trilinear mipmapping alone can't: trilinear blurs isotropically based on the
+worst-case screen-space minification axis, over-blurring the other axis,
+while anisotropic filtering samples more texels along the more-compressed
+axis specifically.
+
+- **`Texture`'s constructor** (`src/texture.cpp`) queries
+  `GL_EXT_texture_filter_anisotropic` support exactly once per process
+  (cached in a function-local static -- the answer can't change for the
+  lifetime of a GL context) via the modern `glGetStringi`/`GL_NUM_EXTENSIONS`
+  per-index query, not the old `glGetString(GL_EXTENSIONS)` single
+  space-separated string -- a core-profile context (this engine has been on
+  one since Phase 12) no longer supports that legacy string at all, so the
+  old-style query would silently return null instead of the real answer.
+  When supported, the driver's own reported maximum
+  (`GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT`) is capped at a conventional 16x
+  ceiling (some drivers report unusually high/exotic maxima; capping avoids
+  blindly requesting whatever a given driver happens to claim) and applied
+  via `glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, ...)`.
+- Only meaningful alongside mipmaps (it refines minification filtering, which
+  mipmaps drive), so it's gated on the same `generateMipmaps` flag as
+  `GL_LINEAR_MIPMAP_LINEAR`. Applied uniformly in `Texture`'s own constructor
+  rather than as a per-call-site opt-in, so every texture the engine creates
+  -- ground plane, table/box/pyramid, PBR sphere materials -- gets it, all
+  the way through `ResourceManager`'s cache.
+- No visible-behavior toggle/env var: unlike later Phase 13 sub-phases (SSAO,
+  SSR), there's no meaningful "before" image worth A/B-comparing at runtime
+  here -- the driver either exposes the extension or it doesn't, and this
+  container's Mesa/llvmpipe does.
+
+Verified: clean rebuild is warning-free under `-Wall -Wextra`; the engine's
+own startup log confirms the extension is detected and the applied level
+(`Anisotropic filtering: GL_EXT_texture_filter_anisotropic supported (driver
+max 16.000000x), applying 16.000000x to all textures`, this container's own
+Mesa/llvmpipe build); a headless screenshot of the ground plane at a grazing
+angle shows a crisp, stable checker pattern all the way to the horizon rather
+than trilinear's characteristic moiré/shimmer.
+
 ### Phase 13b: frustum culling
 
 Phase 13b adds one performance-architecture feature -- skipping draw calls
@@ -1338,6 +1537,61 @@ special-cased hack for this one.
   anisotropic-filtered textures, skybox, HDR/tonemap, and the Blinn-Phong
   table/box/pyramid/ground) still renders pixel-for-pixel identically --
   nothing visible is incorrectly culled at this camera's default framing.
+
+### Phase 13c: Cascaded Shadow Maps
+
+Phase 13c replaces Phase 7a/7b's single, fixed, whole-scene-covering
+orthographic shadow projection with Cascaded Shadow Maps (CSM), without
+changing the shadow-casting light itself (still just the one directional
+light) or `render()`/`renderShadowPass()`'s overall shape.
+
+- **`kCascadeCount` (3) separate `ShadowMap` instances** (`shadowCascades_`,
+  a `std::array<ShadowMap, 3>` rather than a layered/array-texture mode added
+  to `ShadowMap` itself -- see that class's own Phase 13c comment for why),
+  each covering a different depth range ("cascade") of the camera's own view
+  frustum. `renderShadowPass()` now depth-renders the whole scene once per
+  cascade (3 total passes) instead of once total.
+- **Split-depth scheme** (`computeCascadeSplitDepths()`): the standard
+  "practical split scheme" (GPU Gems 3, ch. 10) -- a blend of a logarithmic
+  split (equal *ratios* between consecutive split distances, matching how
+  on-screen texel density falls off with distance under a perspective
+  projection) and a uniform split (equal *differences*, avoiding the log
+  scheme's tendency to make the nearest cascade too thin to be useful),
+  blended evenly (`kCascadeSplitLambda = 0.5`, the commonly cited default).
+  Splits are computed out to `kCascadeShadowDistance` (12 world units) --
+  deliberately not the camera's real 100-unit far plane, since this scene's
+  own shadow-relevant content all sits within roughly 8-9 units of
+  `kDefaultCameraPosition`, so splitting across the full far plane would burn
+  two of three cascades' resolution on empty space nothing ever casts a
+  shadow into. The actual resulting split distances are logged once at
+  startup (this container's own run: `0.100000 2.279954 5.233108 12.000000`).
+- **Per-cascade frustum-fitting** (`computeCascades()`): for each cascade's
+  depth range, unproject that range's 8 view-frustum corners to world space
+  (`Camera::getProjectionMatrix()`'s near/far overload +
+  `frustumCornersWorldSpace()`, see `frustum.hpp`), then fit a tight
+  orthographic projection around their light-space bounding box (backed off
+  `kCascadeLightBackoff` (20) units behind the slice's own center along
+  `-lightDir`, padded by `kCascadeXYPadding`/`kCascadeZPadding` so an object
+  just outside one cascade's tight slice still gets rendered into that
+  cascade's own depth map) -- the standard CSM per-cascade frustum-fitting
+  method. This is what gives CSM its resolution win over the old single
+  whole-scene map: a cascade close to the camera covers a much smaller
+  world-space area, so the same fixed `kShadowMapWidth`/`Height` texel budget
+  lands a proportionally finer world-space grid over it.
+- **`basic.frag`/`pbr.frag`** each pick which cascade a given fragment
+  belongs to (comparing its view-space depth, a new varying, against
+  `uCascadeSplits[]`) and sample that cascade's own shadow map with its own
+  light-space matrix, blending smoothly across a small transition band near
+  each split rather than a hard cutoff, to avoid a visible seam where shadow
+  resolution/aliasing changes abruptly between cascades.
+
+Verified: clean rebuild is warning-free under `-Wall -Wextra`; the startup
+log confirms three cascades built with sane, monotonically increasing split
+distances; a headless screenshot shows visibly sharper, better-defined
+shadow edges close to the camera (the table/box/pyramid and PBR sphere grid's
+own contact shadows) than the old single whole-scene map produced at the
+same resolution, with no visible seam at either cascade boundary and no
+regression to the existing shadow-casting/lit content.
 
 ### Phase 13d: GPU compute-shader clustered forward lighting
 
@@ -1622,7 +1876,30 @@ SSR now can.
   isolating SSR's own contribution in headless before/after verification,
   same pattern as `ENGINE_SSAO_DISABLE`.
 
-- **Bug found post-verification: reflections of the checkerboard floor
+This phase's own verification, and three rounds of independent re-review
+after it, found four bugs in a row in `traceSSR()`'s ray march -- each fix
+below is the one that shipped at the time, written up as it was found, with
+the next review's own re-derivation of the math sometimes overturning a
+previous fix's own reasoning (not just its code) once a wider screenshot or
+a closer look at the algebra showed the earlier fix's justification didn't
+actually hold up. Read in order, they trace a single ray march from
+"visibly broken" to "correct":
+
+1. **Reflection aliasing**, not self-intersection, produced a mottled dark
+   patch on one sphere.
+2. Fixing #1 left a second, smaller **false-hit "island"** on the same
+   sphere, traced to the SSR ray march reusing SSAO's *half-resolution*
+   depth buffer.
+3. Fixing #2's false hit **broke almost every legitimate reflection in the
+   scene** -- the thickness gate #2 tightened was, on closer derivation,
+   gating the wrong quantity for every ray, not just the false-hit case.
+4. Fixing #3 introduced a **swirling/donut-shaped distortion** on several
+   spheres -- #3's refactor had silently deleted the coarse march's own
+   crossing test along the way, a regression invisible in #3's own
+   single-sphere before/after diff but obvious on a full 8-sphere
+   screenshot.
+
+- **Bug review (#1): reflections of the checkerboard floor
   aliased into a mottled/checkered dark patch, not a self-intersection.**
   A headless screenshot's top-right sphere showed a noisy, blotchy dark patch
   between its specular highlight and terminator that didn't belong -- gone
@@ -1826,6 +2103,17 @@ SSR now can.
   `ENGINE_SSR_DISABLE=1` renders pixel-identical (RMSE 0) to the pre-fix
   disabled render. A Debug build's `GL_CHECK` drains zero GL errors across a
   full headless run with the fix in place.
+
+With #4's fix in place, `traceSSR()`'s coarse march once again does what its
+own comment always said it did (reject a step still in front of the
+recorded surface, accept one that's gone behind it), judged against the
+refined post-bisection gap (#3's insight, replacing the coarse-gap check #2
+tightened) and sampling `uSSRColorBuffer` through its own mipmapped,
+`textureGrad`-sampled path (#1) -- still reading `uSSRDepthMap` from SSAO's
+existing half-resolution depth texture throughout (that was never the bug;
+#2 traced the false hit to how tight a margin that lower-resolution buffer's
+own small disagreements with the true surface needed, not to its resolution
+itself).
 
 ## Libraries used and why
 
