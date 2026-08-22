@@ -1,7 +1,9 @@
 #ifndef ENGINE_WINDOW_HPP
 #define ENGINE_WINDOW_HPP
 
-// RAII wrapper around a GLFW window + OpenGL 3.3 core context.
+// RAII wrapper around a GLFW window + OpenGL 4.3 core context (bumped from
+// 3.3 in Phase 12 as a foundation change for Phase 13's compute-shader
+// clustered lighting -- see README.md's Phase 12 section).
 //
 // The constructor does all setup (glfwInit, window/context creation, GLAD
 // function loading) and throws std::runtime_error on the first failure,

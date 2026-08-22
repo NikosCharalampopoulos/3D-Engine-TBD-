@@ -1,24 +1,28 @@
 # 3D Engine (TBD)
 
 A small C++/OpenGL 3D engine: a real windowing/main-loop foundation, a
-free-fly camera, GL 3.3 core shaders/meshes/textures, multi-light (directional
+free-fly camera, GL 4.3 core shaders/meshes/textures (bumped from 3.3 in
+Phase 12 -- see that section below), multi-light (directional
 + point + spot) Blinn-Phong lighting with tangent-space normal mapping and
 directional shadow mapping, Assimp-based multi-object scene loading with a
 real node hierarchy, MSAA anti-aliasing, a thin entity/resource-cache
 layer, a procedural-sky cubemap background, an HDR + Reinhard-tonemapped
 post-process pipeline, (Phase 9) a real metallic/roughness Cook-Torrance
 PBR material/shader alongside the original Blinn-Phong path, proven out on a
-sphere reference grid, and (Phase 10) real-time image-based lighting -- a
+sphere reference grid, (Phase 10) real-time image-based lighting -- a
 diffuse irradiance cubemap, a GGX-prefiltered mipmapped specular cubemap, and
 a split-sum BRDF LUT, all convolved once at startup from the existing skybox
 -- replacing that PBR path's flat placeholder ambient term with a real,
-direction- and roughness-aware one -- built up from bare-metal OpenGL, and
-verified at every step by a headless Xvfb+Mesa run/screenshot harness (no GPU
-or display required). See "Architecture overview" right below for what the
-finished whole looks like today, or "Development history" further down for
-how it got built, phase by phase (this repo was built incrementally across
-10 phases, each independently bug-reviewed), including the specific bugs
-each phase's review found and fixed.
+direction- and roughness-aware one --, (Phase 11) textured PBR materials plus
+tonemap-aware bloom, and (Phase 12) a GL 4.3 core foundation bump laying the
+groundwork for upcoming compute-shader clustered lighting, built up from
+bare-metal OpenGL, and verified at every step by a headless Xvfb+Mesa
+run/screenshot harness (no GPU or display required). See "Architecture
+overview" right below for what the finished whole looks like today, or
+"Development history" further down for how it got built, phase by phase
+(this repo was built incrementally across many phases, each independently
+bug-reviewed), including the specific bugs each phase's review found and
+fixed.
 
 ## Architecture overview
 
@@ -26,8 +30,9 @@ each phase's review found and fixed.
 yet -- see the note at the top of `CMakeLists.txt`) built around a handful
 of small, mostly-RAII classes in `include/engine/` + `src/`:
 
-- **`Window`** (`window.hpp`/`.cpp`) -- owns the GLFW window and a GL 3.3
-  core context, requested with 4x MSAA (`GLFW_SAMPLES`, plus a Linux-only
+- **`Window`** (`window.hpp`/`.cpp`) -- owns the GLFW window and a GL 4.3
+  core context (bumped from 3.3 in Phase 12 -- see that section below),
+  requested with 4x MSAA (`GLFW_SAMPLES`, plus a Linux-only
   EGL context-creation path needed to actually get multisampling on this
   project's headless Xvfb+Mesa target -- see `ENGINE_DISABLE_EGL_CONTEXT`
   below if that path ever needs disabling on a real desktop). Reports raw
@@ -1121,6 +1126,96 @@ single hand-picked ambient constant.
   the skybox background, shadows, ground normal mapping, HDR/tonemap, MSAA,
   and the Blinn-Phong table/box/pyramid are all still visible/unchanged in
   the same screenshot.
+
+### Phase 12: GL 3.3 -> 4.3 core foundation bump
+
+Phase 12 is a deliberately narrow foundation phase, not a rendering-feature
+phase: it changes *what GL context version the engine requests*, proves
+nothing about the existing rendering broke, and stops there. It exists to
+lay the groundwork for Phase 13 (cascaded shadows, compute-shader clustered
+lighting, HDRI, SSAO, SSR, anisotropic filtering) -- specifically, GL 4.3 is
+the version that introduces compute shaders, which Phase 13's clustered
+lighting will need. 4.3 rather than a bigger jump (4.5/4.6) because nothing
+currently planned needs bindless textures or direct state access -- request
+exactly the version the next phase's known requirements call for, not more.
+
+- **`Window`'s context-version hints** (`src/window.cpp`) --
+  `GLFW_CONTEXT_VERSION_MAJOR`/`MINOR` changed from `3`/`3` to `4`/`3`;
+  `GLFW_OPENGL_PROFILE` stays `GLFW_OPENGL_CORE_PROFILE`, unchanged. GLFW's
+  contract for this hint pair is to fail context creation outright (a null
+  window, the pre-existing failure path this constructor already throws
+  `std::runtime_error` on) rather than silently handing back a lower
+  version if the driver can't satisfy the requested minimum -- confirmed
+  directly on this project's own headless target by temporarily requesting
+  a deliberately absurd version (9.9): `glfwCreateWindow` returned `nullptr`
+  and GLFW's own error callback logged `EGL: Failed to create context:
+  Arguments are inconsistent`, exactly the existing "no GL context
+  available?" throw path, not a downgraded context. So a successful
+  `Window` construction after this change is proof a real >=4.3 core
+  context was actually granted, not a silent version downgrade going
+  unnoticed.
+- **Verified on both of this project's headless context-creation paths**
+  (`src/window.cpp`'s Linux-only EGL path, Phase 6, plus its
+  `ENGINE_DISABLE_EGL_CONTEXT=1` GLX fallback) against this container's
+  actual Mesa version (`libgl1-mesa-dri` 25.2.8, `llvmpipe` LLVM 20.1.2):
+  both paths report `OpenGL version: 4.5 (Core Profile) Mesa
+  25.2.8-0ubuntu0.24.04.2` in the engine's own startup log, comfortably
+  above the requested 4.3 floor -- this was true even *before* this
+  phase's change (Mesa/llvmpipe already granted 4.5 when only 3.3 was
+  requested, since core-profile context creation grants the highest
+  version the driver supports that's >= the requested minimum, not exactly
+  the requested version), so the version bump itself changes nothing
+  observable in the log's version *number* on this specific
+  environment -- what it changes is the *floor*: a driver that could only
+  offer 3.3-4.2 would now fail construction instead of silently running in
+  a lower-than-intended context. GLX still reports `GL_SAMPLES = 0`
+  (unrelated to this phase -- Xvfb's GLX simply never advertises a
+  multisample-capable visual, see Phase 6) while EGL still reports
+  `GL_SAMPLES = 4`; that pre-existing MSAA behavior is unaffected by the
+  version bump.
+  - **On real hardware**: the user's own NVIDIA RTX 4060 (Windows) --
+    which this project's history notes has already run this engine
+    successfully once before -- will very likely grant a real 4.3+ core
+    context outright via its native WGL path (unaffected by any of this
+    phase's Linux-only EGL/GLX discussion); this headless container's
+    llvmpipe software rasterizer is the only rendering target actually
+    re-verified for this phase.
+- **GLAD loader** (`external/glad/`) -- left unchanged. Requesting a higher
+  context version at creation time needs no new GL entry points by itself;
+  nothing in *this* phase calls anything GL-4.3-specific (compute shaders
+  are Phase 13d's job, not this one), so no new function pointers/enums
+  were added to `glad.h`/`glad.c` -- doing so speculatively, before
+  anything actually calls them, would violate this loader's own established
+  pattern (see "GL loader" below) of only growing when a real call site
+  needs it. A GL 4.3 core context still exposes every GL 3.3 entry point
+  this loader already declares, so nothing broke.
+- **GLSL shader version left at `#version 330 core`** (every file under
+  `assets/shaders/`) -- deliberately *not* bumped to `430 core`. A GL 4.3
+  core context is required by spec to support every GLSL version from
+  1.10 through 4.30, including 3.30, with fully compatible semantics for
+  the language subset these shaders actually use (no shader here reads any
+  4.3-only builtin, layout qualifier, or behavior that changed between
+  3.30 and 4.30) -- confirmed empirically, not just by spec reading: all
+  eleven `.vert`/`.frag` programs (`basic`, `shadow`, `skybox`,
+  `postprocess`, `bloom_extract`, `blur`, `pbr`, `cubemap_capture`,
+  `irradiance_convolution`, `prefilter`, `brdf_lut`) still compile and link
+  cleanly under the new 4.3 context, and the rendered output is
+  byte-identical (see below) to the pre-bump 3.3-context render. Bumping
+  the `#version` string would add a chance of newly-strict validation
+  behavior for zero functional benefit this phase -- there is nothing in
+  this phase's own scope that needs a GLSL 4.30 feature (compute shaders
+  use GLSL 430, but they're a new file Phase 13d adds, not an edit to any
+  shader that exists today). Revisit this once Phase 13 actually adds a
+  shader that needs 4.30-or-later GLSL features.
+- **No visual regression**: `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh
+  build/engine_app <out.png>` was run once against the unmodified (pre-Phase-12)
+  build and once against the post-bump build; `compare -metric AE` between
+  the two PNGs reports `0` -- zero differing pixels, not just "looks the
+  same" -- confirming the entire existing scene (shadows, PBR direct
+  lighting + IBL reflections on both the plain and Phase 11 textured
+  spheres, bloom, MSAA-smoothed silhouettes, skybox, HDR/tonemap, and the
+  Blinn-Phong table/box/pyramid) renders pixel-for-pixel identically before
+  and after this version bump.
 
 ## Libraries used and why
 

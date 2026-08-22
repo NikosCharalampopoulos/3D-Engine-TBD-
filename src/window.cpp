@@ -54,7 +54,20 @@ Window::Window(int width, int height, const std::string& title) : width_(width),
         throw std::runtime_error("Failed to initialize GLFW");
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    // Phase 12: bumped from 3.3 to 4.3 core -- a foundation change for
+    // Phase 13's compute-shader clustered lighting (compute shaders are a GL
+    // 4.3 feature; nothing in *this* phase uses them yet). GLFW's contract
+    // for GLFW_CONTEXT_VERSION_MAJOR/MINOR + GLFW_OPENGL_CORE_PROFILE is to
+    // fail context creation outright (glfwCreateWindow returns nullptr, an
+    // error already handled below) rather than silently handing back a
+    // lower version if the driver can't satisfy the requested one -- so a
+    // 4.3 core context genuinely was granted if this constructor doesn't
+    // throw, not silently downgraded. Verified on this project's headless
+    // Xvfb + Mesa llvmpipe target (see README.md's Phase 12 section): this
+    // environment's Mesa (25.2.8) reports GL 4.5 core available, comfortably
+    // above 4.3, via both the EGL and GLX (ENGINE_DISABLE_EGL_CONTEXT=1)
+    // context-creation paths below.
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 #ifdef __APPLE__

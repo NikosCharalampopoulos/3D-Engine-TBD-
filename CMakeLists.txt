@@ -105,6 +105,12 @@ FetchContent_MakeAvailable(assimp)
 # pre-generated set of glad.c/glad.h/khrplatform.h (public domain, generated
 # for GL 3.3 core, no extensions) is checked into external/glad/. This keeps
 # the build fully offline-reproducible for the loader itself.
+# (Phase 12: the *context* Window now requests is GL 4.3 core, but this
+# loader's own function/enum set is unchanged -- nothing new is called this
+# phase, see README.md's Phase 12 section. A 4.3 context still exposes every
+# GL 3.3 entry point this loader already declares; new entry points only need
+# adding here once something actually calls them, e.g. Phase 13d's compute
+# shaders.)
 add_library(glad STATIC external/glad/src/glad.c)
 target_include_directories(glad PUBLIC external/glad/include)
 target_link_libraries(glad PUBLIC ${CMAKE_DL_LIBS})
