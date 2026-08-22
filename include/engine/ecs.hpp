@@ -21,7 +21,7 @@
 // What this deliberately IS: a minimal but genuine component registry --
 // entities are indices, not objects; components live in per-type pools, not
 // as fields on a fixed Entity struct; a new component type (Phase 8b's
-// debug-UI-inspectable data, Phase 8d's physics bodies/colliders, etc.) can
+// debug-UI-inspectable data, Phase 8e's physics bodies/colliders, etc.) can
 // be registered without touching EntityRegistry itself, just by calling
 // addComponent<NewType>(...) with a new T. That property -- arbitrary
 // caller-defined component types through one templated add/get/remove/

@@ -228,6 +228,7 @@ add_executable(engine_app
     src/scene_serialization.cpp
     src/scene_loader.cpp
     src/debug_ui.cpp
+    src/physics.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

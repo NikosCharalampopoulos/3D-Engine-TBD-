@@ -1,0 +1,12 @@
+# Phase 8e: material for assets/models/falling_cube.obj -- the physics
+# demo's own falling object. A bright, saturated yellow specifically so it
+# reads as a distinct "thing being dropped" against scene.obj's own
+# table/box/pyramid materials (brown/blue/red, see scene.mtl) and the
+# neutral-albedo PBR sphere grid, in every headless screenshot this phase's
+# own verification takes.
+
+newmtl FallingCube
+Kd 0.95 0.85 0.10
+Ka 0.95 0.85 0.10
+Ks 0.30 0.30 0.30
+Ns 32.0

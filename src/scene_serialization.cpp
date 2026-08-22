@@ -80,6 +80,36 @@ json writeVec3(const glm::vec3& v) { return json::array({v.x, v.y, v.z}); }
 
 json writeQuat(const glm::quat& q) { return json::array({q.w, q.x, q.y, q.z}); }
 
+// Phase 8e: reads a single optional boolean field, or returns `fallback`
+// unchanged if `key` isn't present at all -- same "absent means default"
+// convention as readVec3/readQuat above, just for RigidBody::useGravity's
+// "gravity" field. Throws if `key` IS present but isn't a bool, for the
+// same "a present-but-malformed field is a schema error" reason those two
+// already document.
+bool readBool(const json& obj, const char* key, bool fallback, const std::string& context) {
+    if (!obj.contains(key)) {
+        return fallback;
+    }
+    const json& value = obj.at(key);
+    if (!value.is_boolean()) {
+        throw std::runtime_error(context + ": \"" + key + "\" must be a boolean");
+    }
+    return value.get<bool>();
+}
+
+// Phase 8e: same as readBool, but for a single optional numeric field --
+// used by Collider's "halfExtent".
+float readFloat(const json& obj, const char* key, float fallback, const std::string& context) {
+    if (!obj.contains(key)) {
+        return fallback;
+    }
+    const json& value = obj.at(key);
+    if (!value.is_number()) {
+        throw std::runtime_error(context + ": \"" + key + "\" must be a number");
+    }
+    return value.get<float>();
+}
+
 }  // namespace
 
 std::vector<SceneEntityRecord> parseSceneRecords(const std::string& path) {
@@ -160,6 +190,34 @@ std::vector<SceneEntityRecord> parseSceneRecords(const std::string& path) {
             record.modelPath = modelJson.at("path").get<std::string>();
         }
 
+        // Phase 8e: "rigidBody"/"collider" are both optional, independent
+        // blocks -- see this file's header's "Schema" comment. An empty
+        // "rigidBody": {} is valid (every one of its own fields is itself
+        // optional, defaulting to RigidBody's own defaults), so presence of
+        // the key alone (not any particular field inside it) is what sets
+        // hasRigidBody/hasCollider.
+        if (entityJson.contains("rigidBody")) {
+            const json& rigidBodyJson = entityJson.at("rigidBody");
+            if (!rigidBodyJson.is_object()) {
+                throw std::runtime_error(context + ": \"rigidBody\" must be an object");
+            }
+            record.hasRigidBody = true;
+            const std::string rigidBodyContext = context + ".rigidBody";
+            record.rigidBodyGravity = readBool(rigidBodyJson, "gravity", record.rigidBodyGravity, rigidBodyContext);
+            record.rigidBodyVelocity =
+                readVec3(rigidBodyJson, "velocity", record.rigidBodyVelocity, rigidBodyContext);
+        }
+
+        if (entityJson.contains("collider")) {
+            const json& colliderJson = entityJson.at("collider");
+            if (!colliderJson.is_object()) {
+                throw std::runtime_error(context + ": \"collider\" must be an object");
+            }
+            record.hasCollider = true;
+            record.colliderHalfExtent =
+                readFloat(colliderJson, "halfExtent", record.colliderHalfExtent, context + ".collider");
+        }
+
         records.push_back(std::move(record));
     }
 
@@ -180,6 +238,18 @@ void writeSceneRecords(const std::vector<SceneEntityRecord>& records, const std:
         };
         if (!record.modelPath.empty()) {
             entityJson["model"] = {{"path", record.modelPath}};
+        }
+        // Phase 8e: "rigidBody"/"collider" are written independently of
+        // each other and of "model" -- see this file's header's "Schema"
+        // comment on why all three are opt-in per entity.
+        if (record.hasRigidBody) {
+            entityJson["rigidBody"] = {
+                {"gravity", record.rigidBodyGravity},
+                {"velocity", writeVec3(record.rigidBodyVelocity)},
+            };
+        }
+        if (record.hasCollider) {
+            entityJson["collider"] = {{"halfExtent", record.colliderHalfExtent}};
         }
         entities.push_back(std::move(entityJson));
     }

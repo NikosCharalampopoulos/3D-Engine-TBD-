@@ -55,7 +55,10 @@ void expectQuatNear(const glm::quat& actual, const glm::quat& expected, const st
 // one entity with every field explicitly set (including a "model" block)
 // and one with only a name -- everything else should come back at
 // Transform's own identity defaults, and modelPath should come back empty
-// rather than some placeholder.
+// rather than some placeholder. A third entity (Phase 8e) exercises
+// "rigidBody"/"collider" -- both present, with non-default field values, so
+// a bug that silently dropped either block or fell back to RigidBody/
+// Collider's own defaults would show up as a mismatch.
 std::vector<engine::SceneEntityRecord> makeTestRecords() {
     std::vector<engine::SceneEntityRecord> records;
 
@@ -70,6 +73,17 @@ std::vector<engine::SceneEntityRecord> makeTestRecords() {
     engine::SceneEntityRecord bare;
     bare.name = "transform_only";
     records.push_back(bare);
+
+    engine::SceneEntityRecord physical;
+    physical.name = "falling_thing";
+    physical.position = glm::vec3(0.0f, 3.0f, 0.0f);
+    physical.modelPath = "assets/models/falling_cube.obj";
+    physical.hasRigidBody = true;
+    physical.rigidBodyGravity = false;  // deliberately non-default (true)
+    physical.rigidBodyVelocity = glm::vec3(0.5f, -1.5f, 0.0f);
+    physical.hasCollider = true;
+    physical.colliderHalfExtent = 0.35f;  // deliberately non-default (0.25)
+    records.push_back(physical);
 
     return records;
 }
@@ -94,6 +108,11 @@ int main() {
             expectQuatNear(reloaded[i].rotation, original[i].rotation, tag + ".rotation");
             expectVec3Near(reloaded[i].scale, original[i].scale, tag + ".scale");
             expectTrue(reloaded[i].modelPath == original[i].modelPath, tag + ".modelPath");
+            expectTrue(reloaded[i].hasRigidBody == original[i].hasRigidBody, tag + ".hasRigidBody");
+            expectTrue(reloaded[i].rigidBodyGravity == original[i].rigidBodyGravity, tag + ".rigidBodyGravity");
+            expectVec3Near(reloaded[i].rigidBodyVelocity, original[i].rigidBodyVelocity, tag + ".rigidBodyVelocity");
+            expectTrue(reloaded[i].hasCollider == original[i].hasCollider, tag + ".hasCollider");
+            expectTrue(reloaded[i].colliderHalfExtent == original[i].colliderHalfExtent, tag + ".colliderHalfExtent");
         }
     }
 

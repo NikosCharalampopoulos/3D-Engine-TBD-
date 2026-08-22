@@ -31,9 +31,14 @@ Reflections -- refining the PBR sphere grid's IBL-only specular term with a
 real ray-marched reflection of the actual nearby scene --, (Phase 8a) a
 small but genuine component-based ECS (entities as opaque IDs, components in
 typed per-type pools) replacing the earlier Phase 6 `Entity` struct, (Phase
-8b) JSON scene serialization/level loading, and (Phase 8c) a Dear ImGui
+8b) JSON scene serialization/level loading, (Phase 8c) a Dear ImGui
 debug overlay (entity inspector, render-pass toggles, frame stats) drawn
-last onto the final tonemapped image -- built up from bare-metal OpenGL, and
+last onto the final tonemapped image, (Phase 8d) a data-driven input
+action-mapping layer underneath free-fly camera movement, and (Phase 8e)
+basic physics/collision -- gravity plus ground-plane collision for
+ECS entities with a new RigidBody/Collider component pair, demonstrated by a
+small cube that visibly falls and comes to rest on the ground plane -- built
+up from bare-metal OpenGL, and
 verified at every step by a headless Xvfb+Mesa run/screenshot harness (no
 GPU or display required).
 See "Architecture
@@ -160,10 +165,12 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   `Entity` struct: entities are opaque `EntityId` indices with no data of
   their own; a `Transform` component, a `ModelComponent` (wrapping the
   existing `shared_ptr<Model>` plus, since Phase 8b, the asset path it was
-  loaded from), and a `NameComponent` (Phase 8b, a human-readable name) each
-  live in their own `ComponentPool<T>`, keyed by entity id.
-  `Application::registry_` currently holds one entity (the `scene.obj`
-  model); `render()`/`renderShadowPass()`/`renderSSAO()` visit it via
+  loaded from), a `NameComponent` (Phase 8b, a human-readable name), and
+  (Phase 8e) a `RigidBody`/`Collider` pair (`physics.hpp` -- velocity/gravity
+  and a box collider, see "Phase 8e" below) each live in their own
+  `ComponentPool<T>`, keyed by entity id. `Application::registry_` currently
+  holds two entities (the static `scene.obj` model and Phase 8e's falling
+  cube); `render()`/`renderShadowPass()`/`renderSSAO()` visit them via
   `registry_.each<ModelComponent>(...)`, looking up each entity's `Transform`
   alongside its `ModelComponent`, rather than iterating a hardcoded
   `std::vector<Entity>`.
@@ -171,6 +178,9 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
   below) -- (de)serializes `registry_`'s entity data to/from a JSON file
   (`assets/scenes/default.json` by default), so `Application`'s constructor
   builds its scene from data instead of a hardcoded call sequence.
+- **`stepPhysics()`** (`physics.hpp`/`.cpp`, see "Phase 8e" below) -- gravity
+  integration plus ground-plane collision for every `RigidBody` entity,
+  called once per frame from `update()`.
 - **`ResourceManager`** (`resource_manager.hpp`/`.cpp`) -- a per-key
   `shared_ptr` cache for `Shader`/`Texture`/`Model`. Every asset load in the
   engine -- the scene's shader, the scene's model, every material's diffuse
@@ -260,14 +270,14 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        hdri_loader.cpp, compute_shader.cpp,
                        cluster_light_culler.cpp, ssao.cpp,
                        scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp,
-                       input_action_map.cpp)
+                       input_action_map.cpp, physics.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
                        resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
-                       scene_serialization, debug_ui, input_action_map)
+                       scene_serialization, debug_ui, input_action_map, physics)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -280,12 +290,15 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        faces (Phase 7b/10 procedural fallback), hdri/sky.hdr --
                        Phase 13e's real HDRI, rusted_metal_albedo/orm.png +
                        scuffed_plastic_albedo/orm.png -- Phase 11's textured
-                       PBR materials), models (scene.obj + scene.mtl),
-                       scenes/default.json -- Phase 8b's serialized scene
+                       PBR materials), models (scene.obj + scene.mtl,
+                       falling_cube.obj + falling_cube.mtl -- Phase 8e's demo
+                       object), scenes/default.json -- Phase 8b's serialized
+                       scene (Phase 8e adds its "falling_cube" entity)
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
 tests/                 scene_serialization_test.cpp (Phase 8b),
-                       input_action_map_test.cpp (Phase 8d) + its own
-                       CMakeLists.txt (no longer just the Phase 0 placeholder)
+                       input_action_map_test.cpp (Phase 8d),
+                       physics_test.cpp (Phase 8e) + its own CMakeLists.txt
+                       (no longer just the Phase 0 placeholder)
 ```
 
 A single executable target (`engine_app`) is built for now. A future phase
@@ -2709,6 +2722,179 @@ existing fields -- are completely unchanged by the refactor.
   direct visual inspection of both screenshots as well (the same checkered
   ground/spheres/pyramid/cube scene, and the same four-waypoint orbit, as
   every prior phase's own screenshots).
+
+### Phase 8e: basic physics/collision
+
+Phase 8a gave `registry_` a real component registry; Phase 8b gave it a real
+file format that already promised a physics body would arrive as "a new
+named block + a new parse/serialize branch, not a schema rewrite" (see that
+section's own wording). Phase 8e is that later phase: gravity plus
+ground-plane collision for ECS entities, proven out by a new demo entity
+that visibly falls and comes to rest -- the first phase since 8a/8b/8d that
+changes what the default headless screenshot actually looks like, rather
+than being a refactor verified pixel-identical against a prior commit.
+
+- **`RigidBody` + `Collider`** (`include/engine/physics.hpp`, new file):
+  two new component types, registered via `EntityRegistry::addComponent<T>()`
+  exactly the way `ecs.hpp`'s own header comment said a physics body would
+  be -- without touching `ecs.hpp` itself. `RigidBody` holds a `velocity`
+  (`glm::vec3`) and a `useGravity` bool; deliberately no mass field, since
+  gravity's acceleration doesn't depend on it and this phase does no
+  entity-vs-entity impulse response (the one place mass would actually get
+  read) -- a stored-but-never-consumed field is exactly what this codebase's
+  own established style (see `ecs.hpp`'s `NameComponent` comment) avoids.
+  `Collider` holds a single `halfExtent` float: an axis-aligned box
+  `[center - halfExtent, center + halfExtent]` on every axis, `center` being
+  the entity's own `Transform::position()`. A box, not a reuse of
+  `mesh.hpp`'s Phase 13b `BoundingSphere`, specifically because this phase's
+  demo object is a cube (see below) and the one collision resolved here is
+  against a flat, Y-constant ground plane, which only ever needs the
+  collider's own Y half-extent either way -- a box that visually matches the
+  cube being dropped avoids the "corners poking through" or "resting with
+  visible daylight underneath" artifacts a sphere-vs-cube shape mismatch
+  would otherwise produce.
+- **`stepPhysics()`** (`src/physics.cpp`, new file): the "system" that
+  consumes both components, following `ecs.hpp`'s own
+  `registry.each<T>(...)` pattern. For every entity with a `RigidBody`: adds
+  `kGravityAcceleration * deltaTime` to `velocity.y` (only if `useGravity`),
+  integrates `velocity * deltaTime` into that entity's `Transform` position
+  -- semi-implicit ("symplectic") Euler, velocity updated from acceleration
+  *before* it moves position, the standard basic-but-stable choice over
+  naive explicit Euler -- then, only for entities that *also* have a
+  `Collider`, checks the resulting position against a `groundY` parameter
+  and, if the collider's bottom face would cross below it, snaps the entity
+  to rest exactly on the surface (`position.y = groundY + halfExtent`) and
+  zeroes `velocity.y`. Checking the already-integrated position (rather than
+  sweeping the volume moved through this step, the way general continuous
+  collision detection would) is enough to never tunnel through this one
+  flat, infinite plane regardless of step size -- see `stepPhysics()`'s own
+  comment for why that's specifically true for a flat-plane collider and
+  wouldn't generalize to a second moving body. Depends on nothing but
+  `ecs.hpp`/`transform.hpp` (both plain data, no GL/Window dependency at
+  all), matching `scene_serialization.cpp`'s own "pure logic, no GL" split
+  so `tests/physics_test.cpp` can link against this file alone.
+- **Wired into `Application::update()`**: one `stepPhysics(registry_, ...,
+  kGroundY)` call, reusing the same `deltaTime` already threaded through to
+  `camera_.processMovement()` that frame rather than a second clock --
+  placed before the camera-driving branches (physics doesn't read `camera_`
+  at all) and before `render()` runs later that frame, so anything that
+  moved is already at its new position by the time it's drawn. Clamped
+  first to a new `kMaxPhysicsTimestep` (1/60 s, `application.cpp`): this
+  project's own headless verification runs a Debug build's frame -- CSM's 3
+  depth passes, clustered lighting's compute dispatch, SSAO's 3 passes,
+  bloom, SSR, all under Mesa's `llvmpipe` software rasterizer -- at roughly
+  0.2s of *real* elapsed time each (confirmed directly: 90 frames took
+  18.3s, 30 frames took 6.0s, both ~0.2s/frame). Without a cap, a single
+  frame's raw `deltaTime` would already be large enough to integrate this
+  phase's own falling cube straight past the ground and settle it within
+  the first frame or two -- leaving nothing for a multi-frame headless
+  screenshot sequence to actually show falling at different heights. Camera
+  movement deliberately keeps using the unclamped, real `deltaTime` (its
+  speed staying tied to actual wall-clock time is correct there); only
+  physics integration has a reason to decouple from it.
+- **The demo entity**: `assets/scenes/default.json` gained a second entity,
+  `falling_cube` -- a `Transform` (starting at `(0.0, 2.5, 1.1)`), a
+  `ModelComponent` (a new small hand-authored asset,
+  `assets/models/falling_cube.obj`/`.mtl`: an axis-aligned cube,
+  half-extent 0.25, bright yellow so it reads as a distinct "thing being
+  dropped" against `scene.obj`'s own table/box/pyramid materials and the
+  neutral PBR sphere grid), a `RigidBody` (`gravity: true`,
+  zero initial velocity), and a `Collider` (`halfExtent: 0.25`, matching the
+  mesh's own half-extent exactly, so the entity's `Transform` position IS
+  the physics center the mesh's local origin sits at). It needs zero new
+  code in `render()`/`renderShadowPass()`/`renderSSAO()`: all three already
+  iterate `registry_.each<ModelComponent>(...)` generically (Phase 8a), so
+  the falling cube is shadowed, SSAO-sampled, frustum-culled, and lit
+  exactly like every other `ModelComponent` entity, automatically, the
+  moment `stepPhysics()` starts moving its `Transform`.
+  - **Placement**: `(0.0, 2.5, 1.1)` in x/z sits in the open gap between
+    `scene.obj`'s own table/box/pyramid (documented extents roughly
+    x in `[-1.7, 1.0]`, z in `[-0.65, 0.5]`, expanding to about z = 0.61 at
+    worst after the scene's own 12-degree Y rotation) and the PBR sphere
+    grid (`kSphereGridDistanceFromCamera`/`kSphereGridHeight`, which works
+    out to roughly x in `[1.05, 2.48]`, z in `[1.63, 3.0]` including sphere
+    radius) -- clear of both by a comfortable margin on every side, and
+    close enough to dead-center in the default camera's view that it stays
+    on-screen (mostly out of frame at the very top at the start of its
+    fall, coming fully into frame as it drops) rather than needing an
+    extreme, frustum-edge position.
+  - **Starting height and gravity, tuned together**: 2.5 (start) and 9.81
+    m/s² (`kGravityAcceleration`) were picked, together with the 1/60s
+    physics-step cap above, specifically so this phase's own
+    `ENGINE_MAX_FRAMES=5/30/90` headless checkpoints land on three visually
+    distinct, meaningful states (worked out by hand-simulating the same
+    semi-implicit-Euler recurrence `stepPhysics()` runs): at frame 5 the
+    cube has fallen only ~0.04 units (`y ≈ 2.459`, still mostly above the
+    frame -- "barely started falling"); at frame 30 it's fallen to
+    `y ≈ 1.233`, clearly airborne and roughly halfway down; by frame 41 it
+    lands (`y = restY = groundY + halfExtent = 0.24`) and stays there, so at
+    frame 90 it's long since settled, at rest, velocity zeroed. This is also
+    why 9.81 (Earth-standard gravity) was kept rather than an arbitrarily
+    tuned "faster" constant -- the physics-step clamp alone, not an
+    unrealistic gravity value, is what makes a several-frame fall visible
+    under this project's own coarse per-frame headless timing.
+- **Scene schema extended, not rewritten**: `scene_serialization.hpp`'s
+  schema gains two more independently-optional per-entity blocks --
+  `"rigidBody": {"gravity": bool, "velocity": [x,y,z]}` and
+  `"collider": {"halfExtent": n}` -- both with every one of their own
+  fields optional too (`"rigidBody": {}` is a valid, at-rest body).
+  `SceneEntityRecord` (`scene_serialization.hpp`) gained the matching plain
+  fields (`hasRigidBody`/`rigidBodyGravity`/`rigidBodyVelocity`/
+  `hasCollider`/`colliderHalfExtent`); `scene_serialization.cpp` (the pure
+  JSON<->record half) parses/writes them with the same "absent means
+  default, present-but-malformed throws" convention `readVec3`/`readQuat`
+  already established, via two small new helpers (`readBool`/`readFloat`)
+  -- and still has no dependency on `physics.hpp`/`ecs.hpp` at all.
+  `scene_loader.cpp`'s `loadScene()`/`saveScene()` (the `EntityRegistry`-
+  facing half) are the only place that turns those fields into/out of real
+  `RigidBody`/`Collider` components, matching how `ModelComponent` already
+  splits across the same two files.
+- **What NOT to do (per this phase's own scope)**: no general rigid-body
+  solver, constraint system, or continuous collision detection beyond "a
+  reasonable timestep can't skip through the one flat ground plane" (see
+  `stepPhysics()`'s own comment on why a single-plane check already
+  guarantees that). No entity-vs-entity collision -- ground collision plus
+  gravity is the load-bearing requirement this phase actually needed; two
+  falling objects separating when they overlap is a real nice-to-have this
+  phase's own brief explicitly scoped out rather than adding for a single
+  demo entity with nothing to collide with. No physics on the PBR sphere
+  grid, the ground plane, or `scene.obj`'s own static furniture entity --
+  none of those are meant to move, and `RigidBody` is opt-in per entity like
+  every other component here, so nothing forces it onto them. No
+  user-controlled physics/character controller -- out of "basic
+  physics/collision" scope, that's a gameplay feature.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with zero
+  new warnings under `-Wall -Wextra`. A new test, `tests/physics_test.cpp`,
+  follows `scene_serialization_test`/`input_action_map_test`'s own "plain
+  executable, links only the pure logic file it's testing" shape (no live
+  GL context, no window, no GPU): it builds a real `EntityRegistry`, gives
+  one entity a `Transform` + `RigidBody` + `Collider`, and asserts the exact
+  hand-computed semi-implicit-Euler trajectory both after a handful of
+  steps (still falling, above `restY`, moving downward) and after enough
+  steps that it must have landed (`position.y == groundY + halfExtent`
+  exactly, `velocity.y == 0.0` exactly) -- plus that a `RigidBody` with no
+  `Collider` never collides (falls straight through `groundY`) and a
+  `RigidBody` with `useGravity = false` never moves at all.
+  `scene_serialization_test.cpp` gained a third fabricated entity exercising
+  both new blocks with non-default field values, round-tripped through
+  `writeSceneRecords()`/`parseSceneRecords()` like every other field.
+  `ctest` reports all three tests (`scene_serialization_test`,
+  `input_action_map_test`, `physics_test`) passing.
+  Headless verification (`tools/run_headless.sh`) was run at
+  `ENGINE_MAX_FRAMES=5`, `=30`, and `=90`, with every run's log confirming
+  **zero `[ERROR]`/GL-error lines** (Debug builds actively drain
+  `glGetError()` after every `GL_CHECK`-wrapped call, see `gl_debug.hpp`).
+  Unlike Phase 8a/8b/8d, these screenshots are *not* pixel-diffed against a
+  prior commit -- this phase deliberately changes the rendered frame (a new
+  object now visibly falls and settles) -- so correctness was instead
+  confirmed by direct visual inspection at all three checkpoints: at frame 5
+  the cube is barely visible, cropped by the top edge of frame, having
+  fallen only a hair from its start height; at frame 30 it's clearly
+  airborne, roughly halfway down, passing in front of the pyramid; at frame
+  90 it's resting flush on the checkered ground plane -- casting a contact
+  shadow, no visible gap underneath and no clipping into the floor -- well
+  clear of both `scene.obj`'s furniture and the PBR sphere grid in every
+  frame.
 
 ## Libraries used and why
 

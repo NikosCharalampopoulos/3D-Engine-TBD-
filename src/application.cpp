@@ -10,6 +10,7 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -27,6 +28,7 @@
 #include "engine/log.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
+#include "engine/physics.hpp"
 #include "engine/scene_serialization.hpp"
 
 namespace engine {
@@ -493,6 +495,32 @@ constexpr glm::vec3 kSceneCenter{0.0f, 0.0f, 0.0f};
 constexpr float kGroundHalfExtent = 2.6f;
 constexpr float kGroundY = -0.01f;
 constexpr float kGroundUvTiling = 6.0f;
+
+// Phase 8e: the largest deltaTime a single stepPhysics() call is allowed to
+// integrate with (see update()'s own definition below and physics.hpp for
+// stepPhysics() itself), regardless of how long this frame's real render
+// work actually took. 1/60 s -- an ordinary 60 FPS frame budget -- is the
+// standard "fixed max physics timestep" choice: it keeps the simulation's
+// own behavior reproducible across machines of very different real speed,
+// rather than a slower machine's larger per-frame deltaTime literally
+// making gravity accelerate objects faster in wall-clock terms. It matters
+// concretely on THIS project's own headless verification path in
+// particular -- tools/run_headless.sh's own comment on a Debug build's
+// per-frame cost (CSM's 3 depth passes, clustered lighting's compute
+// dispatch, SSAO's 3 screen-space passes, bloom, SSR, all under Mesa's
+// llvmpipe software rasterizer) measures roughly 0.2-0.3s of *real* elapsed
+// time per rendered frame -- without this clamp, a single frame's raw
+// deltaTime would already be large enough to integrate this phase's own
+// falling demo entity (assets/scenes/default.json's "falling_cube", loaded
+// via loadScene() below) straight past the ground and settle it within the
+// first frame or two, leaving nothing for a multi-frame headless screenshot
+// sequence (ENGINE_MAX_FRAMES=5/30/90) to actually show falling at
+// different heights. Camera movement
+// (camera_.processMovement(), below) deliberately keeps using the
+// unclamped, real deltaTime -- free-fly movement speed staying tied to
+// actual wall-clock time is the correct, expected behavior there; only
+// physics integration has a reason to decouple from it.
+constexpr float kMaxPhysicsTimestep = 1.0f / 60.0f;
 
 // Phase 13c: Cascaded Shadow Maps. Phase 7a/7b's single fixed orthographic
 // projection (a hand-picked half-extent/near/far sized to cover the whole
@@ -1357,6 +1385,23 @@ void Application::update(double deltaTime, const InputState& input) {
     if (input.toggleDebugUIPressed) {
         debugUI_.setEnabled(!debugUI_.enabled());
     }
+
+    // Phase 8e: gravity + ground-plane collision for every registry_ entity
+    // that has a RigidBody (see physics.hpp/physics.cpp) -- the
+    // assets/scenes/default.json "falling_cube" entity today, but opt-in
+    // per entity like every other component, so any future entity with its
+    // own "rigidBody"/"collider" scene blocks gets this for free. Reuses
+    // this frame's own deltaTime (already computed once by run(), passed in
+    // here) rather than a second, separately-tracked clock -- clamped to
+    // kMaxPhysicsTimestep first (see that constant's own comment above for
+    // why: this project's own headless verification runs Debug-build
+    // frames far slower than a real 60 FPS budget, which would otherwise
+    // make gravity integrate implausibly large jumps per frame). Placed
+    // before the camera-driving branches below since physics doesn't read
+    // or depend on camera_ at all, and before render() is called (later
+    // this same frame, from run()) so the object's Transform is already at
+    // its new position by the time this frame actually draws it.
+    stepPhysics(registry_, std::min(static_cast<float>(deltaTime), kMaxPhysicsTimestep), kGroundY);
 
     if (frustumCullDemoMode_) {
         // Phase 13b: the camera's fixed "facing away from the scene" pose

@@ -38,3 +38,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME input_action_map_test COMMAND input_action_map_test)
+
+# Phase 8e adds physics_test, testing engine::stepPhysics() (src/physics.cpp)
+# in isolation -- same "plain executable, links only the pure logic file
+# it's testing" shape as scene_serialization_test/input_action_map_test
+# above. physics.cpp depends only on ecs.hpp/transform.hpp (both plain data,
+# no GL/Window dependency at all -- see ecs.hpp's own header comment), so
+# this needs no live GL context/GPU either -- just GLM for glm::vec3.
+add_executable(physics_test
+    physics_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/physics.cpp
+)
+target_include_directories(physics_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(physics_test PRIVATE glm::glm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(physics_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME physics_test COMMAND physics_test)

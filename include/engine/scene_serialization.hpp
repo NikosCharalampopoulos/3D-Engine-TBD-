@@ -9,6 +9,18 @@
 // class's own Phase 8b comment in application.hpp/.cpp for how that call
 // site changes).
 //
+// Phase 8e extends this with two more optional, independently-opt-in
+// component blocks -- "rigidBody" and "collider" (see physics.hpp for
+// RigidBody/Collider themselves) -- exactly the way this header's own
+// Phase 8b "Schema" comment below said a later phase's physics body would
+// be added: a new named block plus a new parse/serialize branch, not a
+// schema rewrite. scene_serialization.cpp (the pure JSON<->record half)
+// still doesn't depend on physics.hpp/ecs.hpp at all -- it only reads/
+// writes the plain bool/float/vec3 fields SceneEntityRecord now carries for
+// them; only scene_loader.cpp's loadScene()/saveScene() (the
+// EntityRegistry-facing half) turns those fields into/out of real
+// RigidBody/Collider components.
+//
 // --- Format: why JSON via a vendored single-header library -------------
 // This project has no existing serialization format to reuse, so Phase 8b
 // picks one. CMakeLists.txt already FetchContent's three real dependencies
@@ -39,18 +51,40 @@
 //         "rotation": [w, x, y, z],                 // Transform's own
 //         "scale":    [x, y, z]                     // identity defaults
 //       },
-//       "model": { "path": "assets/models/foo.obj" }  // optional block
+//       "model": { "path": "assets/models/foo.obj" },  // optional block
+//       "rigidBody": {                             // optional block (Phase
+//         "gravity": true,                         // 8e) -- presence adds
+//         "velocity": [x, y, z]                    // a RigidBody component.
+//       },                                         // Both fields optional,
+//                                                   // defaulting to true /
+//                                                   // [0,0,0] (RigidBody's
+//                                                   // own defaults) --
+//                                                   // "rigidBody": {} is a
+//                                                   // valid, at-rest body.
+//       "collider": { "halfExtent": 0.25 }          // optional block (Phase
+//                                                   // 8e) -- presence adds
+//                                                   // a Collider component;
+//                                                   // "halfExtent" itself
+//                                                   // optional, defaulting
+//                                                   // to Collider's own
+//                                                   // 0.25 default.
 //     }
 //   ]
 // }
 //
 // Each entity is "an array of named component blocks" ("transform",
-// "model", ...) rather than a schema hardcoded to today's exactly-one
-// (Transform, Model) shape -- so Phase 8c-8e adding a new component type
-// (e.g. a physics body) is a new named block + a new parse/serialize
-// branch here, not a schema rewrite. "model" is an optional block (an
-// entity with a Transform but no Model is valid, matching ecs.hpp's
-// "components are opt-in per entity" design) for the same reason.
+// "model", "rigidBody", "collider", ...) rather than a schema hardcoded to
+// one fixed component shape -- so a later phase's new component type is a
+// new named block + a new parse/serialize branch here, not a schema
+// rewrite (Phase 8e's own "rigidBody"/"collider" blocks are exactly that:
+// see physics.hpp for RigidBody/Collider). "model"/"rigidBody"/"collider"
+// are all independently optional blocks (an entity can have any subset of
+// Transform/Model/RigidBody/Collider, matching ecs.hpp's "components are
+// opt-in per entity" design) for the same reason -- a RigidBody with no
+// Collider simply never collides with the ground (see physics.hpp's
+// stepPhysics()), and a Collider with no RigidBody never moves at all
+// (nothing but stepPhysics() ever reads Collider, and it only visits
+// entities with a RigidBody).
 //
 // Rotation is stored as a quaternion, [w, x, y, z] -- the same order
 // glm::quat's own constructor and Transform::rotation() use (see
@@ -104,6 +138,19 @@ struct SceneEntityRecord {
     glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
     glm::vec3 scale{1.0f, 1.0f, 1.0f};
     std::string modelPath;
+
+    // Phase 8e: mirrors the optional "rigidBody"/"collider" blocks above --
+    // hasRigidBody/hasCollider are false when the entity's JSON had no such
+    // block at all (matching modelPath's own empty-string "no model block"
+    // convention, just as a bool since a RigidBody/Collider block has no
+    // single "is this empty" string field to overload); the rest of each
+    // pair's fields default to RigidBody/Collider's own defaults (see
+    // physics.hpp) and are only meaningful when their has* flag is true.
+    bool hasRigidBody = false;
+    bool rigidBodyGravity = true;
+    glm::vec3 rigidBodyVelocity{0.0f, 0.0f, 0.0f};
+    bool hasCollider = false;
+    float colliderHalfExtent = 0.25f;
 };
 
 // Parses `path` as a scene JSON file (see this header's "Schema" comment)
@@ -138,6 +185,12 @@ void writeSceneRecords(const std::vector<SceneEntityRecord>& records, const std:
 // gets the union, matching EntityRegistry's own "create() always allocates
 // a fresh index" semantics.
 //
+// Phase 8e: also adds a RigidBody component (only when hasRigidBody is
+// true, with velocity/gravity from rigidBodyVelocity/rigidBodyGravity) and
+// a Collider component (only when hasCollider is true, with halfExtent from
+// colliderHalfExtent) -- both independently, matching every other
+// component here being opt-in per entity.
+//
 // Throws std::runtime_error (after LOG_ERROR, naming the offending
 // entity's name and path) if a record's modelPath doesn't resolve to a
 // file that exists on disk, or if ResourceManager::getModel()/Model's own
@@ -157,7 +210,10 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
 // "entity_<index>" placeholder if it doesn't (so saveScene() never fails
 // or drops an entity purely for lacking a name) -- see ecs.hpp's
 // NameComponent comment for why names are their own opt-in component
-// rather than a mandatory EntityId field.
+// rather than a mandatory EntityId field. Phase 8e: also writes out a
+// "rigidBody"/"collider" block for any entity with a RigidBody/Collider
+// component (independently -- see this header's own "Schema" comment),
+// same opt-in-per-entity treatment as ModelComponent already gets.
 //
 // Takes `registry` by non-const reference, not const&, even though this
 // function only reads it: EntityRegistry::each<T>()/pool<T>() (see

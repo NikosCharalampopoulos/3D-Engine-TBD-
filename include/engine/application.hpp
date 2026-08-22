@@ -444,6 +444,21 @@
 //     (registry_.each<Transform>(...), editable via ImGui::DragFloat3) --
 //     see "What NOT to do" in this phase's own brief for why scene save/
 //     load buttons, gamepad support, and physics visualization aren't here.
+//
+// Phase 8e adds basic physics/collision on top of registry_ -- see
+// physics.hpp for RigidBody/Collider (the two new component types) and
+// stepPhysics() (the "system" that consumes them). No new members on this
+// class at all: stepPhysics(registry_, ..., kGroundY) is called once from
+// update() (see that function's own Phase 8e comment and
+// kMaxPhysicsTimestep's own comment, both in application.cpp), reusing the
+// same deltaTime already threaded through to camera_.processMovement()
+// rather than a second clock. assets/scenes/default.json gained a second
+// entity ("falling_cube", see that file and
+// assets/models/falling_cube.obj/.mtl) with a RigidBody + Collider
+// alongside its Transform + ModelComponent -- it needs no special-casing
+// anywhere in render()/renderShadowPass()/renderSSAO(), since all three
+// already iterate registry_.each<ModelComponent>(...) generically; only its
+// Transform's position changes, once per frame, before any of them run.
 
 #include <glm/glm.hpp>
 

@@ -8,6 +8,17 @@
         "scale": [1.0, 1.0, 1.0]
       },
       "model": { "path": "assets/models/scene.obj" }
+    },
+    {
+      "name": "falling_cube",
+      "transform": {
+        "position": [0.0, 2.5, 1.1],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "model": { "path": "assets/models/falling_cube.obj" },
+      "rigidBody": { "gravity": true, "velocity": [0.0, 0.0, 0.0] },
+      "collider": { "halfExtent": 0.25 }
     }
   ]
 }

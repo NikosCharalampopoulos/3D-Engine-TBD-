@@ -17,6 +17,7 @@
 #include "engine/log.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
+#include "engine/physics.hpp"
 #include "engine/resource_manager.hpp"
 #include "engine/transform.hpp"
 
@@ -36,6 +37,18 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
         transform.setPosition(record.position);
         transform.setRotation(record.rotation);
         transform.setScale(record.scale);
+
+        // Phase 8e: RigidBody/Collider are added independently of each
+        // other and of the modelPath check below -- an entity can have
+        // either, both, or neither, matching every other component here
+        // being opt-in per entity (see scene_serialization.hpp's own
+        // "Schema" comment).
+        if (record.hasRigidBody) {
+            registry.addComponent<RigidBody>(id, RigidBody{record.rigidBodyVelocity, record.rigidBodyGravity});
+        }
+        if (record.hasCollider) {
+            registry.addComponent<Collider>(id, Collider{record.colliderHalfExtent});
+        }
 
         if (record.modelPath.empty()) {
             continue;
@@ -97,6 +110,20 @@ void saveScene(EntityRegistry& registry, const std::string& path) {
         const ModelComponent* modelComponent = registry.getComponent<ModelComponent>(id);
         if (modelComponent != nullptr) {
             record.modelPath = modelComponent->path;
+        }
+
+        // Phase 8e: RigidBody/Collider round-trip the same way ModelComponent
+        // does -- present only when the entity actually has that component.
+        const RigidBody* rigidBody = registry.getComponent<RigidBody>(id);
+        if (rigidBody != nullptr) {
+            record.hasRigidBody = true;
+            record.rigidBodyGravity = rigidBody->useGravity;
+            record.rigidBodyVelocity = rigidBody->velocity;
+        }
+        const Collider* collider = registry.getComponent<Collider>(id);
+        if (collider != nullptr) {
+            record.hasCollider = true;
+            record.colliderHalfExtent = collider->halfExtent;
         }
 
         records.push_back(std::move(record));
