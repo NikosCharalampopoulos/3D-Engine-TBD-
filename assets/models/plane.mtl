@@ -1,0 +1,14 @@
+# Phase 14f: material for assets/models/plane.obj -- the editor Create
+# menu's "Plane" primitive. A neutral light gray (distinct from the existing
+# ground plane's own procedural normal-mapped material, mesh.hpp's
+# makeGroundPlane()/application.cpp's groundMaterial_ -- this is a separate,
+# ordinary ModelComponent entity, not a second copy of that hand-built
+# ground) so it reads clearly as its own flat surface without competing
+# visually with the saturated colors every other demo material in this
+# project already uses.
+
+newmtl Plane
+Kd 0.65 0.65 0.65
+Ka 0.65 0.65 0.65
+Ks 0.15 0.15 0.15
+Ns 8.0

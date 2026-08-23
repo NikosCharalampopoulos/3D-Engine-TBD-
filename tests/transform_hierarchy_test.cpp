@@ -236,6 +236,114 @@ int main() {
                               "without hanging/crashing, and produces a finite matrix");
     }
 
+    // --- Phase 14f: destroyEntityOrphaningChildren() orphans direct
+    // children to their own current WORLD position -------------------------
+    // parent (rotated + translated) -> child (a local offset) -- the child's
+    // world position before deletion is parent's world matrix applied to its
+    // own local position, exactly what resolveWorldMatrix() already computes
+    // elsewhere in this file. After destroying `parent`, `child` must (a)
+    // become a root (no Parent component at all) and (b) keep that exact
+    // world position as its own new LOCAL position -- i.e. it must not
+    // visibly jump, even though its old local position was relative to a
+    // parent transform that no longer exists.
+    {
+        engine::EntityRegistry registry;
+
+        const engine::EntityId parent = registry.create();
+        engine::Transform& parentTransform = registry.addComponent<engine::Transform>(parent);
+        parentTransform.setPosition(glm::vec3(5.0f, 0.0f, 0.0f));
+        parentTransform.setRotation(glm::angleAxis(glm::radians(90.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
+
+        const engine::EntityId child = registry.create();
+        engine::Transform& childTransform = registry.addComponent<engine::Transform>(child);
+        childTransform.setPosition(glm::vec3(1.0f, 0.0f, 0.0f));
+        registry.addComponent<engine::Parent>(child, engine::Parent{parent});
+
+        const glm::vec3 childWorldPositionBeforeDelete =
+            glm::vec3(engine::resolveWorldMatrix(registry, child) * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        // Sanity: with a 90-degree Y rotation applied to the parent, the
+        // child's world position must actually differ from its raw local
+        // position (1,0,0) -- otherwise this test wouldn't be exercising the
+        // "world, not local" distinction destroyEntityOrphaningChildren()
+        // exists to get right.
+        expectTrue(glm::distance(childWorldPositionBeforeDelete, childTransform.position()) > 0.5f,
+                   "sanity: child's pre-delete world position differs from its raw local position (parent rotation "
+                   "actually matters here)");
+
+        engine::destroyEntityOrphaningChildren(registry, parent);
+
+        expectTrue(registry.getComponent<engine::Transform>(parent) == nullptr,
+                   "the deleted parent has no Transform (and every other component) left in the registry");
+        expectTrue(registry.getComponent<engine::Parent>(child) == nullptr,
+                   "the orphaned child no longer has a Parent component -- it is a real root now");
+        expectTrue(registry.getComponent<engine::Transform>(child) != nullptr,
+                   "the orphaned child still has its own Transform (only re-pointed, not destroyed)");
+        expectVec3Near(registry.getComponent<engine::Transform>(child)->position(), childWorldPositionBeforeDelete,
+                       "the orphaned child's new LOCAL position equals its OLD WORLD position -- no visible jump");
+        // Re-derived through resolveWorldMatrix() itself (not just reading
+        // the stored Transform field directly, above) -- proves the
+        // now-parentless child is actually treated as a root end-to-end
+        // (no leftover Parent component silently still being consulted),
+        // not merely that its Transform's own fields happen to hold the
+        // right numbers. Comparing the transformed ORIGIN point rather than
+        // the raw matrix: the child's decomposed rotation now also carries
+        // the parent's own former 90-degree rotation (it must -- that
+        // rotation was genuinely part of the child's pre-delete world
+        // orientation too, not just its position), so the matrix itself is
+        // NOT a pure translation; the origin point is still unaffected by
+        // rotating/scaling about itself, so this remains an exact check of
+        // world POSITION specifically, independent of that carried-over
+        // rotation.
+        const glm::vec3 childWorldOriginAfterOrphan =
+            glm::vec3(engine::resolveWorldMatrix(registry, child) * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        expectVec3Near(childWorldOriginAfterOrphan, childWorldPositionBeforeDelete,
+                       "resolveWorldMatrix() on the now-root child reproduces its pre-delete world position exactly");
+    }
+
+    // --- Phase 14f: only DIRECT children are orphaned; a grandchild stays
+    // parented under its own (now-orphaned) parent -------------------------
+    {
+        engine::EntityRegistry registry;
+
+        const engine::EntityId grandparent = registry.create();
+        registry.addComponent<engine::Transform>(grandparent).setPosition(glm::vec3(10.0f, 0.0f, 0.0f));
+
+        const engine::EntityId middleChild = registry.create();
+        registry.addComponent<engine::Transform>(middleChild).setPosition(glm::vec3(1.0f, 0.0f, 0.0f));
+        registry.addComponent<engine::Parent>(middleChild, engine::Parent{grandparent});
+
+        const engine::EntityId grandchild = registry.create();
+        registry.addComponent<engine::Transform>(grandchild).setPosition(glm::vec3(0.0f, 1.0f, 0.0f));
+        registry.addComponent<engine::Parent>(grandchild, engine::Parent{middleChild});
+
+        engine::destroyEntityOrphaningChildren(registry, grandparent);
+
+        expectTrue(registry.getComponent<engine::Transform>(grandparent) == nullptr,
+                   "grandparent itself is destroyed");
+        expectTrue(registry.getComponent<engine::Parent>(middleChild) == nullptr,
+                   "middleChild (a DIRECT child of the deleted entity) is orphaned to root");
+        const engine::Parent* grandchildParent = registry.getComponent<engine::Parent>(grandchild);
+        expectTrue(grandchildParent != nullptr && grandchildParent->id == middleChild,
+                   "grandchild (only an INDIRECT descendant) keeps its own existing Parent link to middleChild, "
+                   "untouched by grandparent's deletion");
+    }
+
+    // --- Phase 14f: an entity with no children at all still destroys
+    // cleanly (no children to orphan is not a special/error case) ----------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId lonely = registry.create();
+        registry.addComponent<engine::Transform>(lonely);
+        registry.addComponent<engine::NameComponent>(lonely, engine::NameComponent{"lonely"});
+
+        engine::destroyEntityOrphaningChildren(registry, lonely);
+
+        expectTrue(registry.getComponent<engine::Transform>(lonely) == nullptr,
+                   "a childless entity's own Transform is gone after destroyEntityOrphaningChildren()");
+        expectTrue(registry.getComponent<engine::NameComponent>(lonely) == nullptr,
+                   "a childless entity's own NameComponent is gone too (every pool, not just Transform/Parent)");
+    }
+
     if (failures == 0) {
         std::printf("transform_hierarchy_test: all checks passed\n");
         return EXIT_SUCCESS;

@@ -1,0 +1,12 @@
+# Phase 14f: material for assets/models/sphere.obj -- the editor Create
+# menu's "Sphere" primitive. A cool teal-green, distinct from the existing
+# demo materials this project already has checked in (falling_cube.mtl's
+# yellow; scene.mtl's brown/blue/red -- see those files) so a freshly
+# created sphere reads as its own distinct object in a headless screenshot,
+# not a shade that could be mistaken for an existing entity.
+
+newmtl Sphere
+Kd 0.15 0.60 0.50
+Ka 0.15 0.60 0.50
+Ks 0.35 0.35 0.35
+Ns 48.0

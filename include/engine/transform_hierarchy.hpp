@@ -114,6 +114,59 @@ constexpr int kMaxParentChainDepth = 64;
 // those call sites without changing that fallback's own behavior.
 glm::mat4 resolveWorldMatrix(EntityRegistry& registry, EntityId id);
 
+// Phase 14f: the editor's real "Delete Object" action -- destroys `id` (via
+// ecs.hpp's own EntityRegistry::destroyEntity(), the generic, Parent-unaware
+// primitive that removes an entity from every component pool that currently
+// exists, see that function's own comment) while ALSO deciding what happens
+// to any entities parented directly under it (a Parent component whose
+// `id` field equals this `id`) -- the one thing destroyEntity() itself can't
+// do, since ecs.hpp deliberately has no idea Parent (this file's own
+// component) exists at all.
+//
+// --- Orphan-to-root, not cascading delete -----------------------------
+// This phase's own design choice: a deleted entity's direct children are
+// ORPHANED (promoted to top-level roots), never destroyed along with it.
+// Cascading delete (removing every descendant too) is equally defensible in
+// the abstract, but orphaning is the safer default for an interactive
+// editor specifically: a user who deletes one entity and only then notices
+// it had children loses exactly that one entity, not an entire subtree they
+// may not have realized was nested underneath it -- there is no "undo" in
+// this editor yet (a real, separate scope this phase doesn't take on), so
+// the recoverable mistake (re-parent the orphaned children back, or delete
+// them too, deliberately, one at a time) is preferable to the
+// unrecoverable one (an unintended cascading wipeout). This mirrors
+// resolveWorldMatrix()'s and buildSceneTree()'s own existing "a dangling
+// Parent::id is an effective root, not an error" treatment (see this
+// file's and scene_hierarchy.hpp's own header comments) -- orphaning here
+// is that exact same end state, just reached deliberately (by removing the
+// child's own Parent component outright) instead of incidentally (by
+// leaving a Parent that now dangles).
+//
+// --- Orphaned children keep their current WORLD position, not their old
+// LOCAL one -----------------------------------------------------------
+// A naive "just remove the Parent component" would silently reinterpret
+// each child's existing LOCAL transform (relative to the now-destroyed
+// parent) as its new WORLD transform -- visibly teleporting it the instant
+// the parent's own accumulated transform stops being composed in. Instead,
+// this function resolves each direct child's current WORLD transform
+// (resolveWorldMatrix(), while `id` -- the soon-to-be-destroyed parent --
+// is still present to resolve against) BEFORE `id` is destroyed, decomposes
+// that matrix back into position/rotation/scale (glm::decompose(), see
+// transform_hierarchy.cpp's own comment on why that's safe for every
+// transform this engine's own UI can actually produce), and overwrites the
+// child's own Transform with that decomposed result -- so the child visibly
+// stays exactly where it was an instant ago, now simply no longer riding
+// along with a parent that no longer exists, exactly the "keeping their own
+// current world position" behavior this phase's own brief calls for.
+//
+// Only DIRECT children (Parent.id == id) are touched -- a grandchild
+// parented under one of those direct children keeps its own existing Parent
+// link untouched (still pointing at that now-orphaned, but very much still
+// alive, direct child), so only the one level actually affected by `id`'s
+// removal changes at all; the rest of the subtree keeps moving together
+// exactly as before, just rooted one level higher up than it used to be.
+void destroyEntityOrphaningChildren(EntityRegistry& registry, EntityId id);
+
 }  // namespace engine
 
 #endif  // ENGINE_TRANSFORM_HIERARCHY_HPP

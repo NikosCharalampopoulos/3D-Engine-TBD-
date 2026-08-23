@@ -653,6 +653,35 @@ private:
     // comment) unless ENGINE_SHOW_DEBUG_UI was set at startup.
     void renderDebugUI();
 
+    // Phase 14f: the Scene panel's Create menu's real implementation --
+    // called from render() whenever editorUI_.renderDockspaceShell() returns
+    // something other than CreateEntityKind::kNone (a menu item was clicked
+    // this frame), and also directly from the constructor for
+    // ENGINE_DEBUG_CREATE (see that env var's own comment in application.cpp)
+    // so a headless run without a real mouse can exercise this exact same
+    // production code path instead of a parallel hand-rolled one -- the same
+    // "debug env var calls the real function the UI calls" precedent
+    // ENGINE_DEBUG_FORCE_STATIC/_DYNAMIC already established for
+    // setEntityStatic() (physics.hpp).
+    //
+    // Builds a new entity via registry_.create() + addComponent<Transform>
+    // (positioned a fixed distance in front of camera_'s current facing
+    // direction, floored at a minimum height so it can never spawn
+    // partially buried in the ground plane -- see application.cpp's own
+    // kCreateEntityDistanceFromCamera/kCreateEntityMinHeight) +
+    // addComponent<NameComponent> (an auto-generated, DE-DUPLICATED name --
+    // "Cube", then "Cube (1)", "Cube (2)", ... the first time "Cube" is
+    // already taken by an existing NameComponent -- see
+    // application.cpp's own uniqueEntityName()) + (for Cube/Sphere/Plane,
+    // not Empty) addComponent<ModelComponent> loading the matching checked-in
+    // asset (assets/models/falling_cube.obj / sphere.obj / plane.obj)
+    // through the ordinary resources_.getModel() cache, exactly like every
+    // other Model this class ever loads -- no new "procedural mesh" engine
+    // plumbing, see model.hpp's own Phase 14f comment for why. A no-op for
+    // CreateEntityKind::kNone (defensive only -- every real call site above
+    // already filters that out before calling this).
+    void spawnEntityFromCreateMenu(CreateEntityKind kind);
+
     // Phase 9: one sphere in the PBR test-grid -- its own placement
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
     // differ per instance; the mesh geometry itself, sphereMesh_, is shared

@@ -49,15 +49,32 @@
 // itself, this file is where to replace it -- the same way this file
 // replaced entity.hpp.
 //
-// Component pools are stored type-erased (std::shared_ptr<void>, keyed by
-// std::type_index) inside EntityRegistry so pool<T>() can be a template that
-// works for any T a caller defines, without EntityRegistry needing a
-// hardcoded member per component type. shared_ptr (not unique_ptr) only
-// because std::unordered_map's mapped type has to be one concrete,
-// copy/move-constructible-on-rehash type -- unique_ptr<void> would technically
-// work too (it's movable), but shared_ptr<void> is the more common idiom for
-// this exact pattern and costs nothing extra here (exactly one owner, the
-// map itself, ever holds a reference).
+// Component pools are stored type-erased (std::shared_ptr<ComponentPoolBase>,
+// keyed by std::type_index) inside EntityRegistry so pool<T>() can be a
+// template that works for any T a caller defines, without EntityRegistry
+// needing a hardcoded member per component type. shared_ptr (not unique_ptr)
+// only because std::unordered_map's mapped type has to be one concrete,
+// copy/move-constructible-on-rehash type -- unique_ptr<ComponentPoolBase>
+// would technically work too (it's movable), but shared_ptr is the more
+// common idiom for this exact pattern and costs nothing extra here (exactly
+// one owner, the map itself, ever holds a reference).
+//
+// Phase 14f: this was originally shared_ptr<void> -- a genuinely type-erased
+// handle with no member functions of its own at all, only ever
+// static_pointer_cast<ComponentPool<T>>'d back to something callable. That
+// was enough until this phase needed one new capability no void* can ever
+// provide: EntityRegistry::destroyEntity(EntityId), which has to remove a
+// given entity from EVERY pool in this map, whatever concrete T each one
+// happens to hold -- something no caller had needed before (see
+// EntityId's own header comment on why real entity destruction didn't exist
+// until now). shared_ptr<void> can't call a T-specific remove(EntityId)
+// without EntityRegistry first knowing every T that's ever been registered
+// (defeating the whole "new component type needs no EntityRegistry change"
+// point of this design) -- so pools_ now holds shared_ptr<ComponentPoolBase>
+// instead: a minimal polymorphic base with exactly one virtual method
+// (remove(EntityId)) every ComponentPool<T> already needed to provide
+// anyway. See ComponentPoolBase's own comment (below) for the full
+// alternative-designs-considered writeup.
 
 #include <cstddef>
 #include <cstdint>
@@ -75,15 +92,23 @@ class Model;
 
 // An opaque handle to an entity: nothing but an index into whatever
 // component pools happen to hold data for it. Deliberately no generation/
-// recycling counter -- this engine only ever creates entities (nothing calls
-// a "destroy this entity" that would free its index for reuse today), so the
-// classic ECS "stale handle into a recycled index" hazard can't happen yet:
-// EntityRegistry::create()'s indices increase monotonically and are never
-// recycled. A later phase that adds real entity destruction (and wants an
-// old handle to a destroyed-then-recycled index to fail safely rather than
-// silently pointing at a different, newer entity) is the right place to add
-// a generation field -- adding one now, unused, would be exactly the kind of
-// speculative complexity this engine's own established style avoids.
+// recycling counter -- EntityRegistry::create()'s indices increase
+// monotonically and are NEVER recycled, even after Phase 14f's
+// destroyEntity() below removes an entity from every pool that held it: a
+// destroyed index's slot in each ComponentPool is gone, but nextIndex_ never
+// steps backward or reuses it, so the classic ECS "stale handle into a
+// recycled index silently now points at a different, newer entity" hazard
+// still can't happen -- a stale EntityId after destroyEntity() instead reads
+// as "valid() == true, but getComponent<T>() returns nullptr for every T",
+// which every existing call site already treats safely today (see e.g.
+// Application's own Phase 14e "Selected entity no longer has a Transform"
+// Inspector fallback, editor_ui.cpp) rather than as a hard error. A
+// generation field would only start earning its keep if this engine ever
+// recycled indices to bound memory growth from repeated create()/
+// destroyEntity() churn -- not a problem this project's own entity counts
+// (a handful, hand-authored or user-created through the editor) have ever
+// approached, so that stays exactly the kind of speculative complexity this
+// engine's own established style avoids until it's a real need.
 class EntityId {
 public:
     EntityId() = default;
@@ -100,6 +125,48 @@ private:
     std::uint32_t index_ = kInvalid;
 };
 
+// Phase 14f: a type-erased base every ComponentPool<T> inherits from, so
+// EntityRegistry::destroyEntity() below can call remove(id) on EVERY pool it
+// owns -- whatever T happens to be -- without knowing any of those T's at
+// compile time. This is the piece Phase 8a's own header comment (further up
+// this file) flagged as deliberately not built yet ("nothing calls a
+// 'destroy this entity' that would free its index for reuse today"): pools_
+// was a std::unordered_map<std::type_index, std::shared_ptr<void>>, and
+// void* has no remove() to call -- there was no generic way to reach into
+// every pool from one loop. Two designs were available to close that gap:
+//   (a) this one -- a small polymorphic base, pools_ upgraded to hold
+//       shared_ptr<ComponentPoolBase> instead of shared_ptr<void>, so
+//       destroyEntity() is a one-line loop calling a virtual function; or
+//   (b) a parallel std::vector<std::function<bool(EntityId)>> of type-erased
+//       erasure callbacks, one recorded the first time each component type's
+//       pool is created (in pool<T>() below), that destroyEntity() would
+//       loop over instead.
+// (a) was chosen: pools_ already exists and already needs a per-type-erased
+// handle stored once per type (exactly what a vtable pointer already gives
+// for free) -- reusing that one map instead of also maintaining a second,
+// parallel list of callbacks that must never drift out of sync with it is
+// less to keep consistent, and virtual dispatch is the ordinary C++ idiom
+// for "call the right T-specific behavior through a type-erased handle",
+// not a novel mechanism this codebase would be introducing just for this.
+// ComponentPoolBase itself stays otherwise empty (destroyEntity() is the
+// only caller that needs to reach a pool generically) rather than growing
+// has()/size() virtuals too -- ecs.hpp's own established style avoids
+// speculative API surface nothing yet calls (see NameComponent's own
+// "nothing at runtime reads this" comment for the same instinct applied to
+// a field instead of a method).
+class ComponentPoolBase {
+public:
+    virtual ~ComponentPoolBase() = default;
+
+    // Removes `id` from this pool if present; a no-op (returns false) if
+    // this pool never held a component for `id` in the first place -- the
+    // overwhelmingly common case destroyEntity() hits on every pool except
+    // the handful of component types the destroyed entity actually had, so
+    // this must be cheap and side-effect-free to call speculatively on every
+    // pool in the registry, not just the ones known in advance to apply.
+    virtual bool remove(EntityId id) = 0;
+};
+
 // One component type's storage: a dense std::vector<T> (data_), a parallel
 // std::vector<EntityId> of which entity owns each dense slot (owners_), and
 // a sparse entity-index -> dense-slot map (sparse_) so get()/has()/remove()
@@ -111,8 +178,15 @@ private:
 // EntityRegistry::each() below) and a linear scan there would make every
 // render() pass O(entities^2) as this scene's entity count grows (two as of
 // Phase 8e, up from Phase 8a's original one).
+//
+// Phase 14f: now inherits ComponentPoolBase (above) purely so
+// EntityRegistry::pools_ can hold a shared_ptr<ComponentPoolBase> and
+// destroyEntity() can call remove(id) on every pool generically -- see
+// ComponentPoolBase's own comment for the full design rationale. Nothing
+// about this class's own remove(EntityId) signature/behavior changes; it
+// simply now satisfies (and is called through) an interface too.
 template <typename T>
-class ComponentPool {
+class ComponentPool : public ComponentPoolBase {
 public:
     T& add(EntityId id, T value) {
         auto it = sparse_.find(id.index());
@@ -137,7 +211,7 @@ public:
 
     bool has(EntityId id) const { return sparse_.find(id.index()) != sparse_.end(); }
 
-    bool remove(EntityId id) {
+    bool remove(EntityId id) override {
         auto it = sparse_.find(id.index());
         if (it == sparse_.end()) {
             return false;
@@ -227,10 +301,10 @@ public:
     EntityRegistry() = default;
 
     // Not copied or moved -- same reasoning as ResourceManager (see
-    // resource_manager.hpp): pools are stored as shared_ptr<void> keyed by
-    // the pool's own type, and nothing in this engine needs to duplicate or
-    // relocate a whole registry out from under callers that hold EntityIds
-    // into it.
+    // resource_manager.hpp): pools are stored as shared_ptr<ComponentPoolBase>
+    // keyed by the pool's own type, and nothing in this engine needs to
+    // duplicate or relocate a whole registry out from under callers that
+    // hold EntityIds into it.
     EntityRegistry(const EntityRegistry&) = delete;
     EntityRegistry& operator=(const EntityRegistry&) = delete;
     EntityRegistry(EntityRegistry&&) = delete;
@@ -268,12 +342,53 @@ public:
         return pool<T>().remove(id);
     }
 
+    // Phase 14f: removes `id` from EVERY component pool this registry
+    // currently owns -- i.e. every component type any entity has ever had
+    // addComponent<T>() called for, on this registry, before now (pool<T>()
+    // below lazily creates a type's pool the first time it's touched, and
+    // that pool then lives in pools_ for the registry's whole lifetime, even
+    // once empty) -- closing exactly the gap Phase 8a's own header comment
+    // flagged: there was previously no way to delete a whole entity across
+    // every component type it might have, only removeComponent<T>() one type
+    // at a time, which silently breaks the day a new component type is added
+    // and some call site forgets to also remove it there. This is generic on
+    // purpose: a future component type someone adds by calling
+    // addComponent<NewType>(...) (ecs.hpp's own established "no
+    // EntityRegistry change needed" contract, see this file's top comment)
+    // is automatically covered here too, with no edit to this function
+    // required -- see ComponentPoolBase's own comment for the mechanism
+    // (virtual remove(EntityId) dispatch) that makes that true.
+    //
+    // A no-op on an id this registry never actually created (or one already
+    // destroyed) -- every pool's own remove(id) already tolerates "id not
+    // present" as a plain false return (see ComponentPool::remove() above),
+    // so there is nothing here to guard against calling this twice on the
+    // same id, or on an EntityId that was never valid to begin with.
+    //
+    // Deliberately does NOT know about Parent (transform_hierarchy.hpp) or
+    // any other higher-level relationship between entities -- ecs.hpp has no
+    // #include of transform_hierarchy.hpp and must not gain one (Phase 8a's
+    // own "entities are opaque, components are opt-in, this file is the one
+    // place a new component type never has to touch" layering would break
+    // the moment ecs.hpp depended on one specific component's own header).
+    // A caller that also needs to decide what happens to a destroyed
+    // entity's CHILDREN (orphan vs. cascade) wants
+    // transform_hierarchy.hpp's own destroyEntityOrphaningChildren() instead
+    // of calling this directly -- see that function's own header comment for
+    // the full orphan-vs-cascade design this phase settled on. This function
+    // is the generic, Parent-unaware primitive that one is built on top of.
+    void destroyEntity(EntityId id) {
+        for (auto& [type, pool] : pools_) {
+            pool->remove(id);
+        }
+    }
+
     // Direct pool access, for a caller that only needs to walk one component
     // type itself rather than the (T, look-up-a-second-component) pattern
     // each() below covers.
     template <typename T>
     ComponentPool<T>& pool() {
-        std::shared_ptr<void>& slot = pools_[std::type_index(typeid(T))];
+        std::shared_ptr<ComponentPoolBase>& slot = pools_[std::type_index(typeid(T))];
         if (!slot) {
             slot = std::make_shared<ComponentPool<T>>();
         }
@@ -309,7 +424,15 @@ private:
     }
 
     std::uint32_t nextIndex_ = 0;
-    std::unordered_map<std::type_index, std::shared_ptr<void>> pools_;
+    // Phase 14f: shared_ptr<ComponentPoolBase>, not shared_ptr<void> -- see
+    // ComponentPoolBase's own comment above for why this changed and
+    // destroyEntity()'s own comment for the one new thing it lets this class
+    // do. shared_ptr (still, not unique_ptr) for the exact same reason this
+    // member's own pre-Phase-14f comment already gave: the map's mapped type
+    // has to be one concrete, copy/move-constructible-on-rehash type, and
+    // shared_ptr is the more common idiom for this pattern even though
+    // exactly one owner (this map) ever holds a reference.
+    std::unordered_map<std::type_index, std::shared_ptr<ComponentPoolBase>> pools_;
 };
 
 }  // namespace engine

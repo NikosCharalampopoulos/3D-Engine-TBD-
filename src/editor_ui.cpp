@@ -29,6 +29,7 @@
 #include "engine/scene_hierarchy.hpp"
 #include "engine/texture.hpp"
 #include "engine/transform.hpp"
+#include "engine/transform_hierarchy.hpp"
 
 namespace engine {
 
@@ -166,6 +167,71 @@ void addCornerBrackets(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight,
         drawList->AddLine(corner, ImVec2(corner.x + (armX[i] * kArmLength), corner.y), color, kThickness);
         drawList->AddLine(corner, ImVec2(corner.x, corner.y + (armY[i] * kArmLength)), color, kThickness);
     }
+}
+
+// Phase 14f: the Scene panel's Create menu -- its own item list, shared
+// between the "+" button's popup and the panel's right-click-background
+// popup (both open the SAME popup id -- see renderDockspaceShell()'s own
+// Phase 14f comment below for how). Returns whichever CreateEntityKind
+// (editor_ui.hpp) was clicked THIS call, or kNone the overwhelmingly common
+// case: nothing clicked, including every frame this menu isn't even open
+// (ImGui::MenuItem() itself is only ever true on the exact frame it's
+// clicked). Doesn't call ImGui::CloseCurrentPopup() itself -- ImGui already
+// closes a popup automatically the instant one of its own MenuItem()s is
+// clicked, the default behavior this engine's other popups (if any existed
+// yet) would already rely on too.
+CreateEntityKind renderCreateEntityMenuItems() {
+    CreateEntityKind result = CreateEntityKind::kNone;
+
+    if (ImGui::MenuItem("Cube")) {
+        result = CreateEntityKind::kCube;
+    }
+    if (ImGui::MenuItem("Sphere")) {
+        result = CreateEntityKind::kSphere;
+    }
+    if (ImGui::MenuItem("Plane")) {
+        result = CreateEntityKind::kPlane;
+    }
+    if (ImGui::MenuItem("Empty / New Folder")) {
+        result = CreateEntityKind::kEmpty;
+    }
+
+    ImGui::Separator();
+
+    // Shown (matching the originally approved mockup) but disabled, not
+    // omitted -- see editor_ui.hpp's own CreateEntityKind comment for the
+    // full "why deferred" reasoning: a real Point/Directional Light or
+    // Camera entity needs a genuinely new ECS component type (and, for
+    // lights, rewiring basic.frag/pbr.frag's shading to read from the ECS
+    // instead of application.cpp's existing fixed kPointLights/kSpotLights
+    // arrays; for a camera, an "which entity is the active camera" concept
+    // this engine has no notion of anywhere today) -- real, substantial,
+    // separate scope well beyond "add a menu item", so this phase declines
+    // to half-build either. Same BeginDisabled()-plus-explanatory-tooltip
+    // treatment this project's own Inspector already established for
+    // "Browse..." (Phase 14e, material.hpp) and, until this very phase,
+    // "Delete Object" itself -- ImGui::BeginDisabled() makes the item itself
+    // unclickable (no dangling half-wired handler to accidentally trigger),
+    // while ImGuiHoveredFlags_AllowWhenDisabled lets IsItemHovered() still
+    // report a hover on a disabled item so the tooltip below still shows.
+    const auto disabledCreateMenuItem = [](const char* label, const char* tooltip) {
+        ImGui::BeginDisabled();
+        ImGui::MenuItem(label);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", tooltip);
+        }
+    };
+    disabledCreateMenuItem("Point Light",
+                            "Not implemented yet -- needs a new Light ECS component plus shading-pipeline "
+                            "wiring. A natural follow-up to Phase 14f, not yet a numbered phase.");
+    disabledCreateMenuItem("Directional Light",
+                            "Not implemented yet -- same reasoning as \"Point Light\" above.");
+    disabledCreateMenuItem("Camera",
+                            "Not implemented yet -- needs a Camera ECS component and an \"active camera\" "
+                            "concept this engine doesn't have yet.");
+
+    return result;
 }
 
 // Phase 14e: the Inspector panel's real content -- replaces the placeholder
@@ -374,15 +440,36 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
     }
 
     ImGui::Separator();
-    // Real deletion is Phase 14f's job -- see this phase's own "What NOT to
-    // do" brief. Shown greyed-out (not omitted) purely for visual
-    // completeness against the approved mockup; BeginDisabled()/EndDisabled()
-    // makes ImGui itself reject any click, so there is no dangling
-    // "does nothing" click handler to accidentally wire up later.
-    ImGui::BeginDisabled();
-    ImGui::Button("Delete Object");
-    ImGui::EndDisabled();
-    ImGui::TextDisabled("Deletion is Phase 14f.");
+    // Phase 14f: real deletion. destroyEntityOrphaningChildren()
+    // (transform_hierarchy.hpp) removes `id` from EVERY component pool that
+    // currently exists (ecs.hpp's own generic EntityRegistry::
+    // destroyEntity()) after first orphaning any direct children to their
+    // own current world transform -- see that function's own header comment
+    // for the full orphan-vs-cascade design this phase settled on (and
+    // README.md's own Phase 14f section for the short version).
+    //
+    // `selectedEntity` is cleared in the SAME click, immediately after --
+    // not left for next frame's defensive "Selected entity no longer has a
+    // Transform" branch (this function's own early-return above, added
+    // Phase 14e specifically anticipating this) to catch. That branch stays
+    // exactly as it was regardless (a real, still-useful safety net for any
+    // OTHER way selectedEntity could ever end up stale), but relying on it
+    // here instead of clearing eagerly would leave the Inspector showing a
+    // "no longer has a Transform" message for one full frame after a delete
+    // rather than immediately falling back to its normal "nothing selected"
+    // placeholder -- a needless, avoidable flash of the wrong message when
+    // the right one is one line away.
+    //
+    // This is the LAST thing renderInspectorPanel() does: nothing below (in
+    // fact, nothing else in this function at all, after this) reads `id`/
+    // `transform`/`modelComponent`/`nameComponent`/etc. again this call, so
+    // clicking Delete here can safely mutate `registry` out from under those
+    // now-stale local pointers without any further use-after-free risk
+    // within this same invocation.
+    if (ImGui::Button("Delete Object")) {
+        destroyEntityOrphaningChildren(registry, id);
+        selectedEntity.reset();
+    }
 }
 
 }  // namespace
@@ -472,8 +559,9 @@ void EditorUI::buildInitialLayout(ImGuiID dockspaceId) {
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
-void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
-                                     std::optional<EntityId>& selectedEntity, const SelectionOutline* outline) {
+CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
+                                                 std::optional<EntityId>& selectedEntity,
+                                                 const SelectionOutline* outline) {
     // DockSpaceOverViewport() is the built-in "just cover the whole main
     // viewport" helper (creates its own invisible host window internally) --
     // simpler than manually building a host window + ImGui::DockSpace()
@@ -495,8 +583,40 @@ void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityReg
         layoutBuilt_ = true;
     }
 
+    // Phase 14f: this frame's Create-menu request, if any -- see
+    // renderCreateEntityMenuItems()'s own comment above and
+    // editor_ui.hpp's own CreateEntityKind comment for why this is returned
+    // from this whole function rather than acted on here (EditorUI has no
+    // ResourceManager/Shader/Camera to build a new entity from -- only
+    // Application does).
+    CreateEntityKind createRequest = CreateEntityKind::kNone;
+
     ImGui::Begin("Scene");
     {
+        // Phase 14f: the Create menu -- a small "+" button plus, reaching
+        // the exact same popup, a right-click anywhere else in this panel's
+        // own background (ImGuiPopupFlags_NoOpenOverItems keeps a
+        // right-click ON an existing tree row from ALSO opening this menu,
+        // so that row's own click-to-select handling (renderSceneTreeNode()
+        // above) stays completely undisturbed -- confirmed by this phase's
+        // own headless verification, not just assumed). Both share one popup id
+        // ("SceneCreateMenu"): ImGui::OpenPopup() and
+        // BeginPopupContextWindow() each independently compute that id as
+        // `ImGui::GetCurrentWindow()->GetID("SceneCreateMenu")` -- the same
+        // current window (this "Scene" Begin/End block) both calls run
+        // inside -- so they resolve to the same popup regardless of which
+        // one actually triggers it opening this frame.
+        if (ImGui::SmallButton("+ Create")) {
+            ImGui::OpenPopup("SceneCreateMenu");
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(right-click for the same menu)");
+        if (ImGui::BeginPopupContextWindow("SceneCreateMenu", ImGuiPopupFlags_NoOpenOverItems)) {
+            createRequest = renderCreateEntityMenuItems();
+            ImGui::EndPopup();
+        }
+        ImGui::Separator();
+
         // Phase 14d: rebuilt fresh every frame -- this engine's own scene has
         // a handful of entities (three today, see assets/scenes/default.json),
         // so there is no reason to cache/diff buildSceneTree()'s own small
@@ -615,6 +735,8 @@ void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityReg
     ImGui::Begin("Inspector");
     renderInspectorPanel(registry, selectedEntity);
     ImGui::End();
+
+    return createRequest;
 }
 
 void EditorUI::render() {

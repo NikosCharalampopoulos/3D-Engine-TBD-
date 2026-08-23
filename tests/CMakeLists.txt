@@ -94,3 +94,19 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME scene_hierarchy_test COMMAND scene_hierarchy_test)
+
+# Phase 14f adds ecs_test, testing engine::EntityRegistry::destroyEntity()
+# (include/engine/ecs.hpp) in isolation. Unlike every test target above, this
+# links NO extra src/*.cpp file at all -- ecs.hpp is entirely header-only/
+# templated (see its own header comment), so there is no matching
+# src/ecs.cpp for a test of it to link against; the header alone is the
+# whole implementation under test.
+add_executable(ecs_test
+    ecs_test.cpp
+)
+target_include_directories(ecs_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(ecs_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME ecs_test COMMAND ecs_test)

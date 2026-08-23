@@ -5,6 +5,17 @@
 
 #include "engine/transform_hierarchy.hpp"
 
+// Phase 14f: destroyEntityOrphaningChildren()'s own comment (transform_hierarchy.hpp)
+// explains WHY each orphaned child's world transform is decomposed back into
+// position/rotation/scale; glm::decompose() (an "experimental" -- i.e. not
+// yet API-frozen, not unstable/buggy -- GLM extension, hence the explicit
+// opt-in macro below) is what actually does that decomposition. Defined only
+// in this .cpp, not transform_hierarchy.hpp, so the experimental-API opt-in
+// doesn't leak into every other translation unit that merely #includes this
+// header.
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/matrix_decompose.hpp>
+
 #include <cstdint>
 #include <unordered_set>
 #include <vector>
@@ -142,6 +153,86 @@ glm::mat4 resolveWorldMatrix(EntityRegistry& registry, EntityId id) {
         world = world * (*it);
     }
     return world;
+}
+
+void destroyEntityOrphaningChildren(EntityRegistry& registry, EntityId id) {
+    // Every direct child's id plus its CURRENT world transform, snapshotted
+    // BEFORE `id` is destroyed below (resolveWorldMatrix() needs `id`'s own
+    // Transform, still present at this point, to compose each child's world
+    // matrix) and applied AFTER the snapshot loop finishes, not inside it --
+    // mutating a ComponentPool<Parent>/<Transform> (via removeComponent()/
+    // getComponent() below) while registry.each<Parent>() is still iterating
+    // that same pool's own dense storage would be exactly the "mutate a
+    // container mid-iteration" bug ComponentPool's sparse-set doesn't
+    // protect against (each<T>() indexes by position, and remove() below can
+    // move a different entity's data into the slot the iterator hasn't
+    // visited yet, or shrink the very range it's iterating).
+    struct Orphan {
+        EntityId id;
+        glm::vec3 position;
+        glm::quat rotation;
+        glm::vec3 scale;
+    };
+    std::vector<Orphan> orphans;
+
+    registry.each<Parent>([&](EntityId childId, Parent& parent) {
+        if (parent.id != id) {
+            return;
+        }
+
+        const glm::mat4 world = resolveWorldMatrix(registry, childId);
+
+        // glm::decompose() can fail (returns false) for a fully degenerate
+        // matrix, e.g. one with a zero-volume scale on some axis -- not
+        // reachable through any path this engine's own editor UI can
+        // currently produce (the Inspector's Scale field is clamped to
+        // [0.01, 100], see editor_ui.cpp's Phase 14e comment), but checked
+        // rather than assumed since this is exactly the kind of "should
+        // never happen, but don't silently misbehave if it somehow does"
+        // case this codebase consistently guards elsewhere (see e.g.
+        // resolveWorldMatrix()'s own cycle/dangling-parent handling just
+        // above). On failure, the child is still orphaned (its Parent is
+        // still removed below) but keeps whatever LOCAL transform it
+        // already had rather than this function guessing at one -- a
+        // visible jump in this one unreachable-today edge case is strictly
+        // better than silently discarding the child's transform data or
+        // aborting the whole delete.
+        glm::vec3 scale(1.0f);
+        glm::quat rotation(1.0f, 0.0f, 0.0f, 0.0f);
+        glm::vec3 translation(0.0f);
+        glm::vec3 skew(0.0f);
+        glm::vec4 perspective(0.0f, 0.0f, 0.0f, 1.0f);
+        if (glm::decompose(world, scale, rotation, translation, skew, perspective)) {
+            // glm::decompose()'s returned quaternion is used AS-IS here, no
+            // conjugate/inverse -- confirmed, not assumed, by an offline
+            // round-trip check: build M = T * mat4_cast(rot) * S from a
+            // known non-identity rotation (this engine's own
+            // Transform::getModelMatrix() composition, transform.hpp), run
+            // it through glm::decompose(), and rebuild T' * mat4_cast(
+            // decomposedRot) * S' -- the rebuilt matrix matches M exactly
+            // (max per-element diff 0.0), while rebuilding with
+            // glm::conjugate(decomposedRot) instead does NOT (diff ~2.5).
+            orphans.push_back(Orphan{childId, translation, rotation, scale});
+        }
+    });
+
+    for (const Orphan& orphan : orphans) {
+        if (Transform* transform = registry.getComponent<Transform>(orphan.id)) {
+            transform->setPosition(orphan.position);
+            transform->setRotation(orphan.rotation);
+            transform->setScale(orphan.scale);
+        }
+        // Removes the Parent component outright (rather than leaving it set
+        // to an invalid/dangling EntityId) so this child is a REAL root from
+        // here on -- not merely relying on resolveWorldMatrix()'s/
+        // buildSceneTree()'s own dangling-parent safety net, which exists to
+        // tolerate an unexpected/buggy dangling reference, not to be this
+        // function's own primary mechanism for an entirely expected,
+        // intentional state change.
+        registry.removeComponent<Parent>(orphan.id);
+    }
+
+    registry.destroyEntity(id);
 }
 
 }  // namespace engine

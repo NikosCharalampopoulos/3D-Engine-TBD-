@@ -4221,6 +4221,246 @@ nothing.
   A clean `-DCMAKE_BUILD_TYPE=Debug` rebuild still compiles with **zero new
   warnings**.
 
+### Phase 14f: real object creation and deletion
+
+Sixth sub-phase of the "Phase 14: full editor UI" arc. Closes the two
+placeholders every earlier Phase 14 sub-phase left behind on purpose: the
+Inspector's "Delete Object" button (Phase 14e's own header comment: "real
+deletion is Phase 14f's job") is now wired to a real, generic entity
+destruction primitive, and the Scene panel gains a real Create menu
+(Cube/Sphere/Plane/Empty) -- Phase 14d's own scope was tree/selection/outline
+only, so this menu is entirely net-new, not a rewire of anything that
+already existed.
+
+- **`EntityRegistry::destroyEntity(EntityId)` -- a small polymorphic base,
+  not a parallel callback registry**: this closes a gap Phase 8a's own header
+  comment flagged from the start ("nothing calls a 'destroy this entity'...
+  a landmine for later phases") and Phase 14a's own review re-flagged.
+  `ecs.hpp`'s `pools_` map used to be `unordered_map<type_index,
+  shared_ptr<void>>` -- a `void*` has no `remove()` to call, so there was no
+  way to reach every pool generically from one loop without `EntityRegistry`
+  hardcoding a member per component type (exactly the enumeration-that-
+  silently-breaks-when-someone-adds-a-type problem this phase's own brief
+  calls out). Two designs could close it: (a) a minimal `ComponentPoolBase`
+  with one pure-virtual `remove(EntityId)`, `ComponentPool<T>` inheriting it,
+  `pools_` upgraded to `shared_ptr<ComponentPoolBase>`; or (b) a parallel
+  `vector<function<bool(EntityId)>>` of type-erased erasure callbacks
+  recorded once per type in `pool<T>()`. (a) was chosen: `pools_` already
+  needs one type-erased handle per type, and a vtable pointer gives that for
+  free -- reusing the map that already exists is less to keep in sync than
+  maintaining a second parallel list that must never drift from it, and
+  virtual dispatch is the ordinary idiom for "call the right per-type
+  behavior through a type-erased handle," not a novel mechanism. `pool<T>()`
+  itself is otherwise unchanged; `ComponentPool<T>::remove()`'s own
+  sparse-set swap-remove logic (Phase 8a) is untouched, just now also an
+  `override`. `destroyEntity(id)` itself is a two-line loop: call
+  `remove(id)` on every pool `pools_` currently holds, whatever `T` each one
+  is -- a **no-op**, not an error, on any pool the destroyed entity never had
+  a component in (the overwhelmingly common case for most pools on any given
+  call), so a future component type someone adds via
+  `addComponent<NewType>(...)` (this file's own long-established "no
+  `EntityRegistry` change needed" contract) is automatically covered here
+  too, with zero edits to `destroyEntity()` itself required. `EntityId`
+  still carries no generation counter -- indices are still never recycled
+  (`create()` only ever increments), so a stale `EntityId` after
+  `destroyEntity()` reads as "valid, but every `getComponent<T>()` returns
+  `nullptr`," which every real call site already treats safely (see Phase
+  14e's own defensive Inspector fallback, added specifically anticipating
+  this).
+- **Orphan-to-root, not cascading delete, for a deleted entity's children --
+  documented, not left implicit**: `transform_hierarchy.hpp`/`.cpp` gain
+  `destroyEntityOrphaningChildren(registry, id)`, the function the Inspector's
+  Delete button and `ENGINE_DEBUG_DELETE` (below) both actually call --
+  `ecs.hpp`'s own `destroyEntity()` deliberately knows nothing about `Parent`
+  at all (it must not `#include transform_hierarchy.hpp`, or Phase 8a's own
+  "components are opt-in, this file never needs to know about a specific
+  one" layering breaks), so deciding what happens to a deleted entity's
+  children is this function's own, one level up. **Chosen: orphan, not
+  cascade.** A deleted entity's direct children (`Parent.id == id`) become
+  top-level roots instead of being destroyed along with it. Cascading delete
+  is equally defensible in the abstract, but orphaning is the safer default
+  specifically because this editor has **no undo yet** (real, separate
+  scope) -- a user who deletes one entity and only then notices it had
+  children loses exactly that one entity, a recoverable mistake (re-parent
+  the orphans, or delete them too, deliberately), not an unrecoverable
+  cascading wipeout of a subtree they may not have realized was nested
+  underneath it. Only **direct** children are touched -- a grandchild keeps
+  its own existing `Parent` link to its (now-orphaned, still alive) parent
+  untouched, so the rest of a multi-level subtree keeps moving together
+  exactly as before, just rooted one level higher.
+- **Orphaned children keep their current WORLD position, not their old LOCAL
+  one -- no visible jump**: naively just removing a child's `Parent`
+  component would silently reinterpret its existing LOCAL transform
+  (relative to the now-gone parent) as its new WORLD transform, teleporting
+  it the instant the parent's own accumulated transform stops composing in.
+  Instead, each direct child's current world transform is resolved via the
+  existing `resolveWorldMatrix()` (Phase 14b) *before* the parent is
+  destroyed, decomposed back into position/rotation/scale via
+  `glm::decompose()` (`glm/gtx/matrix_decompose.hpp`, opted into via
+  `GLM_ENABLE_EXPERIMENTAL` only in `transform_hierarchy.cpp`, not the
+  header), and written straight into the child's own `Transform` before its
+  `Parent` component is removed. `glm::decompose()`'s own rotation
+  convention was **verified, not assumed**, with an offline round-trip probe
+  (build `M = T * mat4_cast(rot) * S` from a known non-identity rotation --
+  this engine's own `Transform::getModelMatrix()` composition -- decompose
+  it, rebuild from the decomposed values, and diff against `M`): the
+  decomposed quaternion is used **as-is**, with no conjugate/inverse (the
+  direct rebuild reproduces `M` exactly, 0.0 max per-element diff; a
+  conjugated rebuild is off by ~2.5) -- a real, checkable fact this section
+  records so nobody re-derives it by trial and error later. `tests/
+  transform_hierarchy_test.cpp` gained three new Phase 14f cases: a rotated,
+  translated parent's direct child keeps its exact pre-delete world position
+  after being orphaned (checked two ways -- the raw stored `Transform`
+  field, and re-resolving through `resolveWorldMatrix()` itself, proving the
+  now-parentless child is treated as a real root end-to-end, not just
+  numerically patched); a grandchild under a deleted grandparent stays
+  correctly parented to its own (now-orphaned) direct parent, untouched; and
+  a childless entity destroys cleanly with no special-cased "no children"
+  branch. `ctest` grows to **6/6** -- five existing targets plus a new
+  `ecs_test` (below), and `transform_hierarchy_test` itself grows from 5 to
+  8 cases.
+- **`ecs_test` -- a new test target, because `ecs.hpp` has no matching
+  `ecs.cpp` to attach a case to**: `ecs.hpp` is entirely header-only/
+  templated (every earlier phase's own test target links against some
+  `src/*.cpp` alongside its own test file -- there is no such file for
+  `ecs.hpp` to link). `tests/ecs_test.cpp` `#include`s only the header, using
+  its own small test-only component types (`Position`/`Velocity`/`Tag`) --
+  deliberately **not** `Transform`/`ModelComponent`/`NameComponent` -- so the
+  test actually exercises `destroyEntity()`'s generic, any-`T` design rather
+  than only ever proving it against this engine's own three real component
+  types. Four cases: destroying an entity clears every pool it was actually
+  in; destroying one entity leaves an *unrelated* entity's own component
+  *values* (not just presence) intact across the sparse-set swap-remove that
+  moves data on delete; destroying a component-less entity is a harmless
+  no-op that doesn't touch anything else; and calling `destroyEntity()` twice
+  on the same id is idempotent.
+- **A real Create menu -- "+ Create" button plus a matching right-click,
+  Cube/Sphere/Plane/Empty, Point Light/Directional Light/Camera shown but
+  disabled**: the Scene panel (`editor_ui.cpp`) gains a small "+ Create"
+  button, and right-clicking the panel's own background opens the identical
+  popup (`ImGui::BeginPopupContextWindow()` with
+  `ImGuiPopupFlags_NoOpenOverItems`, so right-clicking an existing tree row
+  still only selects it, undisturbed -- confirmed by headless screenshot,
+  not assumed). `EditorUI::renderDockspaceShell()` now **returns** a
+  `CreateEntityKind` (`kNone` every frame except the one a real item was
+  clicked) instead of gaining a fourth reference parameter -- `EditorUI` still
+  builds no entities itself (it has no `ResourceManager`/`Shader`/`Camera` to
+  build one from); `Application::render()` acts on a non-`kNone` return value
+  via the new `spawnEntityFromCreateMenu()`, the real production entry point
+  both the menu's own click handler and `ENGINE_DEBUG_CREATE` (below) call.
+  "Cube" reuses the existing `assets/models/falling_cube.obj` (Phase 8e) --
+  one box mesh is enough. "Sphere"/"Plane" are two new checked-in assets
+  generated by `tools/generate_primitive_meshes.py` (a UV sphere and a flat
+  quad, printed as plain OBJ text, no external mesh library -- see that
+  script's own header comment for the exact generation command and the
+  sizing rationale), loaded through the ordinary `resources_.getModel()`
+  cache exactly like every other asset -- there is no procedural-Mesh-to-
+  `Model` pathway in this engine (`Model`'s only constructor loads from a
+  file path via Assimp), and this phase deliberately doesn't invent one,
+  matching the phase brief's own "smallest, most consistent-with-existing-
+  architecture" guidance. Every generated face's winding is **verified**
+  against its own target outward normal by the generator itself (reversed in
+  the output if wrong) -- confirmed independently after generation too, with
+  a second, throwaway script that recomputes each face's geometric normal
+  from its stored vertex positions and dot-products it against the face's
+  own stored `vn`: **0 bad-winding faces, 0 degenerate faces**, across both
+  `sphere.obj` (160 faces) and `plane.obj` (1 face). "Empty" is `Transform` +
+  `NameComponent` only, no `ModelComponent` -- a real, parentable
+  organizational entity (matching the user's own earlier explicit choice of
+  real `Parent`-component grouping over a flat, non-transforming "folder"
+  concept -- see `transform_hierarchy.hpp`'s own Phase 14b header comment),
+  not a label that isn't really an entity at all. A freshly created entity is
+  positioned a fixed distance in front of the camera's current facing
+  direction, floored above the ground plane (`kCreateEntityDistanceFromCamera`/
+  `kCreateEntityMinHeight`, `application.cpp`) so it never spawns overlapping
+  existing geometry or buried in the ground, and named via a new
+  `uniqueEntityName()` helper -- `"Cube"`, then `"Cube (1)"`, `"Cube (2)"`,
+  ... the first time the base name already collides with an existing
+  `NameComponent` -- the simple "append a counter" scheme the phase brief
+  itself calls sufficient, not a bulletproof-uniqueness guarantee (matching
+  this project's own established Phase 8b tolerance for duplicate names
+  elsewhere). **Point Light/Directional Light/Camera are shown, matching the
+  originally approved mockup, but `BeginDisabled()`'d with an explanatory
+  tooltip** -- the same treatment this project's own Inspector already
+  established for "Browse..." (Phase 14e) and, until this very phase,
+  "Delete Object" itself -- rather than either half-building a Light/Camera
+  ECS component or silently dropping the menu items the mockup shows. Each
+  needs real, substantial, separate scope this phase's own brief explicitly
+  declines to take on: a new `Light` component plus rewiring `basic.frag`/
+  `pbr.frag`'s shading to read lights from the ECS instead of
+  `application.cpp`'s existing fixed `kPointLights`/`kSpotLights` arrays, and
+  for a camera, an "which entity is the active camera" concept this engine
+  has no notion of anywhere today. Deferred to a natural follow-up phase --
+  there is no currently-tracked phase number for it yet, so none is invented
+  here.
+- **`ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty>` /
+  `ENGINE_DEBUG_DELETE=<entity name>`**: the same getenv-gated-value shape as
+  every other `ENGINE_DEBUG_*` var this arc has added, letting a headless run
+  (no real mouse to click "+ Create" or "Delete Object" with) exercise the
+  **exact same production functions** the real UI calls --
+  `spawnEntityFromCreateMenu()`/`destroyEntityOrphaningChildren()` -- rather
+  than a parallel hand-rolled path, the same precedent
+  `ENGINE_DEBUG_FORCE_STATIC`/`_DYNAMIC` already set for `setEntityStatic()`.
+  Applied in the constructor right after the scene finishes loading (CREATE,
+  so a single run can combine it with `ENGINE_DEBUG_SELECT` naming the same
+  fresh entity) and last among every `ENGINE_DEBUG_*` entity-name lookup
+  (DELETE, so it can remove anything an earlier step in the same run just
+  named/created/selected) -- deleting the currently-selected entity also
+  clears `selectedEntity_`, the identical behavior the real button's own
+  click handler has.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with
+  **zero new warnings** under `-Wall -Wextra`. `ctest` reports **6/6**
+  (`ecs_test` new; `transform_hierarchy_test` 5 -> 8 cases; every other
+  target unchanged). `tools/run_headless.sh` at `ENGINE_MAX_FRAMES=60`
+  completed cleanly with **zero `[ERROR]` log lines** across nine separate
+  runs -- default baseline; `ENGINE_DEBUG_CREATE` for each of
+  cube/sphere/plane/empty; `ENGINE_DEBUG_CREATE=cube` combined with
+  `ENGINE_DEBUG_SELECT=Cube`; `ENGINE_DEBUG_DELETE=falling_cube` (a parent,
+  with a live child); `ENGINE_DEBUG_DELETE=parented_demo_cube` (a leaf
+  child); and `ENGINE_DEBUG_FORCE_STATIC`/`ENGINE_DEBUG_SELECT` /
+  `ENGINE_DEBUG_FORCE_DYNAMIC` together, confirming those still work
+  unaffected -- all inspected directly as screenshots, not just logs:
+  - **Create**: the real (non-debug-overlay) Scene panel shows the new
+    "+ Create (right-click for the same menu)" affordance; after
+    `ENGINE_DEBUG_CREATE=cube` + `ENGINE_DEBUG_SELECT=Cube`, the tree shows
+    `scene` / `falling_cube` (still correctly nesting `parented_demo_cube`
+    underneath it, Phase 14d's own nesting completely undisturbed) / `Cube`,
+    with `Cube` highlighted selected; the Inspector shows it as a real "Mesh
+    entity" with a sensible in-front-of-camera Transform position, the
+    correct (reused `falling_cube.obj`) yellow-tinted checker material, and
+    no physics components yet; the Viewport shows the new cube rendered with
+    its dashed selection outline, positioned in front of the existing scene
+    without overlapping it. `ENGINE_DEBUG_CREATE=sphere`/`=plane` each show
+    up correctly in the debug overlay's own "Scene Entities" list and render
+    correctly in the Viewport -- the sphere a smoothly-lit teal-green ball
+    (correct winding: a real specular highlight, no black backface patches),
+    the plane a flat light-gray quad facing the camera (also correct
+    winding -- a reversed quad would render black/invisible from this
+    angle). `ENGINE_DEBUG_CREATE=empty` shows `Empty` added to the entity
+    list with the Viewport pixel-identical to the no-create baseline (no
+    mesh drawn, exactly as designed).
+  - **Delete**: `ENGINE_DEBUG_DELETE=falling_cube` -- the debug overlay's
+    entity list drops from `parented_demo_cube` / `scene` / `falling_cube`
+    to just `parented_demo_cube` / `scene`; the Viewport shows
+    `parented_demo_cube` still present, in very nearly its prior on-screen
+    location (not teleported to the origin, not vanished) -- the orphan
+    behavior's "no visible jump" property holding up in the actual rendered
+    scene, not just the unit test. `ENGINE_DEBUG_DELETE=parented_demo_cube`
+    (deleting the *child*, not the parent) -- the entity list drops to just
+    `falling_cube` / `scene`, with `falling_cube` itself rendering completely
+    unaffected, confirming deleting a leaf doesn't disturb its parent.
+  - **Delete Object button, visually**: a separate run at a taller window
+    size (so the Inspector's full Physics section and the button below it
+    are both on-screen at once) with `falling_cube` selected shows "Delete
+    Object" rendered as a normal, **enabled** button -- no more greyed-out
+    `BeginDisabled()` styling, no more "Deletion is Phase 14f." caption below
+    it.
+  - **Regression check**: `ENGINE_DEBUG_FORCE_STATIC=falling_cube` +
+    `ENGINE_DEBUG_SELECT=falling_cube` (`ENGINE_SHOW_DEBUG_UI=1`) and
+    `ENGINE_DEBUG_FORCE_DYNAMIC=scene` both log and render exactly as Phase
+    14e's own README section already describes -- confirming this phase's
+    `ecs.hpp`/`editor_ui.cpp` changes didn't disturb either debug aid.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

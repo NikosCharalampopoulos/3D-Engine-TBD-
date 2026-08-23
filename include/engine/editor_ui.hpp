@@ -91,6 +91,29 @@
 // removes a RigidBody component, not a cosmetic flag. See editor_ui.cpp's
 // own Phase 14e comment (at renderInspectorPanel()) for the full
 // section-by-section design.
+//
+// Phase 14f: two real, working changes closing this phase's own two
+// placeholder-labeled gaps.
+//   - The Inspector's "Delete Object" button (Phase 14e left it
+//     BeginDisabled()'d, with an explicit "Deletion is Phase 14f" caption)
+//     is now live: it calls transform_hierarchy.hpp's
+//     destroyEntityOrphaningChildren() on the selected entity and clears
+//     `selectedEntity` -- see editor_ui.cpp's own renderInspectorPanel()
+//     comment for exactly why clearing it there, not merely relying on this
+//     phase's own defensive "Selected entity no longer has a Transform"
+//     fallback (Phase 14e), is the correct behavior.
+//   - The Scene panel gains a real Create menu -- a "+" button (also
+//     reachable by right-clicking the panel's own background) offering
+//     Cube/Sphere/Plane/Empty (all real, working) plus Point Light/
+//     Directional Light/Camera (shown, but BeginDisabled()'d with an
+//     explanatory tooltip -- see this file's own CreateEntityKind comment
+//     and editor_ui.cpp's own Phase 14f comment for why those three are
+//     deliberately NOT implemented this phase). renderDockspaceShell() now
+//     RETURNS a CreateEntityKind (see that type's own comment below) rather
+//     than gaining a fourth reference parameter -- EditorUI itself builds no
+//     entities; Application::render() is what actually acts on a non-kNone
+//     return value, since only Application owns the ResourceManager/Shader/
+//     Camera a new entity needs.
 
 #include <optional>
 
@@ -100,6 +123,28 @@ struct GLFWwindow;
 typedef unsigned int ImGuiID;
 
 namespace engine {
+
+// Phase 14f: what (if anything) the Scene panel's Create menu was clicked
+// for THIS frame -- returned by renderDockspaceShell() below rather than
+// EditorUI acting on it directly, matching this class's own "just a Dear
+// ImGui wrapper over data Application owns" role (see this file's own
+// header comment further up): EditorUI has no ResourceManager/Shader/Camera
+// to actually build a new entity from (Application owns all three), so it
+// only ever reports the user's intent for Application::render() to act on
+// right after this call returns -- the same "EditorUI edits Application's
+// own state by reference/return value, never owns the underlying systems
+// itself" shape selectedEntity/outline already establish for selection.
+//
+// kNone every frame nothing was clicked -- the overwhelmingly common case --
+// so a caller can simply `if (request != CreateEntityKind::kNone)` rather
+// than needing a separate std::optional wrapper around this enum.
+enum class CreateEntityKind {
+    kNone,
+    kCube,
+    kSphere,
+    kPlane,
+    kEmpty,
+};
 
 // Phase 14d: the currently-selected entity's on-screen bounding box, already
 // projected into normalized device coordinates ([-1, 1] on both axes, +Y up
@@ -192,8 +237,19 @@ public:
     //     comment for why that, rather than the global foreground draw list,
     //     is what keeps this overlay from ever bleeding into the panels
     //     around it.
-    void renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
-                               std::optional<EntityId>& selectedEntity, const SelectionOutline* outline);
+    //
+    // Phase 14f: return value -- CreateEntityKind::kNone every frame except
+    // the one where the Scene panel's Create menu (a "+" button, opened via
+    // either a click on it or a right-click anywhere in the panel's own
+    // background -- see editor_ui.cpp's own Phase 14f comment) had one of
+    // its real, enabled items (Cube/Sphere/Plane/Empty) clicked this frame.
+    // See CreateEntityKind's own comment above for why this is a return
+    // value, not a third read/write reference parameter alongside
+    // `selectedEntity` -- unlike selection, "what was just requested"
+    // doesn't need to persist across frames or be readable from outside this
+    // one call, only acted on once, immediately after it's returned.
+    CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
+                                           std::optional<EntityId>& selectedEntity, const SelectionOutline* outline);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()
