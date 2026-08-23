@@ -3291,14 +3291,22 @@ design was written.
     would just fail `parseSceneRecords()`'s own validation on the next load.
 - **`assets/scenes/default.json`** gains one new entity,
   `"parented_demo_cube"` -- reuses the existing `falling_cube.obj` mesh
-  (scaled to 0.6x, not physics-simulated: no `"rigidBody"`/`"collider"`
-  block) parented to the existing `"scene"` entity (which already carries a
-  fixed ~12° Y rotation, see Phase 8a/8b), at a local offset placed in open
-  ground space well clear of the table/box/pyramid/PBR-sphere-grid's own
-  footprint. Deliberately listed **before** `"scene"` in the `"entities"`
-  array, so the shipped scene file itself demonstrates the forward-reference
-  case above, not only a synthetic test. `falling_cube`'s own physics demo
-  (position, velocity, collider) is untouched.
+  (scaled to 0.4x, not itself physics-simulated: no `"rigidBody"`/`"collider"`
+  block of its own) parented to the existing `"falling_cube"` entity, at a
+  small local offset (`[0.5, 0.3, 0.0]`) so it renders as a smaller cube
+  riding just off to the side of the real, gravity-simulated one. This is
+  deliberately the *physics-riding-along* case `physics.cpp`'s own Phase 14b
+  comment describes, not just a parenting demo: `falling_cube` is the one
+  entity in this scene with a `RigidBody`, so parenting under it is what
+  actually exercises "a static entity's world position tracks a moving
+  physics body because `resolveWorldMatrix()` runs at render time, after
+  `stepPhysics()` already moved the parent's `Transform` for that frame" --
+  parenting under a second static entity (e.g. `"scene"`) would only exercise
+  name resolution, not that interaction. Deliberately listed **before**
+  `"falling_cube"` in the `"entities"` array (`"falling_cube"` is the last
+  entity in the file), so the shipped scene file itself demonstrates the
+  forward-reference case above, not only a synthetic test. `falling_cube`'s
+  own physics demo (position, velocity, collider) is untouched.
 - **Tests, 3 -> 4**:
   - `tests/scene_serialization_test.cpp` gained a `"parent"` round-trip case
     (a 4th/5th record pair, deliberately pushed **child-before-parent** into
@@ -3369,6 +3377,84 @@ design was written.
   still run cleanly (12 drawables, no parenting demonstrated -- unchanged
   from before this phase, per that flag's own documented "isolate scene-
   loading problems, not scene-content problems" scope).
+- **Post-14b bug-review fix: the demo data didn't match the demo it was
+  documented as**. `physics.cpp`'s own Phase 14b comment (see above) says
+  `"parented_demo_cube"` is parented to `"falling_cube"` "for exactly that
+  demonstration" -- i.e. a static entity visually riding along with a
+  *moving, physics-simulated* one, the whole point of the paragraph it sits
+  in. The `default.json` this phase actually shipped instead parented it to
+  `"scene"` -- a second static entity with no `RigidBody` at all, so nothing
+  in that file exercised the physics-riding-along interaction the comment
+  claims demonstrates it (it still validly exercised forward-reference name
+  resolution, just not the physics case). Two ways to close that gap:
+  reword the comment to say `"scene"`, or repoint the data to `"falling_cube"`
+  as the comment already said. Fixed by the latter -- `"scene"` is a strictly
+  weaker demonstration (an entity riding along with something that never
+  moves proves nothing about the render-after-physics ordering
+  `resolveWorldMatrix()`/`stepPhysics()` depend on), so matching the data to
+  the comment's original intent is strictly more thorough than matching the
+  comment to the data, and both are made consistent either way. Also
+  shrunk the child's scale (0.6x -> 0.4x, clearly smaller than its
+  gravity-simulated parent) and local offset (to `[0.5, 0.3, 0.0]`, a small
+  offset that reads as "attached to" rather than "coincidentally near" the
+  parent) now that the offset is relative to a moving cube rather than a
+  fixed point in the room. `"parented_demo_cube"` is still listed **before**
+  `"falling_cube"` in the file (`"falling_cube"` is now the last entity), so
+  the forward-reference demonstration this phase's own tests/comments
+  describe is unchanged. Re-verified headlessly with the same
+  `renderDockspaceShell()`-disabled-then-reverted capture technique as the
+  original phase (confirmed reverted via `git diff src/application.cpp`
+  showing no changes to that file), at three wall-clock-timed captures
+  (~2s, ~10s, ~18s after launch): the smaller cube visibly tracks
+  `falling_cube` downward frame-to-frame and comes to rest attached to its
+  upper corner once `falling_cube` settles on the ground plane -- the
+  demonstration `physics.cpp`'s comment describes is now real, not just
+  documented. `ctest` still reports 4/4 passing and
+  `tools/run_headless.sh` still completes with zero `[ERROR]` lines and
+  `0/14 drawables culled` (the JSON edit changes values, not entity/model
+  count).
+  - **Independently re-verified, no other bugs found**: hand-derived the
+    3-level-hierarchy matrix composition
+    (`resolveWorldMatrix(leaf) = root.local * middle.local * leaf.local`,
+    root-then-descendant left-to-right) against `transform_hierarchy.cpp`'s
+    actual fold direction (`chain` collected leaf-to-root, then folded via
+    `rbegin()..rend()` -- root-to-leaf) and confirmed the multiplication
+    order is genuinely parent-then-local, not reversed. Constructed an
+    additional adversarial 3-entity cycle (`A.parent=B, B.parent=C,
+    C.parent=A`, none of which is a 2-cycle the existing test already
+    covers) by hand-tracing the algorithm rather than as new committed test
+    code: each of the three possible starting points terminates via the
+    visited-id check and warns once for a different "offending" entity (the
+    one whose own `Parent` link closes the loop from that starting point),
+    confirming the guard generalizes past the 2-entity case the shipped test
+    exercises. Confirmed the self-parent case (an entity naming itself as
+    `"parent"`) passes `parseSceneRecords()`'s name-existence check (a name
+    trivially matches itself) and is instead caught by
+    `resolveWorldMatrix()`'s general visited-set guard on the very first
+    loop iteration (`current`'s own index is already in `visited` before the
+    walk starts) -- no special-cased self-parent check was needed or is
+    missing. Confirmed the warned-once log dedup sets are keyed by the
+    *offending* entity's index in all three cases (cycle, dangling-parent,
+    max-depth), not the id originally passed in, so a second, distinct
+    offending entity is never incorrectly suppressed by an earlier warning
+    -- and confirmed by inspection these sets are never cleared or bounded,
+    which is fine only because there's no entity-destruction path yet to
+    make an entity index repeat across the same run (already the exact
+    caveat `transform_hierarchy.hpp`'s own header comment names). Confirmed
+    all three `application.cpp` render call sites
+    (`renderShadowPass()`/`renderSSAO()`/`render()`) consistently call
+    `resolveWorldMatrix()` for every `ModelComponent` entity -- the
+    `SphereInstance` procedural grid's own `instance.transform.getModelMatrix()`
+    calls in those same functions are a separate, non-ECS system with no
+    `Parent` support and are correctly left alone, not a missed call site.
+    Confirmed duplicate entity names interacting with name-based `"parent"`
+    lookup behave exactly as `scene_loader.cpp`'s own comment states: the
+    last-created record with a given name wins `loadScene()`'s
+    `idByName` map, so a `"parent"` naming an ambiguous (duplicated) name
+    resolves to whichever of those entities happened to be parsed last --
+    the same pre-existing "names aren't unique" looseness Phase 8b's own
+    review already found, now also reachable through `"parent"` rather than
+    a new problem this phase introduced.
 
 ## Libraries used and why
 
