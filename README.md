@@ -3927,6 +3927,74 @@ itself, selecting a row, and the outline that selection drives.
     Entities) still layers correctly on top of the dockspace, listing all
     three entities, unaffected in content -- exactly as every prior Phase 14
     sub-phase left it.
+- **Post-14d bug-review fix: `buildSceneTree()` had no depth bound, unlike
+  the `resolveWorldMatrix()` guard it was meant to mirror**. This phase's own
+  cycle-safety design (above) explicitly set out to mirror
+  `resolveWorldMatrix()`'s two guards (`transform_hierarchy.hpp`) -- and did,
+  correctly, for cycles: hand-tracing both a 2-entity cycle (A parents B, B
+  parents A) and a 3-entity cycle (A parents B, B parents C, C parents A)
+  through `Builder::build()`'s actual code confirms each yields the right
+  node count with no duplicates. But `resolveWorldMatrix()` has a *second*,
+  independent guard beyond its own visited-set cycle check --
+  `kMaxParentChainDepth` (64), enforced via an iterative walk specifically
+  *not* real recursion, "regardless of how deep/cyclic a malformed chain is"
+  (that file's own comment) -- and `buildSceneTree()`'s `Builder::build()`
+  had no equivalent: it recurses with a genuine C++ call per tree level, so a
+  parent chain deeper than 64 (or a cycle longer than 64) would recurse the
+  real call stack that deep too, risking an actual stack overflow that
+  `resolveWorldMatrix()` was specifically designed to never risk for the same
+  conceptual input. Today's scenes only nest one level deep, so this was
+  latent, not reachable -- but per this project's own established precedent
+  (designing the cycle/dangling-parent guards themselves for a
+  not-yet-reachable case, since there's no entity-destruction or reparenting
+  UI before Phase 14f either), a hand-edited scene file or a later
+  reparenting feature could reach it. Fixed by threading a `depth` parameter
+  through `build()` and reusing `kMaxParentChainDepth` (imported from
+  `transform_hierarchy.hpp`, not re-declared) as the same bound: a child
+  beyond the depth limit is left unclaimed rather than recursed into,
+  letting the function's own pre-existing "claim any still-unvisited id as
+  an extra root" pass (previously only reached by cycles) pick it up and
+  give it a fresh depth budget of its own -- proven correct by hand-tracing
+  that a single linear pass over `ids` still claims every entity exactly
+  once regardless of chain length or creation-order/chain-order mismatch,
+  the same "no single correct tree shape, but every entity appears exactly
+  once" guarantee the cycle guard already provided. A new
+  `scene_hierarchy_test` case (mirroring `transform_hierarchy_test`'s own
+  "Deep-chain guard" case exactly) builds a `kMaxParentChainDepth + 20`-deep
+  non-cyclic chain and confirms all entities still appear exactly once,
+  split across more than one top-level forest entry.
+- **Post-14d bug-review fix: the outline's screen-space rectangle had no
+  upper bound before reaching `addDashedRect()`'s per-segment loop**.
+  `computeSelectionOutlineNDC()`'s `clip.w <= 1e-4f` guard only rejects a
+  point essentially at or behind the camera -- it does nothing for a
+  selected entity's bounding sphere merely being *very close* to the camera,
+  which nothing prevents (this engine's free-fly camera has no
+  camera-vs-scenery collision, so it can fly right up to or through a
+  selected object). A small-but-positive `w` there is a perfectly finite
+  divide -- never NaN/Inf -- but can inflate an ordinary-sized offset into
+  the thousands, and that finite-but-huge NDC rect reached
+  `addDashedRect()`/`addCornerBrackets()` (`editor_ui.cpp`) completely
+  unclamped: their own cost is proportional to the rectangle's on-screen
+  perimeter, so an unbounded rect could turn one frame's dashed-outline draw
+  into hundreds of thousands of `AddLine()` calls -- a real per-frame
+  hitch (sustained for as long as the camera stayed that close), not a
+  crash, but not the "degrades gracefully" behavior this phase's own design
+  otherwise achieves. Dear ImGui's window-clipping (this phase's own
+  clipping design, above) only trims what's actually *rasterized* -- it does
+  nothing for the CPU-side cost of first generating that many segments.
+  Fixed with a `kMaxOutlineNdcExtent` (50) clamp on the outline's NDC extents
+  in `computeSelectionOutlineNDC()` itself, before either drawing helper ever
+  sees the rectangle -- generous enough to never visibly affect any normal
+  on-screen selection (the actually-visible NDC range is only `[-1, 1]`),
+  while bounding the worst case to a small, constant number of dash
+  segments regardless of how close the camera gets.
+  - Re-verified after both fixes: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild
+    still compiles with zero new warnings; `ctest` still **5/5** (including
+    the new deep-chain case); `tools/run_headless.sh`-style runs at
+    `ENGINE_MAX_FRAMES=60` across the default/`ENGINE_DEBUG_SELECT=falling_cube`/
+    `ENGINE_DEBUG_SELECT=<unknown name>`/`ENGINE_SHOW_DEBUG_UI=1` combinations
+    all completed cleanly with zero GL-error log lines, matching this
+    section's original Verify results exactly.
 
 ## Libraries used and why
 

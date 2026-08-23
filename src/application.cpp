@@ -1048,10 +1048,38 @@ bool computeSelectionOutlineNDC(const BoundingSphere& worldSphere, const Camera&
     const float halfWidth = std::abs(ndcRightPoint.x - ndcCenter.x);
     const float halfHeight = std::abs(ndcUpPoint.y - ndcCenter.y);
 
-    outOutline.ndcMinX = ndcCenter.x - halfWidth;
-    outOutline.ndcMaxX = ndcCenter.x + halfWidth;
-    outOutline.ndcMinY = ndcCenter.y - halfHeight;
-    outOutline.ndcMaxY = ndcCenter.y + halfHeight;
+    // Bug-review fix (this phase's own review): the `clip.w <= 1e-4f` guard
+    // above only rejects a point that's essentially AT or behind the camera
+    // -- it does nothing for the case just short of that, where the
+    // selected entity's bounding sphere is merely very close to the camera
+    // (nothing stops the free-fly camera from flying right up to/through a
+    // selected object; there's no camera-vs-scenery collision in this
+    // engine). A small-but-still-positive `w` there is a perfectly finite
+    // divide, so ndcCenter/halfWidth/halfHeight above never become NaN/Inf
+    // -- but they CAN still come out enormous (dividing by a `w` on the
+    // order of 1e-3 can inflate a normal-sized offset into the thousands),
+    // and that finite-but-huge NDC rect would otherwise reach
+    // addDashedRect()'s per-segment loop (editor_ui.cpp) unclamped: that
+    // loop's own cost is directly proportional to the rectangle's on-screen
+    // perimeter, so an unclamped rect large enough can turn one frame's
+    // worth of outline drawing into hundreds of thousands of AddLine() calls
+    // -- a real per-frame hitch (or worse, sustained for as long as the
+    // camera stays that close), not a crash, but not "degrades gracefully"
+    // either. Dear ImGui's own window-clipping (this class's header
+    // comment) only trims what's actually RASTERIZED -- it does nothing for
+    // the CPU-side cost of first generating that many dashed-line segments
+    // -- so this clamp has to happen here, before that loop ever sees the
+    // rectangle. kMaxOutlineNdcExtent is generous relative to the actually-
+    // visible [-1, 1] NDC range (comfortably covers "camera close enough
+    // that the object fills several screens' worth of view", which still
+    // reads as a sane, if mostly off-screen, rectangle once clipped) while
+    // keeping the worst case bounded to a small, constant number of dash
+    // segments regardless of how close the camera gets.
+    constexpr float kMaxOutlineNdcExtent = 50.0f;
+    outOutline.ndcMinX = std::clamp(ndcCenter.x - halfWidth, -kMaxOutlineNdcExtent, kMaxOutlineNdcExtent);
+    outOutline.ndcMaxX = std::clamp(ndcCenter.x + halfWidth, -kMaxOutlineNdcExtent, kMaxOutlineNdcExtent);
+    outOutline.ndcMinY = std::clamp(ndcCenter.y - halfHeight, -kMaxOutlineNdcExtent, kMaxOutlineNdcExtent);
+    outOutline.ndcMaxY = std::clamp(ndcCenter.y + halfHeight, -kMaxOutlineNdcExtent, kMaxOutlineNdcExtent);
     return true;
 }
 

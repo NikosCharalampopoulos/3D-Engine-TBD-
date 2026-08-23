@@ -73,7 +73,7 @@ struct SceneTreeNode {
 // ecs.hpp) -- deterministic and stable across calls within the same process
 // run, so a caller (or a test) can rely on it without needing to sort.
 //
-// Cycle/dangling-parent safety: mirrors resolveWorldMatrix()'s own two
+// Cycle/dangling-parent safety: mirrors resolveWorldMatrix()'s own three
 // guards (transform_hierarchy.hpp), just applied to tree-building instead of
 // matrix composition. A Parent whose id doesn't resolve to another entity
 // this same call also sees (dangling, or pointing at something with no
@@ -82,11 +82,19 @@ struct SceneTreeNode {
 // happens to reach first: that one becomes an extra top-level root, and
 // every other entity in the same cycle nests normally beneath it, one level
 // at a time, until the link back to the first entity is reached and simply
-// dropped instead of re-adding a node for it a second time -- there is no
-// single "correct" tree shape for a cycle, so the only real guarantee here
-// is the one that matters: every entity registry.each<Transform>() visits
-// appears in the returned forest exactly once, never zero or two times, and
-// building the tree always terminates rather than recursing forever.
+// dropped instead of re-adding a node for it a second time. A chain deeper
+// than kMaxParentChainDepth (transform_hierarchy.hpp -- the exact same bound
+// resolveWorldMatrix() itself enforces, reused rather than duplicated) is
+// similarly split: the entity at the depth boundary becomes another extra
+// top-level root instead of this function's own recursion (a real C++ call
+// per tree level, unlike resolveWorldMatrix()'s iterative walk) descending
+// arbitrarily deep and risking a stack overflow on a pathologically long,
+// non-cyclic chain (or a cycle longer than the bound). There is no single
+// "correct" tree shape once a cycle or an over-long chain makes one
+// impossible, so the only real guarantee here is the one that matters:
+// every entity registry.each<Transform>() visits appears in the returned
+// forest exactly once, never zero or two times, and building the tree
+// always terminates -- both without recursing unboundedly deep.
 std::vector<SceneTreeNode> buildSceneTree(EntityRegistry& registry);
 
 }  // namespace engine

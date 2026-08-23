@@ -201,6 +201,59 @@ int main() {
         expectTrue(totalNodes == 2, "a two-entity parent cycle still yields exactly 2 total nodes (none dropped)");
     }
 
+    // --- Deep-chain guard: a chain longer than kMaxParentChainDepth -------
+    // Bug-review addition (this phase's own review): mirrors
+    // transform_hierarchy_test's own "Deep-chain guard" case exactly (same
+    // chain length, same "not a cycle -- every id genuinely distinct and
+    // visited only once, but deep enough to need the depth bound rather
+    // than the visited-set check" shape) -- see buildSceneTree()'s own
+    // header comment on why it reuses resolveWorldMatrix()'s
+    // kMaxParentChainDepth rather than recursing arbitrarily deep. As with
+    // the cycle case above, the real assertion is implicit: build() is
+    // genuine C++ recursion (unlike resolveWorldMatrix()'s iterative walk),
+    // so if this depth guard didn't exist, a chain this long would risk a
+    // real stack overflow rather than just hanging -- reaching the checks
+    // below at all is already proof the guard works.
+    {
+        engine::EntityRegistry registry;
+
+        const int chainLength = engine::kMaxParentChainDepth + 20;
+        engine::EntityId previous;  // invalid EntityId -- the first entity created below is a root
+        for (int i = 0; i < chainLength; ++i) {
+            const engine::EntityId id = registry.create();
+            registry.addComponent<engine::Transform>(id);
+            if (previous.valid()) {
+                registry.addComponent<engine::Parent>(id, engine::Parent{previous});
+            }
+            previous = id;
+        }
+
+        const std::vector<engine::SceneTreeNode> tree = engine::buildSceneTree(registry);
+
+        // Count every entity anywhere in the returned forest, the same
+        // independent recursive counter the cycle case above uses.
+        std::size_t totalNodes = 0;
+        struct Counter {
+            std::size_t& total;
+            void operator()(const engine::SceneTreeNode& node) {
+                ++total;
+                for (const engine::SceneTreeNode& child : node.children) {
+                    (*this)(child);
+                }
+            }
+        } counter{totalNodes};
+        for (const engine::SceneTreeNode& root : tree) {
+            counter(root);
+        }
+
+        expectTrue(totalNodes == static_cast<std::size_t>(chainLength),
+                   "a chain deeper than kMaxParentChainDepth still yields exactly chainLength total nodes across "
+                   "the whole forest (none dropped, none duplicated)");
+        expectTrue(tree.size() > 1,
+                   "a chain deeper than kMaxParentChainDepth is split across more than one top-level forest entry "
+                   "(the depth guard actually engaged, not just happened to not matter)");
+    }
+
     if (failures == 0) {
         std::printf("scene_hierarchy_test: all checks passed\n");
         return EXIT_SUCCESS;

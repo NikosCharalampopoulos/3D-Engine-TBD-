@@ -89,7 +89,27 @@ std::vector<SceneTreeNode> buildSceneTree(EntityRegistry& registry) {
         std::unordered_map<std::uint32_t, std::vector<EntityId>>& childrenOf;
         std::unordered_set<std::uint32_t>& visited;
 
-        SceneTreeNode build(EntityId id) {
+        // Bug-review fix (this phase's own review): `depth` counts how many
+        // real Parent-link hops this call is below whichever id started the
+        // current top-level build() (always 0 there -- see both call sites
+        // below). build() recurses with an ACTUAL C++ call per tree level,
+        // unlike resolveWorldMatrix()'s own iterative walk
+        // (transform_hierarchy.cpp deliberately avoids real recursion
+        // specifically so its own kMaxParentChainDepth guard bounds a loop
+        // counter, not call-stack depth, "regardless of how deep/cyclic a
+        // malformed chain is" -- see that file's own comment). Before this
+        // fix, this function's only guard was the cycle check below, which
+        // bounds each individual entity to being claimed once but does
+        // nothing to bound a long, genuinely non-cyclic chain (or a cycle
+        // longer than any sane depth) -- either could still recurse this
+        // engine's real call stack as deep as the chain itself, an
+        // inconsistency with resolveWorldMatrix()'s own explicit "second,
+        // independent guard against a pathologically long chain" that this
+        // function was supposed to mirror (see this file's own header
+        // comment). Reusing kMaxParentChainDepth (the exact same bound
+        // resolveWorldMatrix() uses, transform_hierarchy.hpp) keeps the two
+        // guards from drifting apart instead of inventing a second constant.
+        SceneTreeNode build(EntityId id, int depth) {
             SceneTreeNode node;
             node.id = id;
             node.name = nameOrFallback(registry, id);
@@ -98,6 +118,31 @@ std::vector<SceneTreeNode> buildSceneTree(EntityRegistry& registry) {
             if (it != childrenOf.end()) {
                 node.children.reserve(it->second.size());
                 for (EntityId childId : it->second) {
+                    if (depth + 1 > kMaxParentChainDepth) {
+                        // Depth guard: deliberately does NOT claim (insert
+                        // into `visited`) `childId` here -- leaving it
+                        // unclaimed is what lets the trailing "claim any
+                        // still-unvisited id as an extra root" pass below
+                        // pick it up and give it (and whatever of its own
+                        // subtree is reachable within a FRESH kMaxParentChainDepth
+                        // budget starting from there) a home, rather than
+                        // this call recursing arbitrarily deep into a
+                        // pathologically long chain and risking a real stack
+                        // overflow -- the same "treat as an effective root
+                        // from here, don't walk further" fallback
+                        // resolveWorldMatrix() gives a chain that exceeds
+                        // this exact same bound, just reusing this
+                        // function's own pre-existing cycle-handling
+                        // mechanism (below) instead of new plumbing. A
+                        // single hierarchy panel row nested 64+ Parent-links
+                        // deep would be unusable anyway, so displaying it as
+                        // several separate top-level entries instead is not
+                        // a meaningfully worse outcome -- see this file's
+                        // own header comment on why there is no single
+                        // "correct" tree shape once a well-formed one isn't
+                        // possible.
+                        continue;
+                    }
                     // Cycle guard: `childId` already being in `visited` means
                     // it was already claimed elsewhere -- either as a root
                     // (impossible for a real child, since childrenOf only
@@ -119,7 +164,7 @@ std::vector<SceneTreeNode> buildSceneTree(EntityRegistry& registry) {
                     if (!visited.insert(childId.index()).second) {
                         continue;
                     }
-                    node.children.push_back(build(childId));
+                    node.children.push_back(build(childId, depth + 1));
                 }
             }
             return node;
@@ -131,19 +176,24 @@ std::vector<SceneTreeNode> buildSceneTree(EntityRegistry& registry) {
     for (EntityId id : ids) {
         if (!effectiveParent[id.index()].valid()) {
             visited.insert(id.index());
-            roots.push_back(builder.build(id));
+            roots.push_back(builder.build(id, 0));
         }
     }
-    // Anything left unvisited belongs entirely to a parent cycle (no entity
-    // in the cycle ever looked like a root, so the loop above never claimed
-    // it) -- claim and append each as an extra root, in the same stable
-    // `ids` order, so every entity registry.each<Transform>() visits still
-    // appears in the returned forest exactly once, per this header's own
-    // contract.
+    // Anything left unvisited belongs either to a parent cycle, or (see the
+    // depth guard above) to the tail of a chain longer than
+    // kMaxParentChainDepth -- no entity in either case ever looked like a
+    // root, so the loop above never claimed it. Claim and append each as an
+    // extra root (build()'s own depth counter restarts at 0, giving it a
+    // fresh kMaxParentChainDepth budget of its own -- see build()'s comment
+    // above), in the same stable `ids` order, so every entity
+    // registry.each<Transform>() visits still appears in the returned
+    // forest exactly once, per this header's own contract, no matter how
+    // many separate kMaxParentChainDepth-sized fragments a single
+    // pathological chain needs to be split across.
     for (EntityId id : ids) {
         if (visited.count(id.index()) == 0) {
             visited.insert(id.index());
-            roots.push_back(builder.build(id));
+            roots.push_back(builder.build(id, 0));
         }
     }
     return roots;
