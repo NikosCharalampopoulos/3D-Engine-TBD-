@@ -4177,6 +4177,49 @@ nothing.
     Hierarchy tree, click-to-select highlighting, and viewport selection
     outline (the dashed teal rectangle) all still render correctly,
     unaffected by this phase's changes.
+- **Post-14e bug-review: adversarial pass found no functional bug, but
+  closed two real test-coverage gaps `setEntityStatic()`'s adversarial cases
+  exposed.** An independent skeptical review specifically targeted: the
+  Rot-Y field's "lossless for every entity today" claim (re-decoded every
+  quaternion in `assets/scenes/default.json` by hand against
+  `scene_serialization.cpp`'s own confirmed `[w, x, y, z]` storage order --
+  every one of the three entities' rotations really is pure-Y, `x = z = 0`
+  exactly, not just numerically close); `setEntityStatic()`'s behavior under
+  repeated static/dynamic toggling and against a pre-existing non-default
+  `Collider::halfExtent`; `Model::primaryMaterial()`'s const-reference
+  read-only contract (grepped for any other write path into `Material::tint`/
+  `shininess` -- there is none); the Scene Hierarchy click-handler and
+  Inspector's read of `selectedEntity_` within one `renderDockspaceShell()`
+  call (strictly sequential, same thread, same optional reference -- no
+  staleness window exists within a frame); and all three
+  `ENGINE_DEBUG_FORCE_STATIC`/`_DYNAMIC` edge cases (unmatched name, both set
+  to the *same* entity, both set to *different* entities), each confirmed by
+  an actual headless run's log output, not just code reading. All of it held
+  up. The one real gap: `tests/physics_test.cpp`'s four Phase 14e cases never
+  exercised `setEntityStatic()` on a RigidBody-with-no-Collider entity
+  (Phase 8e's own tested `stepPhysics()` combination, but untested through
+  this newer function specifically) or a repeated
+  static-\>dynamic-\>static-\>dynamic sequence on one entity -- the exact
+  shape a user clicking the Inspector checkbox back and forth produces. Two
+  new cases close both: the first confirms toggling static on a
+  Collider-less RigidBody still adds a sane default-halfExtent Collider and
+  actually stops the entity at the ground; the second flips one entity
+  static/dynamic four times in a row and confirms a freshly-revived
+  `RigidBody` never carries stale velocity from an earlier dynamic phase
+  (guaranteed by `ComponentPool::remove()`'s sparse-set erase fully dropping
+  the old slot -- see `ecs.hpp` -- rather than merely asserted), the
+  surviving `Collider` keeps its original custom `halfExtent` untouched
+  across all four flips, and the entity actually falls under gravity again
+  once dynamic. `ctest` stays **5/5** (still no new test executable -- two
+  more cases inside `physics_test`, six Phase 14e cases total now). Also
+  added a one-time clarifying comment in `application.cpp` (no behavior
+  change) spelling out what the code already deterministically does when
+  both debug env vars name the same entity: `ENGINE_DEBUG_FORCE_DYNAMIC` always
+  wins, since it's applied second in a fixed order -- confirmed by running
+  both set to `"falling_cube"` and observing it fall exactly like the
+  `FORCE_DYNAMIC`-only run, not stay pinned like the `FORCE_STATIC`-only run.
+  A clean `-DCMAKE_BUILD_TYPE=Debug` rebuild still compiles with **zero new
+  warnings**.
 
 ## Libraries used and why
 

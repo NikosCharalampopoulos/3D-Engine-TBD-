@@ -1509,6 +1509,22 @@ Application::Application(int width, int height, const std::string& title, std::u
     // resolved (an unset/unmatched env var leaves it at std::nullopt) so
     // update() can log its Transform::position().y periodically -- see that
     // function's own Phase 14e comment.
+    //
+    // Post-14e bug-review, checked rather than assumed: if both name the
+    // SAME entity, this block's own fixed order (FORCE_STATIC applied,
+    // then FORCE_DYNAMIC applied second) means FORCE_DYNAMIC always wins --
+    // setEntityStatic()'s own idempotent/well-defined-on-any-state contract
+    // (physics.hpp) makes that a harmless, deterministic "last one written
+    // wins" rather than any kind of conflict, but it IS FORCE_DYNAMIC that
+    // wins, not FORCE_STATIC, however the two env vars happen to be ordered
+    // on the command line -- confirmed by running both set to
+    // "falling_cube" and observing its logged y strictly decrease exactly
+    // as the FORCE_DYNAMIC-only run does. physicsVerifyEntity_ itself has
+    // the same last-write-wins behavior when the two name DIFFERENT
+    // entities (whichever block runs second overwrites it) -- both
+    // entities' toggles still apply correctly and independently either way,
+    // there just isn't periodic y-logging for both at once, only whichever
+    // one this variable ends up pointing at.
     {
         const std::string forceStaticName = debugForceStaticEntityNameFromEnv();
         if (!forceStaticName.empty()) {

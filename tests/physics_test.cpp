@@ -275,6 +275,98 @@ int main() {
         }
     }
 
+    // --- Phase 14e bug-review: setEntityStatic() -- RigidBody with NO
+    // Collider -> static ----------------------------------------------------
+    // Phase 8e's own tested combination (a RigidBody with no Collider,
+    // exercised above for stepPhysics() itself) was never exercised through
+    // setEntityStatic() specifically -- every pre-existing "dynamic -> static"
+    // case above starts with BOTH a RigidBody and a Collider already present.
+    // Confirms toggling static on an entity that has a RigidBody but nothing
+    // to preserve on the Collider side still removes the RigidBody and adds
+    // a sane default-halfExtent Collider, exactly as the neither-component
+    // case above does -- not some other, silently different behavior because
+    // a RigidBody happened to be present.
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(0.0f, kStartY, 0.0f));
+        registry.addComponent<engine::RigidBody>(id, engine::RigidBody{glm::vec3(0.0f, -4.0f, 0.0f), true});
+
+        engine::setEntityStatic(registry, id, /*makeStatic=*/true);
+
+        expectTrue(!registry.hasComponent<engine::RigidBody>(id), "collider-less: RigidBody removed");
+        expectTrue(registry.hasComponent<engine::Collider>(id), "collider-less: Collider added");
+        const engine::Collider* collider = registry.getComponent<engine::Collider>(id);
+        if (collider != nullptr) {
+            expectNear(collider->halfExtent, 0.25f, "collider-less: added Collider uses its own struct default");
+        }
+
+        // Confirm the effect, not just the bookkeeping: it must no longer
+        // fall through the ground it now has a Collider for.
+        for (int i = 0; i < 90; ++i) {
+            engine::stepPhysics(registry, kDeltaTime, kGroundY);
+        }
+        const engine::Transform* transform = registry.getComponent<engine::Transform>(id);
+        expectTrue(transform != nullptr, "collider-less: still has its Transform after stepPhysics()");
+        if (transform != nullptr) {
+            expectNear(transform->position().y, kStartY, "collider-less: position never moves once made static");
+        }
+    }
+
+    // --- Phase 14e bug-review: setEntityStatic() -- repeated toggling ------
+    // static -> dynamic -> static -> dynamic on the SAME entity, the exact
+    // sequence a user clicking the Inspector's checkbox back and forth
+    // produces. Two things this must NOT do: (1) leak stale velocity from an
+    // earlier dynamic phase into a later one (removeComponent<RigidBody>()
+    // fully erases the ComponentPool<RigidBody> slot -- see ecs.hpp's own
+    // sparse-set remove() -- so a freshly-added RigidBody is always a clean
+    // default-constructed one, never a resurrected old value), and (2) drop
+    // or duplicate the Collider across any of the four transitions.
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(0.0f, kStartY, 0.0f));
+        registry.addComponent<engine::RigidBody>(id, engine::RigidBody{glm::vec3(0.0f, -7.0f, 0.0f), true});
+        registry.addComponent<engine::Collider>(id, engine::Collider{kHalfExtent});
+
+        engine::setEntityStatic(registry, id, /*makeStatic=*/true);   // dynamic -> static
+        engine::setEntityStatic(registry, id, /*makeStatic=*/false);  // static -> dynamic
+        expectTrue(registry.hasComponent<engine::RigidBody>(id), "repeated toggle: RigidBody present after 2 flips");
+        expectTrue(registry.hasComponent<engine::Collider>(id), "repeated toggle: Collider present after 2 flips");
+        const engine::RigidBody* revived = registry.getComponent<engine::RigidBody>(id);
+        if (revived != nullptr) {
+            expectNear(revived->velocity.y, 0.0f,
+                       "repeated toggle: re-added RigidBody has no stale velocity from before it went static");
+        }
+
+        engine::setEntityStatic(registry, id, /*makeStatic=*/true);   // dynamic -> static
+        engine::setEntityStatic(registry, id, /*makeStatic=*/false);  // static -> dynamic
+        expectTrue(registry.hasComponent<engine::RigidBody>(id), "repeated toggle: RigidBody present after 4 flips");
+        expectTrue(registry.hasComponent<engine::Collider>(id), "repeated toggle: Collider present after 4 flips");
+        const engine::RigidBody* revivedAgain = registry.getComponent<engine::RigidBody>(id);
+        if (revivedAgain != nullptr) {
+            expectNear(revivedAgain->velocity.y, 0.0f, "repeated toggle: still no stale velocity after 4 flips");
+        }
+        const engine::Collider* collider = registry.getComponent<engine::Collider>(id);
+        if (collider != nullptr) {
+            expectNear(collider->halfExtent, kHalfExtent,
+                       "repeated toggle: original custom Collider::halfExtent survives 4 flips untouched");
+        }
+
+        // And it actually behaves dynamic again: falls under gravity from
+        // wherever its Transform sits now, not frozen or double-counting an
+        // old velocity.
+        for (int i = 0; i < 5; ++i) {
+            engine::stepPhysics(registry, kDeltaTime, kGroundY);
+        }
+        const engine::Transform* transform = registry.getComponent<engine::Transform>(id);
+        expectTrue(transform != nullptr, "repeated toggle: still has its Transform after stepPhysics()");
+        if (transform != nullptr) {
+            expectTrue(transform->position().y < kStartY,
+                       "repeated toggle: final dynamic state actually falls under gravity");
+        }
+    }
+
     if (failures == 0) {
         std::printf("physics_test: all checks passed\n");
         return EXIT_SUCCESS;
