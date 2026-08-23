@@ -37,14 +37,17 @@
 // this engine's entity count grows past one. What's missing on purpose: no
 // archetypes (entities that share the same component *set* aren't packed
 // into one contiguous table together), no compile-time multi-component view/
-// query type, no systems scheduler. This scene has exactly one entity (a
-// Transform+Model pair) today and Phase 8a's own scope doesn't add a second
-// one -- "iterate every entity with a Model, then look up its Transform"
-// (see EntityRegistry::each() below) is a one-line composition that is
-// exactly as fast, and far simpler to read, than a generic view type would
-// be at this entity count. If a later phase's entity count/variety ever
-// makes archetype packing pay for itself, this file is where to replace it
-// -- the same way this file replaced entity.hpp.
+// query type, no systems scheduler. As of Phase 8e this scene holds two
+// entities (the static scene.obj model and Phase 8e's falling cube -- see
+// application.cpp's constructor and assets/scenes/default.json) across five
+// component types (Transform, ModelComponent, NameComponent, RigidBody,
+// Collider) -- still few enough that "iterate every entity with a Model,
+// then look up its Transform" (see EntityRegistry::each() below) is a
+// one-line composition, exactly as fast and far simpler to read than a
+// generic multi-type view would be at this entity count/variety. If a
+// later phase's entity count/variety ever makes archetype packing pay for
+// itself, this file is where to replace it -- the same way this file
+// replaced entity.hpp.
 //
 // Component pools are stored type-erased (std::shared_ptr<void>, keyed by
 // std::type_index) inside EntityRegistry so pool<T>() can be a template that
@@ -106,8 +109,8 @@ private:
 // than degrading as entities come and go -- the one piece of "real ECS"
 // bookkeeping this file doesn't skip, since get() runs every frame (see
 // EntityRegistry::each() below) and a linear scan there would make every
-// render() pass O(entities^2) as soon as this scene grows past its current
-// single entity.
+// render() pass O(entities^2) as this scene's entity count grows (two as of
+// Phase 8e, up from Phase 8a's original one).
 template <typename T>
 class ComponentPool {
 public:
@@ -164,10 +167,22 @@ private:
 };
 
 // Phase 8a: wraps the existing shared_ptr<Model> (Models still come from
-// ResourceManager's cache -- see resource_manager.hpp and entity.hpp's old
-// comment on why shared_ptr -- several entities can in principle share one
-// cached Model) as its own component type -- see this file's own header
-// comment for why this isn't just a bare ComponentPool<shared_ptr<Model>>.
+// ResourceManager's cache -- see resource_manager.hpp; shared_ptr because
+// several entities can in principle share one cached Model, the same
+// reasoning the now-removed entity.hpp gave for its own Model field) as its
+// own component type -- see this file's own header comment for why this
+// isn't just a bare ComponentPool<shared_ptr<Model>>.
+//
+// Named with a "Component" suffix (unlike Transform above, or RigidBody/
+// Collider below) because it wraps a pointer to an existing engine type
+// (Model) that already has its own unqualified name -- a bare `struct Model`
+// component here would collide with the `Model` class itself. NameComponent
+// keeps the same suffix for symmetry (both are Phase 8b-and-earlier
+// bespoke, ECS-only wrapper structs with no standalone meaning outside an
+// entity's data), whereas RigidBody/Collider (Phase 8e, see physics.hpp)
+// deliberately drop it: each names a self-contained simulation concept in
+// its own right -- exactly the same "reused directly, no wrapper suffix"
+// treatment Transform above already gets, and for the same reason.
 //
 // Phase 8b adds `path`: the asset path `model` was loaded from (relative,
 // e.g. "assets/models/scene.obj" -- the same string form ResourceManager's

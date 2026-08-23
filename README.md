@@ -214,8 +214,13 @@ of small, mostly-RAII classes in `include/engine/` + `src/`:
 One frame, in short (every step below runs unconditionally by default; the
 env vars named along the way turn individual ones off for isolated
 before/after comparison -- see each phase's own section for what each one
-does): `Application::run()` polls GLFW events and an `InputState`, feeds it
-to `camera_`, then `render()`:
+does): `Application::run()` polls GLFW events and an `InputState` (by default
+a real per-frame poll through `inputActionMap_`'s data-driven bindings, see
+"Phase 8d"), then `update()` toggles the debug overlay if `InputAction::
+ToggleDebugUI`'s bound key (default F1) was just pressed ("Phase 8c"/"Phase
+8d"), steps `stepPhysics()` for every `registry_` entity with a `RigidBody`
+("Phase 8e"), and feeds `camera_` either that same `InputState` or a scripted
+demo path, before `render()`:
 
 1. Builds this frame's `kCascadeCount` (3) cascades from the camera's
    current pose (`computeCascades()` -- see "Phase 13c"), then renders the
@@ -2849,6 +2854,20 @@ than being a refactor verified pixel-identical against a prior commit.
   facing half) are the only place that turns those fields into/out of real
   `RigidBody`/`Collider` components, matching how `ModelComponent` already
   splits across the same two files.
+- **Interaction with `ENGINE_LEGACY_SCENE` ("Phase 8b")**: that escape
+  hatch's hardcoded C++ scene construction was deliberately NOT extended
+  with a second entity mirroring `falling_cube` -- doing so would mean
+  hand-duplicating in C++ exactly the entity data `default.json` already
+  carries, defeating the flag's own purpose (isolating scene-*loading*
+  regressions, not scene *content*). `InputActionMap`-driven camera control
+  ("Phase 8d") and the Phase 8c debug overlay are both entity-count-
+  independent, so they're unaffected under `ENGINE_LEGACY_SCENE=1`;
+  `stepPhysics()` (unconditional
+  every frame, see above) simply iterates zero `RigidBody` entities under
+  that path instead of one -- confirmed by a headless run with
+  `ENGINE_LEGACY_SCENE=1` set: it completes with zero errors and one fewer
+  drawable logged by frustum culling than the default path, matching exactly
+  the one entity `falling_cube` alone accounts for, everything else identical.
 - **What NOT to do (per this phase's own scope)**: no general rigid-body
   solver, constraint system, or continuous collision detection beyond "a
   reasonable timestep can't skip through the one flat ground plane" (see

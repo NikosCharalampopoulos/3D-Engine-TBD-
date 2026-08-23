@@ -8,8 +8,10 @@
 // movement, FPS display) will need exactly this, so the pattern is
 // established here rather than bolted on later. Phase 6 adds the smallest
 // possible "things in the scene are enumerable" structure (entities_, see
-// entity.hpp) but deliberately does not grow into a full scene graph / real
-// ECS / callback system -- that's later phases' job if/when it's needed.
+// the now-removed entity.hpp -- superseded by Phase 8a's registry_/ecs.hpp,
+// see this class's own Phase 8a comment further down) but deliberately does
+// not grow into a full scene graph / real ECS / callback system -- that's
+// later phases' job if/when it's needed.
 //
 // Phase 2 added the first real rendered content: render() draws a shaded
 // cube via a Shader + Mesh instead of just clearing the framebuffer.
@@ -53,8 +55,9 @@
 //   - Phase 5's single model_ + sceneTransform_ pair (two loose members
 //     that only worked for exactly one object) becomes entities_, a
 //     std::vector<Entity>: each Entity bundles a Transform with a
-//     (possibly shared, possibly null) Model -- see entity.hpp. This phase
-//     only ever puts one Entity in it, but render() iterates entities_
+//     (possibly shared, possibly null) Model -- see the now-removed
+//     entity.hpp (superseded by Phase 8a's registry_/ecs.hpp below). This
+//     phase only ever puts one Entity in it, but render() iterates entities_
 //     rather than assuming exactly one, establishing the "a scene is an
 //     enumerable list of things" pattern a later phase's real scene
 //     graph/ECS can build on.

@@ -908,6 +908,18 @@ bool proceduralSkyboxFromEnv() {
 // ENGINE_USE_PROCEDURAL_SKYBOX) -- e.g. useful for isolating whether a
 // rendering regression is scene-data-loading-related without needing to
 // touch/revert assets/scenes/default.json itself.
+//
+// Deliberately still builds only Phase 8b's original single scene.obj
+// entity -- it was never updated to also add Phase 8e's "falling_cube"
+// RigidBody/Collider entity, since doing so would mean hardcoding in C++
+// exactly the entity data assets/scenes/default.json already carries,
+// defeating this flag's own "isolate scene-LOADING problems, not scene
+// CONTENT problems" purpose. So this path still exercises input handling
+// and the debug overlay identically to the default path (neither is
+// scene-content-dependent), but stepPhysics() runs over zero RigidBody
+// entities under it -- a real, harmless narrowing of what this escape hatch
+// demonstrates, not a bug: nothing about Phase 8c/8d's own wiring lives in
+// scene content, only Phase 8e's one demo entity does.
 bool legacySceneFromEnv() {
     const char* value = std::getenv("ENGINE_LEGACY_SCENE");
     return value != nullptr && *value != '\0' && std::string(value) != "0";
@@ -1229,6 +1241,14 @@ Application::Application(int width, int height, const std::string& title, std::u
         // calls -- a Transform component and a ModelComponent -- registered
         // separately rather than bundled as one Entity's two fixed fields.
         // See ecs.hpp for why.
+        //
+        // Phase 8e: deliberately NOT extended with a second, RigidBody/
+        // Collider-carrying entity mirroring assets/scenes/default.json's
+        // "falling_cube" -- see legacySceneFromEnv()'s own comment above for
+        // why. stepPhysics() (called unconditionally from update()) still
+        // runs every frame under this path; it just iterates zero RigidBody
+        // entities, exactly as harmlessly as it would for any entity that
+        // simply never opted into that component.
         LOG_INFO("ENGINE_LEGACY_SCENE set: building the scene from hardcoded C++ instead of " + kDefaultScenePath);
         const EntityId sceneEntity = registry_.create();
         registry_.addComponent<NameComponent>(sceneEntity, NameComponent{"scene"});
@@ -1863,11 +1883,14 @@ void Application::render() {
     // the model's node tree, uploading uModel/uNormalMatrix per node as
     // entity's Transform component * (accumulated parent node transform) *
     // (node's own local transform), and binding + drawing each node's
-    // mesh(es) with their own Material. This phase's scene is exactly one
-    // entity, but iterating registry_'s ModelComponent pool (rather than
-    // drawing one hardcoded model_) establishes the pattern for however many
-    // later phases add -- Phase 8a: previously `for (const Entity& entity :
-    // entities_)`, see this class's own Phase 8a header comment and ecs.hpp.
+    // mesh(es) with their own Material. Iterating registry_'s ModelComponent
+    // pool (rather than drawing one hardcoded model_) is what lets this loop
+    // draw however many entities registry_ actually holds -- two by default
+    // as of Phase 8e (the static scene.obj model and the falling cube), one
+    // under ENGINE_LEGACY_SCENE -- without this call site itself needing to
+    // change as that count does. Phase 8a: previously `for (const Entity&
+    // entity : entities_)`, see this class's own Phase 8a header comment and
+    // ecs.hpp.
     registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) {
         if (mc.model) {
             const Transform* transform = registry_.getComponent<Transform>(id);
@@ -1876,8 +1899,9 @@ void Application::render() {
         }
     });
 
-    // Phase 7a's ground plane: drawn directly (not through Entity/Model,
-    // see this class's header comment) with an identity model matrix, since
+    // Phase 7a's ground plane: drawn directly (not through registry_/
+    // ModelComponent, see this class's header comment) with an identity
+    // model matrix, since
     // makeGroundPlane() already bakes its position into world-space vertex
     // data. Phase 13b: tested against the frustum like every other
     // drawable, even though in this engine's small fixed scene it's about
@@ -2328,9 +2352,11 @@ void Application::run() {
 
         // Polled once per frame, right after pollEvents() (same timing
         // real keyboard/mouse reads always had) and threaded down through
-        // update() to whatever needs it (currently just Camera) -- see
-        // input.hpp. ESC is read from this same snapshot (input.escapePressed)
-        // rather than Application calling window_.isKeyPressed() directly, so
+        // update() to whatever needs it -- Camera (movement/mouse-look) and,
+        // since Phase 8d, update() itself (input.toggleDebugUIPressed, read
+        // directly to flip debugUI_'s enabled state) -- see input.hpp. ESC is
+        // read from this same snapshot (input.escapePressed) rather than
+        // Application calling window_.isKeyPressed() directly, so
         // Application -- like Camera since Phase 6 -- never reaches into
         // Window/GLFW key constants itself; InputState is the one place that
         // does.

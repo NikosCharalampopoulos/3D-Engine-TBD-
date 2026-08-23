@@ -7,7 +7,12 @@
 // below). RigidBody and Collider are two new component types, registered
 // via EntityRegistry::addComponent<T>() exactly the way ecs.hpp's own header
 // comment says a new component type should be -- without touching ecs.hpp
-// itself, the same way ModelComponent/NameComponent already work.
+// itself, the same way ModelComponent/NameComponent already work. Deliberately
+// no "Component" suffix on either name (unlike ModelComponent/NameComponent)
+// -- see ecs.hpp's own ModelComponent comment for why: both are
+// self-contained simulation concepts in their own right, reused directly the
+// same way Transform already is, not a bespoke wrapper around some other
+// engine type's pointer/label.
 //
 // --- Why an AABB (cube) collider, not a bounding sphere ------------------
 // mesh.hpp already has a BoundingSphere (Phase 13b, for frustum culling),
