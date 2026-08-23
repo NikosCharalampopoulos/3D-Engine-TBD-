@@ -462,6 +462,30 @@
 // anywhere in render()/renderShadowPass()/renderSSAO(), since all three
 // already iterate registry_.each<ModelComponent>(...) generically; only its
 // Transform's position changes, once per frame, before any of them run.
+//
+// Phase 14a (first sub-phase of the "Phase 14: full editor UI" arc) adds
+// editorUI_ (see editor_ui.hpp) -- an always-visible Dear ImGui docking
+// shell (Scene/Assets/Viewport/Inspector placeholder panels, Unity/Blender-
+// style) layered on top of the still-unchanged 3D render pipeline above,
+// plus three window/resize changes independent of any UI:
+//   - main.cpp's default window size grows from 800x600 to 1600x900 (see
+//     its own comment); Window (window.hpp) gained an optional `maximized`
+//     constructor parameter (GLFW_MAXIMIZED hint) and a
+//     glfwSetFramebufferSizeCallback() that keeps glViewport() correct
+//     through a live resize -- see window.hpp's own Phase 14a comment for
+//     exactly what that does and doesn't cover (viewport only; every fixed-
+//     size FBO above -- hdrFramebuffer_, ssaoGBuffer_, the bloom/shadow
+//     targets -- is explicitly NOT resized this phase, deferred to Phase
+//     14c's render-to-texture work).
+//   - render()'s existing per-frame glViewport(0, 0, fbWidth, fbHeight)
+//     call (see its own definition) was already re-deriving fbWidth/
+//     fbHeight fresh from window_.getSize() every frame, not a value
+//     cached at construction -- confirmed, not changed, by this phase.
+// See debug_ui.hpp's and editor_ui.hpp's own Phase 14a comments for why
+// DebugUI (the pre-existing F1-toggled diagnostic overlay, completely
+// unchanged in behavior/content) and editorUI_ end up sharing one ImGui
+// context rather than each owning an independent one, and README.md's own
+// Phase 14a section for the full layout/verification writeup.
 
 #include <glm/glm.hpp>
 
@@ -475,6 +499,7 @@
 #include "engine/cluster_light_culler.hpp"
 #include "engine/debug_ui.hpp"
 #include "engine/ecs.hpp"
+#include "engine/editor_ui.hpp"
 #include "engine/framebuffer.hpp"
 #include "engine/ibl_probe.hpp"
 #include "engine/input.hpp"
@@ -502,7 +527,13 @@ public:
     // manager or keyboard to close the window / send ESC) can terminate
     // deterministically instead of relying on an external timeout/kill. See
     // main.cpp's ENGINE_MAX_FRAMES handling.
-    Application(int width, int height, const std::string& title, std::uint64_t maxFrames = 0);
+    //
+    // Phase 14a: `maximized` is passed straight through to Window (see its
+    // own Phase 14a comment) -- default false, an ordinary resizable window
+    // at (width, height) the user can maximize themselves. See main.cpp's
+    // ENGINE_WINDOW_MAXIMIZED handling for how a real run opts in.
+    Application(int width, int height, const std::string& title, std::uint64_t maxFrames = 0,
+                bool maximized = false);
 
     void run();
 
@@ -819,15 +850,25 @@ private:
     // its position among these members is unconstrained; grouped next to
     // camera_ since both are per-frame input-consuming state.
     InputActionMap inputActionMap_;
-    // Phase 8c: owns the ImGui context + GLFW/OpenGL3 backend lifecycle --
-    // see debug_ui.hpp and this header's own Phase 8c comment above. Only
-    // needs window_.handle() (a live GL context + GLFW window), so its
-    // position here (after every GL-resource member above) is unconstrained
-    // beyond "after window_", same as camera_. Phase 8d: toggled at
-    // runtime via setEnabled() from InputAction::ToggleDebugUI (default
-    // F1) -- see update()'s definition and debug_ui.hpp's own Phase 8d
-    // comment.
+    // Phase 8c: the F1-toggled diagnostic overlay's enabled/disabled state
+    // -- see debug_ui.hpp and this header's own Phase 8c comment above.
+    // Phase 8d: toggled at runtime via setEnabled() from InputAction::
+    // ToggleDebugUI (default F1) -- see update()'s definition and
+    // debug_ui.hpp's own Phase 8d comment. Phase 14a: no longer owns any
+    // GL/ImGui resources itself (editorUI_ below does, unconditionally) --
+    // see debug_ui.hpp's own Phase 14a comment for why; its position here
+    // is otherwise unconstrained (no GL dependency left at all).
     DebugUI debugUI_;
+    // Phase 14a: owns the shared ImGui context + GLFW/OpenGL3 backend
+    // lifecycle (see editor_ui.hpp) and draws the always-on editor
+    // dockspace shell (Scene/Assets/Viewport/Inspector placeholder panels).
+    // Unlike debugUI_, constructed unconditionally -- no enabled/disabled
+    // gate -- since this is meant to be visible for the whole run, not an
+    // optional diagnostic. Only needs window_.handle() (a live GL context +
+    // GLFW window), so its position here (after every GL-resource member
+    // above) is unconstrained beyond "after window_", same as debugUI_/
+    // camera_ before it.
+    EditorUI editorUI_;
     std::uint64_t maxFrames_;
     std::uint64_t frameCount_ = 0;
     double totalTime_ = 0.0;

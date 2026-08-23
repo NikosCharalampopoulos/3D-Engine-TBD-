@@ -31,6 +31,50 @@
 // GL_SAMPLES value back via glGetIntegerv() and logs what it actually got
 // (a warning, not a thrown error, if it came back 0): this phase's bar is
 // "prove MSAA actually took effect", not just "asked for it and assumed".
+//
+// Phase 14a: no GLFW_RESIZABLE hint is set (never has been), so GLFW's own
+// default (resizable = true) already applied before this phase too -- what
+// was actually missing was anything reacting to a resize. The constructor
+// now also registers a glfwSetFramebufferSizeCallback() that immediately
+// re-applies glViewport() to the new framebuffer size the moment GLFW
+// reports a resize, in addition to (not instead of) Application::render()
+// already re-querying getSize() and calling glViewport() fresh at the top
+// of every frame (see application.cpp) -- the callback is deliberately
+// redundant with that per-frame call for the steady-state case (both end up
+// setting the same viewport before the next real draw), but it matters for
+// one specific case the per-frame call alone doesn't cover: on at least
+// Windows, an interactive drag-resize runs GLFW's event pump
+// (glfwPollEvents()) through a modal loop for the duration of the drag,
+// during which this engine's own main loop (poll -> update -> render ->
+// swap) never reaches its next render() call at all -- only registered
+// callbacks fire during that blocked period. Without a callback, the GL
+// viewport stays at its pre-drag size for that entire drag; nothing this
+// engine draws during it would use the new size until the drag ends and
+// control returns to run()'s own loop. Actually redrawing *new content* at
+// each intermediate size during that drag (so the window doesn't appear to
+// freeze while being resized) would additionally require rendering from
+// inside the callback itself -- out of scope for this phase (see this
+// class's own Phase 14a callback comment in window.cpp and README.md's
+// Phase 14a section for the exact scope line drawn here): a resized-then-
+// released window is guaranteed to render correctly at its new size and
+// never crash/corrupt GL state either way, which is this phase's actual
+// bar (see this project's Phase 14a brief); a live, flicker-free redraw
+// *during* the drag itself is not.
+//
+// Every render-target FBO this engine allocates elsewhere (Application's
+// hdrFramebuffer_, the SSAO g-buffer, bloom's ping-pong buffers, the shadow
+// maps, etc.) is still sized once, at construction time, from the window's
+// *initial* framebuffer size -- unaffected by either the callback above or
+// render()'s per-frame glViewport() re-query, and NOT resized when the
+// window is. A resize therefore does not crash or corrupt any of those
+// buffers (they simply keep their original resolution and get sampled with
+// GL_LINEAR/GL_CLAMP_TO_EDGE like normal, blitting/stretching onto whatever
+// the new default-framebuffer viewport is), but it does mean the final
+// on-screen image can look visually stretched/distorted relative to the
+// window's new aspect ratio until those buffers are themselves made
+// resize-aware -- explicitly deferred to Phase 14c's render-to-texture
+// viewport work, not attempted here (see this phase's own "What NOT to do"
+// scope notes).
 
 #include <string>
 #include <utility>
@@ -69,7 +113,22 @@ class Window {
 public:
     // Throws std::runtime_error if GLFW fails to initialize, the window/GL
     // context can't be created, or GL function pointers can't be loaded.
-    Window(int width, int height, const std::string& title);
+    //
+    // Phase 14a: `maximized` (default false) sets the GLFW_MAXIMIZED window
+    // hint before creation -- an ordinary resizable window at (width, height)
+    // that the user can maximize themselves either way, just starting
+    // already-maximized when true. Deliberately a constructor parameter, not
+    // a hardcoded literal in here: this class stays as agnostic about "what
+    // size/state should a window start at" as it already is about width/
+    // height -- that's a call-site decision (see main.cpp, which is also
+    // where Phase 14a's default width/height bump from 800x600 lives; this
+    // class's own default width/height are unchanged from Phase 1 -- it has
+    // never hardcoded a size, only main.cpp's call site did). GLFW ignores
+    // GLFW_MAXIMIZED on platforms/window managers that don't support it
+    // (Xvfb included, verified empirically -- see this phase's own README
+    // section) rather than failing, so passing true is always safe to try,
+    // never a hard requirement.
+    Window(int width, int height, const std::string& title, bool maximized = false);
     ~Window();
 
     Window(const Window&) = delete;

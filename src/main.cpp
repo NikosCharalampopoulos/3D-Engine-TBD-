@@ -67,11 +67,85 @@ std::uint64_t maxFramesFromEnv() {
     return static_cast<std::uint64_t>(parsed);
 }
 
+// Phase 14a: this call site's own default window size, bumped from the
+// Phase 1 800x600 to 1600x900 -- the same doubling-of-pixel-area-ish jump
+// this project already made for MSAA sample counts (window.hpp's own
+// comment on 4x -> 8x -> 16x), just for window size: big enough that the
+// four Phase 14a dockspace panels (Scene/Assets/Viewport/Inspector) each
+// have a genuinely usable amount of screen real estate rather than a
+// cramped sliver, while staying a plain 16:9 window (not full display-
+// resolution) a user can still move/resize/tile against other windows on
+// their own desktop -- "maximizable, not forced fullscreen" (see
+// windowMaximizedFromEnv() below for the separate, opt-in "start already
+// maximized" knob). 1600x900 rather than 1920x1080 specifically: it's
+// already 3x this project's original 800x600 pixel count, which is as much
+// headless-verification render-time growth as this phase takes on (see
+// ENGINE_WINDOW_WIDTH/HEIGHT below for why the headless path doesn't
+// actually pay this cost at all); 1920x1080 would be 4.5x, with no
+// benefit for this phase's placeholder-only panels.
+constexpr int kDefaultWindowWidth = 1600;
+constexpr int kDefaultWindowHeight = 900;
+
+// Phase 14a: ENGINE_WINDOW_WIDTH/ENGINE_WINDOW_HEIGHT let a caller override
+// main.cpp's own default window size -- used by tools/run_headless.sh
+// specifically (see that script's own Phase 14a comment) to keep launching
+// engine_app at the original 800x600 under Xvfb instead of inheriting this
+// phase's bigger interactive default. Widening Xvfb's own virtual screen to
+// 1600x900 to match instead (the other option this phase's brief allows)
+// was rejected: every render pass sized off the window's real framebuffer
+// (hdrFramebuffer_, SSAO's g-buffer, bloom's ping-pong buffers -- see
+// application.hpp) would then run at 3x this project's original pixel
+// count on the same llvmpipe software rasterizer every prior phase's own
+// headless timing budget (tools/run_headless.sh's 60s hard-kill timeout,
+// sized against Phase 13g's own measured ~20s/60-frames Debug-build cost --
+// see that script's own comment) was measured against -- risking a
+// regression to every *existing* phase's headless verification, not just
+// this one, for a resolution bump this phase's own placeholder-only panels
+// don't substantively need. An explicit env var lets a real interactive
+// run default to the bigger, more usable window while this project's
+// proven headless timing budget stays exactly as it was.
+//
+// Same rejected-then-accepted validation shape as ENGINE_MAX_FRAMES above:
+// missing/empty means "use the default"; anything present but not a valid
+// positive int is rejected with a warning (not silently misparsed) and
+// falls back to the default too.
+int windowDimensionFromEnv(const char* envVarName, int defaultValue) {
+    const char* value = std::getenv(envVarName);
+    if (!value || *value == '\0') {
+        return defaultValue;
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed <= 0 || parsed > 16384 || errno == ERANGE) {
+        LOG_WARN(std::string(envVarName) + "=\"" + value + "\" is not a valid positive window dimension; using " +
+                  std::to_string(defaultValue) + " instead");
+        return defaultValue;
+    }
+    return static_cast<int>(parsed);
+}
+
+// Phase 14a: ENGINE_WINDOW_MAXIMIZED opts into GLFW_MAXIMIZED (see
+// window.hpp's own Phase 14a comment) -- unset by default, same
+// getenv-gated-off-by-default pattern as every other flag in this engine
+// (ENGINE_CAMERA_DEMO, ENGINE_SHOW_DEBUG_UI, etc.). A normal resizable
+// window the user can maximize themselves is this phase's own chosen
+// default (see kDefaultWindowWidth/Height's own comment); this env var is
+// the documented opt-in for "start already maximized" instead, not a
+// change to that default.
+bool windowMaximizedFromEnv() {
+    const char* value = std::getenv("ENGINE_WINDOW_MAXIMIZED");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 }  // namespace
 
 int main() {
     try {
-        engine::Application app(800, 600, "3D Engine", maxFramesFromEnv());
+        const int width = windowDimensionFromEnv("ENGINE_WINDOW_WIDTH", kDefaultWindowWidth);
+        const int height = windowDimensionFromEnv("ENGINE_WINDOW_HEIGHT", kDefaultWindowHeight);
+        engine::Application app(width, height, "3D Engine", maxFramesFromEnv(), windowMaximizedFromEnv());
         app.run();
     } catch (const std::exception& e) {
         LOG_ERROR(std::string("Fatal: ") + e.what());

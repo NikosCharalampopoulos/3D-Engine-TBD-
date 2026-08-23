@@ -142,10 +142,23 @@ FetchContent_MakeAvailable(nlohmann_json)
 # itself, the same "small first-party add_library() target" shape this
 # file's own `glad` target below already uses for the same underlying
 # reason (a dependency with no ready-made CMake target of its own).
+# Phase 14a: switched from v1.92.9b to v1.92.9b-docking. Upstream Dear ImGui
+# has never merged its docking feature (DockSpace/DockBuilder, io.ConfigFlags
+# |= ImGuiConfigFlags_DockingEnable, ImGuiViewport, etc.) into `master` -- it
+# only ever ships on a permanently-separate `docking` branch/tag family that
+# upstream releases in lockstep with each ordinary tagged version. This was
+# *assumed* to already be merged into mainline by this phase's own brief; it
+# is not (verified directly: `git ls-remote --tags` against upstream shows a
+# `v1.92.9b-docking` tag alongside plain `v1.92.9b`, and a clone of the
+# latter has zero occurrences of ImGuiConfigFlags_DockingEnable/DockBuilder*/
+# DockSpaceOverViewport anywhere in imgui.h/imgui_internal.h -- confirmed by
+# grep before touching a single line of this project's own code). The
+# `-docking` tag is the exact same v1.92.9b release plus docking; nothing
+# else about this project's ImGui usage/version changes.
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.92.9b
+    GIT_TAG        v1.92.9b-docking
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(imgui)
@@ -229,6 +242,7 @@ add_executable(engine_app
     src/scene_loader.cpp
     src/debug_ui.cpp
     src/physics.cpp
+    src/editor_ui.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

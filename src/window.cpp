@@ -38,11 +38,26 @@ bool eglContextDisabledFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 14a: registered via glfwSetFramebufferSizeCallback() in the
+// constructor below -- see window.hpp's own Phase 14a comment for why this
+// exists *in addition to* render()'s own per-frame glViewport() re-query,
+// not instead of it. A plain free function (not a Window member) is enough:
+// it only ever needs the new size GLFW itself hands it, no other Window
+// state, matching glfwErrorCallback right above (also a free function for
+// the same reason).
+void framebufferSizeCallback(GLFWwindow*, int width, int height) {
+    // width/height can legitimately be 0 (e.g. the window minimized) --
+    // glViewport(0, 0, 0, 0) is well-defined (an empty viewport, not an
+    // error), so no guard is needed here beyond what GL_CHECK already does.
+    GL_CHECK(glViewport(0, 0, width, height));
+}
+
 }  // namespace
 
 namespace engine {
 
-Window::Window(int width, int height, const std::string& title) : width_(width), height_(height) {
+Window::Window(int width, int height, const std::string& title, bool maximized)
+    : width_(width), height_(height) {
     glfwSetErrorCallback(glfwErrorCallback);
 
     if (!glfwInit()) {
@@ -98,6 +113,14 @@ Window::Window(int width, int height, const std::string& title) : width_(width),
     // verified against the real GL_SAMPLES value further down, after the
     // context exists.
     glfwWindowHint(GLFW_SAMPLES, kRequestedMsaaSamples);
+    // Phase 14a: an ordinary resizable window (GLFW's own default -- no
+    // GLFW_RESIZABLE hint has ever been set here) can additionally start
+    // already-maximized when the caller asks for it (see this class's own
+    // Phase 14a header comment on why this is a constructor parameter, not
+    // a hardcoded literal). GLFW_FALSE (the default when `maximized` is
+    // false) is GLFW's own out-of-the-box behavior, so this hint is a no-op
+    // for every pre-Phase-14a caller.
+    glfwWindowHint(GLFW_MAXIMIZED, maximized ? GLFW_TRUE : GLFW_FALSE);
 #if defined(__linux__)
     // On this project's Linux/X11 target, request EGL for context creation
     // instead of GLFW's GLX default. This was verified necessary, not
@@ -167,7 +190,14 @@ Window::Window(int width, int height, const std::string& title) : width_(width),
 
     GL_CHECK(glViewport(0, 0, width_, height_));
 
-    LOG_INFO("Window created (" + std::to_string(width_) + "x" + std::to_string(height_) + ")");
+    // Phase 14a: see window.hpp's own Phase 14a comment for exactly what
+    // this does/doesn't cover (viewport-only, no FBO resize, no mid-drag
+    // redraw) and why it's needed alongside (not instead of) render()'s own
+    // per-frame glViewport() re-query.
+    glfwSetFramebufferSizeCallback(window_, framebufferSizeCallback);
+
+    LOG_INFO("Window created (" + std::to_string(width_) + "x" + std::to_string(height_) +
+              (maximized ? ", maximized" : "") + ")");
 }
 
 Window::~Window() {

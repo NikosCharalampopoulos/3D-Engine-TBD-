@@ -62,21 +62,46 @@
 // "env-var-initialized, then runtime-mutable" combination
 // ssaoDisabled_/ssrDisabled_ already use (Phase 13d/13g's env vars +
 // Phase 8c's own checkboxes over them).
-struct GLFWwindow;
-
+//
+// Phase 14a rewiring (behavior unchanged -- see README.md's own Phase 14a
+// section): this class used to own the ImGui context + GLFW/OpenGL3 backend
+// lifecycle itself, lazily created only once first enabled, so a headless
+// run with the overlay off (the default) called zero ImGui functions ever.
+// Phase 14a adds a second, always-on ImGui-based UI layer (see
+// engine::EditorUI, editor_ui.hpp) -- and Dear ImGui only supports one live
+// context safely driving a given GLFWwindow*'s input at a time (see
+// EditorUI's own header comment for exactly why two independent contexts
+// on one window doesn't work). Since EditorUI's dockspace is unconditionally
+// on every run, it -- not this optional, F1-toggled class -- is now the one
+// that creates/owns the shared ImGui context and backends, and calls the
+// one shared ImGui::NewFrame()/Render() pair each frame. DebugUI no longer
+// creates or tears down anything ImGui-related itself: it is now just the
+// enabled/disabled state ENGINE_SHOW_DEBUG_UI + F1 have always controlled,
+// which Application::renderDebugUI() (application.cpp, its own content
+// completely untouched by this phase) still checks before submitting its
+// panel's ImGui:: widget calls into whichever frame EditorUI already
+// started. The *observable* behavior is identical to before: unset
+// ENGINE_SHOW_DEBUG_UI means the panel itself still never appears and F1
+// still toggles it exactly as before -- what changed is only "which class's
+// constructor calls ImGui::CreateContext()", not what the panel shows or
+// when. One real, intentional consequence: a headless run's default
+// screenshot is no longer pixel-identical to a pre-Phase-14a build the way
+// Phase 8c's own verification proved (see that phase's own README section) --
+// EditorUI's dockspace is drawn unconditionally now, independent of
+// ENGINE_SHOW_DEBUG_UI, which is exactly the point of this phase (an
+// always-visible editor chrome) rather than a regression in this specific
+// class's own guarantee.
 namespace engine {
 
 class DebugUI {
 public:
-    // `window` must already have a current GL context (see Window's own
-    // constructor). If `enabled` is true, ImGui_ImplOpenGL3_Init() creates
-    // GL objects (a shader program, the font atlas texture) immediately;
-    // see this file's own header comment for why `enabled=false` (the
-    // default, unless ENGINE_SHOW_DEBUG_UI is set) instead does nothing at
-    // all here -- that GL-object creation is deferred until setEnabled(true)
-    // is first called, if ever.
-    DebugUI(GLFWwindow* window, bool enabled);
-    ~DebugUI();
+    // `enabled` is the overlay's initial visibility (from
+    // ENGINE_SHOW_DEBUG_UI, see application.cpp's showDebugUIFromEnv()).
+    // Phase 14a: no longer takes a GLFWwindow* or touches ImGui/GL at all --
+    // see this file's own Phase 14a comment above for why that ownership
+    // moved to EditorUI. This constructor is now just a plain state
+    // initializer (and an existence log line).
+    explicit DebugUI(bool enabled);
 
     DebugUI(const DebugUI&) = delete;
     DebugUI& operator=(const DebugUI&) = delete;
@@ -85,52 +110,15 @@ public:
 
     bool enabled() const { return enabled_; }
 
-    // Phase 8d: flips whether the overlay is shown/updated from here on.
-    // A no-op if `enabled` already matches the current state. Turning it
-    // on for the FIRST time on an object originally constructed with
-    // enabled=false lazily performs the same ImGui context/backend
-    // creation the constructor would have done had it started enabled --
-    // deferred rather than done unconditionally at construction, so a run
-    // that starts disabled and is never toggled on (every headless
-    // verification run today, since Xvfb has no real F1 keypress to
-    // trigger it) still calls zero ImGui functions across its whole
-    // lifetime, preserving this class's original guarantee for that
-    // unchanged default path. Once created, the ImGui context is kept
-    // alive (not torn down) across later off->on->off transitions within
-    // the same DebugUI's lifetime -- only newFrame()/render() below start
-    // no-op'ing again -- since destroying and recreating ImGui's GL
-    // objects on every toggle would be needless churn for a debug overlay.
+    // Phase 8d: flips whether the overlay's panel is submitted from here on.
+    // A no-op if `enabled` already matches the current state. Phase 14a:
+    // no longer lazily creates/tears down anything -- EditorUI's ImGui
+    // context is already always alive, so this is now purely a state flip
+    // (plus the same log line as before).
     void setEnabled(bool enabled);
 
-    // Starts a new ImGui frame (ImGui_ImplOpenGL3_NewFrame() +
-    // ImGui_ImplGlfw_NewFrame() + ImGui::NewFrame()) -- call once per frame,
-    // before issuing any ImGui:: widget calls. No-op if !enabled().
-    void newFrame();
-
-    // Finishes the frame newFrame() started (ImGui::Render()) and
-    // rasterizes its draw data straight onto whichever framebuffer is
-    // currently bound (see Application::renderDebugUI()'s own comment on
-    // why that's always the default framebuffer, after this engine's own
-    // tonemap pass) via ImGui_ImplOpenGL3_RenderDrawData(). No-op if
-    // !enabled().
-    void render();
-
 private:
-    // Factored out of the constructor so setEnabled(true) can lazily run
-    // the exact same ImGui context/backend setup the constructor runs
-    // immediately when starting enabled.
-    void initializeImGuiContext();
-
-    GLFWwindow* window_;
     bool enabled_;
-    // Separate from enabled_: tracks whether the ImGui context/backends
-    // have EVER been created for this object, so setEnabled()/the
-    // destructor know whether there's anything to tear down/re-toggle
-    // versus lazily create, independent of the CURRENT enabled_ value
-    // (e.g. constructed enabled, then toggled off: initialized_ stays
-    // true, enabled_ goes false, and no re-init is needed if toggled back
-    // on).
-    bool initialized_ = false;
 };
 
 }  // namespace engine

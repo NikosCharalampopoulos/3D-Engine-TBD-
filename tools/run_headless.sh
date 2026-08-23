@@ -52,6 +52,24 @@ export DISPLAY="${XVFB_DISPLAY}"
 # real GPU in this environment, only the swrast_dri.so driver.
 export LIBGL_ALWAYS_SOFTWARE=1
 
+# Phase 14a: main.cpp's own default window size grew from 800x600 to
+# 1600x900 (see its own comment) for normal interactive use, but this
+# script pins engine_app back to the original 800x600 here via
+# ENGINE_WINDOW_WIDTH/HEIGHT (main.cpp's override, see its own comment)
+# rather than widening Xvfb's screen (below) to match. Reason: every render
+# pass sized off the window's real framebuffer (hdrFramebuffer_, SSAO's
+# g-buffer, bloom's ping-pong buffers) would run at 3x this project's
+# original pixel count on the same llvmpipe software rasterizer this
+# script's own MAX_WAIT_ITERS timeout below was measured against (see that
+# comment for Phase 13g's own ~20s/60-frames Debug-build cost) --
+# regressing every *existing* phase's headless verification timing budget,
+# not just this one, for a resolution bump this phase's placeholder-only
+# dockspace panels don't need to actually see. A real interactive run still
+# gets the bigger, more usable default; only this headless verification
+# path opts back down.
+export ENGINE_WINDOW_WIDTH="${ENGINE_WINDOW_WIDTH:-800}"
+export ENGINE_WINDOW_HEIGHT="${ENGINE_WINDOW_HEIGHT:-600}"
+
 echo "== Launching ${APP_BIN} on DISPLAY=${DISPLAY} =="
 # Run the app in the background so we can screenshot its window while it is
 # still up (it only lives for a handful of frames), then wait for it to
@@ -80,22 +98,66 @@ sleep 0.4
 # this loop now keeps polling past a merely-successful conversion until the
 # resulting file also clears a minimum size, rather than stopping at the
 # first technically-successful (but possibly still-blank) one.
-MIN_SCREENSHOT_BYTES=20000
+#
+# Phase 14a lowered MIN_SCREENSHOT_BYTES (20000 -> 2000) and added the
+# consecutive-pass debounce below -- both earned by a real, reproducible
+# false result this phase's own always-on ImGui dockspace exposed that
+# neither existed before it:
+#   1. A steady-state frame with the dockspace's four (mostly text-on-dark-
+#      background) panels visible PNG-compresses to only ~11-12KB -- for
+#      every prior phase, "real content" always meant a dense, colorful lit
+#      3D render (tens-to-hundreds of KB), so 20000 bytes was a safe filter
+#      against a ~241-byte blank Xvfb root window. Phase 14a's own
+#      legitimate steady-state output falls *below* that old filter, so the
+#      old threshold would silently exhaust every one of the 40 polling
+#      attempts without ever "passing" and just fall through to whatever
+#      the last (still perfectly valid) attempt wrote -- functionally fine,
+#      but it burns this script's whole ~8s polling budget on every future
+#      run instead of exiting the moment good content appears, for a
+#      filter value that no longer matches what "real content" looks like
+#      post-Phase-14a. 2000 bytes keeps comfortable margin above the
+#      ~241-byte blank case while clearing every real frame observed either
+#      side of this phase (dockspace-covered ~11-12KB and pre-14a
+#      dense-3D-render hundreds of KB alike).
+#   2. Directly measured against this phase's own build (see this
+#      project's own Phase 14a README section for the full trace): the
+#      very first frame that has any real content at all can, for exactly
+#      one frame, show the freshly-docked Viewport panel not yet actually
+#      occluding the 3D scene behind it -- a known, benign Dear ImGui
+#      docking startup transient (a newly created dock node's child window
+#      needs one frame to settle before it visually fills its slot) -- so a
+#      "first passing screenshot wins" loop could land on that one
+#      transient frame instead of the stable, ever-after-representative one
+#      immediately following it. Requiring the SAME size check to pass on
+#      two *consecutive* 0.2s-apart polls (not just once) skips past a
+#      single anomalous frame like that one, at the cost of one extra 0.2s
+#      in the common case where there's nothing to debounce.
+MIN_SCREENSHOT_BYTES=2000
+consecutive_passes=0
 for _ in $(seq 1 40); do
     if ! kill -0 "${APP_PID}" 2>/dev/null; then
         break
     fi
+    passed=0
     if command -v xwd >/dev/null 2>&1; then
         if xwd -root -display "${DISPLAY}" -out "${SCREENSHOT_OUT}.xwd" 2>/dev/null; then
             if command -v convert >/dev/null 2>&1; then
                 if convert "${SCREENSHOT_OUT}.xwd" "${SCREENSHOT_OUT}" 2>/dev/null; then
                     size=$(stat -c%s "${SCREENSHOT_OUT}" 2>/dev/null || stat -f%z "${SCREENSHOT_OUT}" 2>/dev/null || echo 0)
                     if (( size >= MIN_SCREENSHOT_BYTES )); then
-                        break
+                        passed=1
                     fi
                 fi
             fi
         fi
+    fi
+    if (( passed )); then
+        consecutive_passes=$((consecutive_passes + 1))
+        if (( consecutive_passes >= 2 )); then
+            break
+        fi
+    else
+        consecutive_passes=0
     fi
     sleep 0.2
 done

@@ -37,7 +37,12 @@ last onto the final tonemapped image, (Phase 8d) a data-driven input
 action-mapping layer underneath free-fly camera movement, and (Phase 8e)
 basic physics/collision -- gravity plus ground-plane collision for
 ECS entities with a new RigidBody/Collider component pair, demonstrated by a
-small cube that visibly falls and comes to rest on the ground plane -- built
+small cube that visibly falls and comes to rest on the ground plane, and
+(Phase 14a) the first sub-phase of a new "Phase 14: full editor UI" arc -- a
+bigger, properly resizable window and an always-on Dear ImGui docking shell
+(Scene/Assets/Viewport/Inspector placeholder panels, Unity/Blender-style)
+layered over the still-unchanged 3D render, alongside (not replacing) the
+existing Phase 8c F1 debug overlay -- built
 up from bare-metal OpenGL, and
 verified at every step by a headless Xvfb+Mesa run/screenshot harness (no
 GPU or display required).
@@ -260,9 +265,13 @@ demo path, before `render()`:
 8. Resolves the final image to the window with one fullscreen tonemap/
    gamma-correct/bloom-composite pass (`postProcessShader_` +
    `postProcessQuad_`).
-9. Unless `ENGINE_SHOW_DEBUG_UI` is set, stops here. Otherwise draws the
-   Phase 8c Dear ImGui debug overlay (`renderDebugUI()`) straight onto the
-   default framebuffer, on top of the now-final tonemapped image.
+9. Draws Phase 14a's always-on `EditorUI` dockspace shell
+   (Scene/Assets/Viewport/Inspector placeholder panels) straight onto the
+   default framebuffer, on top of the now-final tonemapped image, then
+   (unless `ENGINE_SHOW_DEBUG_UI`/F1 have it off) the Phase 8c Dear ImGui
+   debug overlay (`renderDebugUI()`) as a normal free-floating window in
+   that same ImGui frame -- see "Phase 14a" below for why these two share
+   one ImGui context/frame instead of each owning their own.
 
 ## Directory layout
 
@@ -275,14 +284,15 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        hdri_loader.cpp, compute_shader.cpp,
                        cluster_light_culler.cpp, ssao.cpp,
                        scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp,
-                       input_action_map.cpp, physics.cpp)
+                       input_action_map.cpp, physics.cpp, editor_ui.cpp)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
                        resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
-                       scene_serialization, debug_ui, input_action_map, physics)
+                       scene_serialization, debug_ui, input_action_map, physics,
+                       editor_ui)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -411,12 +421,19 @@ tools/run_headless.sh [path-to-engine_app] [screenshot-output.png]
 #   screenshot-output.png build/phase0_screenshot.png
 ```
 
-Equivalent manual steps, if you want to reproduce it by hand:
+Equivalent manual steps, if you want to reproduce it by hand (Phase 14a
+note: `engine_app`'s own default window size is 1600x900 as of that phase --
+`ENGINE_WINDOW_WIDTH=800 ENGINE_WINDOW_HEIGHT=600` below, matching
+`tools/run_headless.sh`'s own Phase 14a change, keeps this manual recipe's
+window matched to the 800x600 Xvfb screen it's launched against; see that
+phase's own section for why headless verification stays pinned at 800x600
+instead of following the interactive default up to 1600x900):
 
 ```sh
 Xvfb :99 -screen 0 800x600x24 &
 export DISPLAY=:99
 export LIBGL_ALWAYS_SOFTWARE=1   # force Mesa's llvmpipe software GL driver
+export ENGINE_WINDOW_WIDTH=800 ENGINE_WINDOW_HEIGHT=600   # Phase 14a
 ./build/engine_app &
 xwd -root -display :99 -out shot.xwd && convert shot.xwd shot.png
 wait
@@ -2477,7 +2494,10 @@ it renders, instead of only ever reading log lines or comparing screenshots
 after the fact -- a [Dear ImGui](https://github.com/ocornut/imgui) debug
 overlay, drawn last in the frame, straight onto the window.
 
-- **Vendoring**: Dear ImGui is `FetchContent`'d (git tag `v1.92.9b`) the
+- **Vendoring**: Dear ImGui is `FetchContent`'d (git tag `v1.92.9b`, bumped
+  to `v1.92.9b-docking` by Phase 14a to gain docking support -- see that
+  phase's own section for why upstream needed a different tag, not just a
+  config flag, for that) the
   same way GLFW/GLM/Assimp/nlohmann_json already are -- an ordinary,
   actively-maintained, tagged dependency, not a code generator with no
   canonical pre-generated file to pull (see "GL loader" below for why
@@ -2914,6 +2934,240 @@ than being a refactor verified pixel-identical against a prior commit.
   shadow, no visible gap underneath and no clipping into the floor -- well
   clear of both `scene.obj`'s furniture and the PBR sphere grid in every
   frame.
+
+### Phase 14a: editor window scaffolding + an empty ImGui docking shell
+
+First sub-phase of a new, larger arc -- **"Phase 14: full editor UI"** --
+moving this project from "an engine that renders one fixed demo scene" toward
+"an engine with an actual editor around it" (Unity/Blender-style: a scene
+hierarchy + asset browser on the left, a 3D viewport filling the center, an
+inspector on the right). This phase is scaffolding only: a bigger, properly
+resizable window and an empty Dear ImGui docking layout with four placeholder
+panels. No real panel content, no render-to-texture viewport (Phase 14c), no
+real scene hierarchy (Phase 14d), no real inspector (Phase 14e) -- those are
+later sub-phases of this same arc, each following the same
+build-verify-commit-then-check-in-before-push pattern as this one.
+
+- **The vendored Dear ImGui tag had to change, not just its config flags**:
+  this phase's own brief assumed docking was already merged into upstream
+  Dear ImGui's `master` branch by v1.92.9b (the tag Phase 8c already
+  vendors). It is not, and never has been -- `ocornut/imgui` has kept
+  docking (`DockSpace`/`DockBuilder*`/`ImGuiConfigFlags_DockingEnable`,
+  `ImGuiViewport`, etc.) on a permanently separate `docking` branch/tag
+  family for its entire existence, released in lockstep with every ordinary
+  tag rather than ever merged in. Verified directly before writing a single
+  line of this project's own code: `git ls-remote --tags` against upstream
+  shows a `v1.92.9b-docking` tag alongside the plain `v1.92.9b` this project
+  already pins, and a clone of the latter has zero occurrences of
+  `ImGuiConfigFlags_DockingEnable`/`DockBuilder*`/`DockSpaceOverViewport`
+  anywhere in `imgui.h`/`imgui_internal.h`. `CMakeLists.txt`'s `GIT_TAG`
+  switched to `v1.92.9b-docking` -- the exact same release, plus docking;
+  nothing else about this project's ImGui usage or version changes.
+- **Bigger, resizable window** (`main.cpp`): the default window size grows
+  from Phase 1's 800x600 to **1600x900** -- big enough that all four
+  dockspace panels below get genuinely usable screen space instead of a
+  cramped sliver, while staying an ordinary 16:9 window a user can still
+  move/tile/resize on their own desktop rather than a forced fullscreen.
+  1600x900 (not 1920x1080) was chosen specifically to bound how much this
+  phase grows headless-verification render time (see below). The literal
+  800x600 default was never hardcoded inside `Window` itself -- it was
+  always `main.cpp`'s call-site choice (`engine::Application app(800, 600,
+  ...)`) -- so only that call site changed; `Window`'s constructor still
+  takes width/height as plain parameters, unconstrained. `Window` also
+  gained an optional `maximized` constructor parameter (sets the
+  `GLFW_MAXIMIZED` hint before creation) -- **defaults to false** (an
+  ordinary resizable window the user maximizes themselves), with
+  `ENGINE_WINDOW_MAXIMIZED=1` as the documented opt-in for "start already
+  maximized" instead, the same getenv-gated-off-by-default pattern as every
+  other flag in this engine. No `GLFW_RESIZABLE` hint has ever been set
+  (Phase 1 onward) -- GLFW's own default (resizable) already applied before
+  this phase; what this phase actually adds on top is something reacting to
+  a resize (next point).
+- **Live resize doesn't crash or corrupt GL state**: `Window`'s constructor
+  now also registers a `glfwSetFramebufferSizeCallback()` that immediately
+  re-applies `glViewport()` to the new framebuffer size. This is deliberately
+  redundant with `Application::render()`'s own per-frame
+  `glViewport(0, 0, fbWidth, fbHeight)` call (confirmed, not changed, by this
+  phase -- it already re-derives `fbWidth`/`fbHeight` fresh from
+  `window_.getSize()` at the top of every `render()` call, never a value
+  cached at construction), but the callback matters for one case the
+  per-frame call alone doesn't cover: on at least Windows, an interactive
+  drag-resize runs GLFW's event pump through a modal loop for the whole
+  drag, during which this engine's own main loop (poll -> update -> render
+  -> swap) never reaches its next `render()` call -- only a registered
+  callback fires during that blocked period. **Explicitly out of scope for
+  this phase**, and unnecessary for its own bar of "doesn't crash / doesn't
+  corrupt GL state": actually redrawing new content live *during* a drag
+  (so the window doesn't appear frozen while being resized) would require
+  rendering from inside the callback itself, and every fixed-size render
+  target this engine allocates (`hdrFramebuffer_`, SSAO's g-buffer, bloom's
+  ping-pong buffers, the shadow maps) is still sized once, at construction,
+  from the window's *initial* framebuffer size -- unaffected by the resize
+  callback, not resized when the window is. A resize therefore cannot crash
+  or corrupt any of those buffers, but it can make the final on-screen image
+  look visually stretched relative to the window's new aspect ratio until
+  those buffers are themselves resize-aware -- deferred to Phase 14c's
+  render-to-texture viewport work, exactly as this phase's brief scoped it.
+- **DebugUI (F1 diagnostic overlay, Phase 8c) vs. EditorUI (this phase's
+  always-on dockspace)**: two classes, serving genuinely different purposes
+  -- an occasional diagnostic HUD vs. persistent editor chrome -- but they
+  cannot each independently own a full ImGui context/backend the way the
+  brief's "alongside DebugUI" framing might first suggest. Dear ImGui
+  supports multiple `ImGuiContext` instances in principle, but
+  `imgui_impl_glfw`'s GLFW callbacks are installed **once per GLFWwindow\***,
+  not once per context -- two independent
+  `ImGui_ImplGlfw_InitForOpenGL(window, install_callbacks=true)` calls on
+  the *same* window would have the second silently clobber the first
+  context's own callback registration at the GLFW level. So there is
+  exactly one live ImGui context driving this window's input, period, and
+  the question is only which class owns it. Since `EditorUI`'s dockspace is
+  unconditionally on every run (unlike `DebugUI`'s F1-toggled overlay), it's
+  the natural, and now the only, owner: `EditorUI` (`editor_ui.hpp`/
+  `editor_ui.cpp`) creates the ImGui context, sets
+  `io.ConfigFlags |= ImGuiConfigFlags_DockingEnable`, and owns the
+  `ImGui_ImplGlfw`/`ImGui_ImplOpenGL3` backend lifecycle -- unconditionally,
+  no enabled/disabled gate, mirroring the shape `DebugUI` used to have
+  itself before this phase. `DebugUI` was slimmed down to what it actually
+  still needs to be: the `enabled_` bool `ENGINE_SHOW_DEBUG_UI`/F1 have
+  always controlled, plus `setEnabled()`'s same log lines as before -- it no
+  longer touches ImGui/GL at all itself. `Application::renderDebugUI()`
+  (its actual panel-building code) is **completely unchanged** -- same
+  Frame Stats/Render Passes/Input Bindings/Scene Entities content, same
+  `ENGINE_SHOW_DEBUG_UI`/F1 gating -- it just now submits its `ImGui::`
+  calls into whichever frame `EditorUI` already started, instead of
+  bracketing its own separate `ImGui::NewFrame()`/`Render()` pair.
+  `Application::render()`'s tail is now: `editorUI_.newFrame()` ->
+  `editorUI_.renderDockspaceShell()` -> `renderDebugUI()` (a no-op unless
+  enabled, exactly as before) -> `editorUI_.render()`.
+- **The dockspace layout** (`EditorUI::renderDockspaceShell()`):
+  `ImGui::DockSpaceOverViewport(0, nullptr, ImGuiDockNodeFlags_PassthruCentralNode)`
+  covers the whole main viewport; the first time it ever runs (guarded by an
+  internal `layoutBuilt_` flag, not re-run every frame -- `imgui.ini`
+  persistence is left off, same reasoning as `DebugUI`'s own Phase 8c
+  choice, so there's nothing on disk to restore instead), the DockBuilder
+  API (`imgui_internal.h` -- still marked "not yet a stable public API"
+  upstream, but the documented, standard way every Dear ImGui docking app
+  sets up an initial layout; mirrors `imgui_demo.cpp`'s own
+  `ShowExampleAppDockSpace()`) splits it into the approved-mockup regions:
+  **Scene** (left column, upper), **Assets** (left column, lower),
+  **Inspector** (right column), **Viewport** (center, whatever's left).
+  Each panel is `ImGui::Begin()`/`End()` with one `ImGui::TextWrapped()`
+  placeholder line (e.g. "Scene Hierarchy -- coming in Phase 14d") -- no
+  real content, no Play/Pause/Restart or other toolbar chrome. Guarding on
+  `layoutBuilt_` (checked once, not every frame) means a user's own later
+  drag-to-resize/rearrange of these four panels is never stomped by this
+  code on a subsequent frame.
+- **The Viewport panel currently floats over the still-directly-rendered 3D
+  scene, not a texture of it** -- exactly the documented, temporary,
+  intermediate state this phase's brief called out rather than something
+  this phase tried to prematurely solve. The 3D scene keeps rendering
+  straight to the default framebuffer precisely as every prior phase left
+  it, entirely independent of `EditorUI`; `ImGuiDockNodeFlags_PassthruCentralNode`
+  only makes a dock node's background see-through when that node is
+  **empty** -- since "Viewport" is docked *into* the central node (not
+  merely left unoccupied), its own ordinary opaque window background covers
+  that region regardless of the flag, hiding the 3D render behind it in
+  practice. Confirmed directly (see the manual-capture screenshot described
+  below): at any window size, the Scene/Assets/Inspector panels show the
+  scene behind their own edges' gaps, but the Viewport panel's own interior
+  is flat dark background, not the 3D render. Rendering the actual scene
+  into that panel is exactly Phase 14c's job.
+- **A real, reproducible headless-harness bug this phase's own content
+  exposed** (not present in any prior phase, worth recording in full):
+  `tools/run_headless.sh`'s polling loop accepted the *first* `xwd`+
+  `convert` capture whose file size cleared `MIN_SCREENSHOT_BYTES=20000` --
+  tuned against every prior phase's own "real content" always being a
+  dense, colorful lit 3D render (hundreds of KB), safely distinguishable
+  from Xvfb's blank root window (~241 bytes). This phase's own steady-state
+  frame -- four mostly-text-on-dark-background dockspace panels covering
+  most of the window -- PNG-compresses to only **~11-12KB**, *below* that
+  old threshold: a real screenshot mistaken for a possibly-still-blank one.
+  Worse, a direct frame-by-frame trace of a real headless run (`xwd`
+  captured every 0.2s against the same running process, sizes logged) found
+  the *first* frame with any real content at all momentarily showed the
+  full 3D scene with **no dockspace at all** -- a one-frame gap before
+  settling into the stable, dockspace-covered state every frame after it
+  -- a known, benign Dear ImGui docking startup transient (a freshly
+  created dock node's child window needs one frame to actually occupy its
+  slot). That one transient frame happened to be large enough (a full,
+  uncovered 3D render) to clear the *old* 20000-byte threshold, so the
+  original "first passing screenshot wins" loop reliably grabbed that one
+  anomalous frame instead of the stable one immediately following it --
+  reproduced identically across multiple separate runs. Fixed by lowering
+  `MIN_SCREENSHOT_BYTES` to 2000 (comfortable margin above the ~241-byte
+  blank case, clears every real frame observed on either side of this
+  phase) and requiring the size check to pass on **two consecutive** 0.2s-
+  apart polls (not just one) before accepting -- skips past exactly that
+  kind of single anomalous frame, at the cost of one extra 0.2s poll in the
+  common case where there's nothing to debounce. This is a fix to shared
+  verification infrastructure every phase's headless run depends on, called
+  out explicitly rather than folded in silently.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild (after clearing the
+  stale pre-docking `imgui-src`/`imgui-subbuild`/`imgui-build` FetchContent
+  state so the new `v1.92.9b-docking` tag actually gets fetched) compiles
+  with **zero new warnings** under `-Wall -Wextra`. `ctest` still reports
+  all three tests passing (`scene_serialization_test`,
+  `input_action_map_test`, `physics_test`) -- this phase touches no tested
+  logic. `tools/run_headless.sh` (fixed per above) was run repeatedly at
+  `ENGINE_MAX_FRAMES=60`: every run completed cleanly (exit 0), **zero
+  `[ERROR]`/GL-error lines**, and the resulting screenshot is byte-identical
+  across separate runs (12686 bytes each time) -- deterministic, showing the
+  four dockspace panels in their correct approved-mockup positions with the
+  Viewport panel's own dark interior in the center (see the point above on
+  why the 3D scene isn't visible through it yet). `ENGINE_SHOW_DEBUG_UI=1`
+  was separately confirmed to still show the exact same "Engine Debug"
+  panel (Frame Stats/Render Passes/Input Bindings/Scene Entities, listing
+  both `scene` and `falling_cube`) as a normal free-floating ImGui window
+  layered over the dockspace, unaffected in content -- confirming `DebugUI`'s
+  own behavior truly didn't change. A separate, un-clamped run directly
+  exercised the *actual* default (1600x900, no `ENGINE_WINDOW_WIDTH`/HEIGHT`
+  override, against a matching 1600x900 Xvfb screen) end to end: it also
+  completed cleanly with zero GL errors and rendered the same dockspace
+  layout correctly proportioned at the bigger size. That run measured
+  **~0.51s/frame at 1600x900 vs. ~0.30s/frame at 800x600** in this Debug
+  build on this project's llvmpipe software rasterizer (roughly 1.7x, not
+  the full 3x the pixel-count increase might suggest, since several render
+  passes -- bloom, SSAO -- are already downsampled/fixed-resolution) --
+  confirming the decision below to keep the *headless verification* path
+  pinned at 800x600 rather than accept that slowdown across every future
+  phase's own headless runs.
+  - **Why headless verification stays at 800x600 instead of widening to
+    match**: `main.cpp` reads `ENGINE_WINDOW_WIDTH`/`ENGINE_WINDOW_HEIGHT`
+    to override its own new 1600x900 default (same validated,
+    warn-and-fall-back-on-garbage-input shape as `ENGINE_MAX_FRAMES`);
+    `tools/run_headless.sh` now sets both to 800/600 before launching
+    `engine_app`, and Xvfb's own virtual screen is left at its original
+    800x600x24 (unchanged) to match. Widening Xvfb to 1600x900 instead (the
+    other option this phase's brief allowed) was rejected specifically
+    because of the measured ~1.7x-slower-per-frame result above: every
+    render pass sized off the window's real framebuffer would run at that
+    cost on the exact same 60s hard-kill timeout every *prior* phase's own
+    headless verification was measured against (sized off Phase 13g's own
+    ~20s/60-frames Debug-build cost) -- risking a regression to every
+    existing phase's headless story, not just this one, for a resolution
+    bump this phase's own placeholder-only panels don't substantively
+    need. A real interactive run still gets the bigger, more usable 1600x900
+    default; only this specific verification path opts back down.
+  - **Live resize -- the honest limitation**: Xvfb has no real window
+    manager or pointer device driving an actual interactive drag-resize, so
+    this phase's live-resize claim rests on: (a) direct code inspection
+    confirming `render()`'s per-frame `glViewport()` call already re-derives
+    the current framebuffer size fresh every frame rather than a cached
+    value (true before this phase too, just now verified rather than
+    assumed); (b) the new `glfwSetFramebufferSizeCallback()` registered and
+    exercised at both tested sizes (800x600 and 1600x900) without error,
+    confirming the callback itself compiles, links, and fires correctly for
+    the one resize GLFW *does* deliver headlessly (the initial
+    window-creation size); and (c) no code path in either the callback or
+    `render()`'s existing per-frame viewport call does anything unsafe with
+    a changed size (0-sized viewports are well-defined in GL; no fixed-size
+    FBO is touched by either). What this does **not** cover: an actual
+    interactive drag-resize's full modal-loop behavior (relevant primarily
+    on Windows -- see `window.hpp`'s own comment), which needs verification
+    on a real desktop. Documented plainly rather than claimed as fully
+    proven -- this matches this phase's own brief, which anticipated that
+    exact limitation as an acceptable answer for a headless-only
+    verification environment.
 
 ## Libraries used and why
 

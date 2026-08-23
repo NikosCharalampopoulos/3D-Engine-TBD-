@@ -1027,8 +1027,8 @@ constexpr std::uint64_t kCullLogFrameInterval = 15;
 
 }  // namespace
 
-Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames)
-    : window_(width, height, title),
+Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames, bool maximized)
+    : window_(width, height, title, maximized),
       shader_(resources_.getShader(kVertexShaderPath, kFragmentShaderPath)),
       shadowShader_(resources_.getShader(kShadowVertexShaderPath, kShadowFragmentShaderPath)),
       skyboxShader_(resources_.getShader(kSkyboxVertexShaderPath, kSkyboxFragmentShaderPath)),
@@ -1144,11 +1144,16 @@ Application::Application(int width, int height, const std::string& title, std::u
       // header note on declaration order).
       sphereMesh_(makeUVSphere(32, 32, kSphereRadius)),
       camera_(kDefaultCameraPosition),
-      // Phase 8c: window_.handle() already exists (window_ is the first
-      // member constructed) -- see this header's own Phase 8c comment for
-      // why "enabled=false" (the default) means this constructor does
-      // nothing at all, not just "creates an invisible window".
-      debugUI_(window_.handle(), showDebugUIFromEnv()),
+      // Phase 8c: initial enabled/disabled state from ENGINE_SHOW_DEBUG_UI.
+      // Phase 14a: no longer takes window_.handle() -- this no longer
+      // creates or owns anything ImGui-related itself (see debug_ui.hpp's
+      // own Phase 14a comment); it's now a plain state initializer.
+      debugUI_(showDebugUIFromEnv()),
+      // Phase 14a: window_.handle() already exists (window_ is the first
+      // member constructed) -- always constructed, unconditionally, unlike
+      // debugUI_ above (see editor_ui.hpp's own header comment for why
+      // this is the one that owns the shared ImGui context/backends).
+      editorUI_(window_.handle()),
       maxFrames_(maxFrames),
       cameraDemoMode_(cameraDemoModeFromEnv()),
       frustumCullDemoMode_(frustumCullDemoModeFromEnv()),
@@ -2194,14 +2199,26 @@ void Application::render() {
     postProcessQuad_.bind();
     postProcessQuad_.draw();
 
-    // Phase 8c: last thing render() does, after the tonemap/bloom
+    // Phase 8c/14a: last thing render() does, after the tonemap/bloom
     // postprocess pass right above has already resolved onto the default
     // framebuffer (still bound from that pass, at the window's own
-    // viewport) -- see this class's own Phase 8c header comment for why
-    // ImGui draws straight onto the final tonemapped image rather than
-    // through the HDR/bloom/SSR pipeline. A no-op unless ENGINE_SHOW_DEBUG_UI
-    // was set at startup.
+    // viewport) -- so every ImGui widget (both editorUI_'s always-on
+    // dockspace shell and, when enabled, debugUI_'s diagnostic panel) lands
+    // straight on the final tonemapped image rather than through the HDR/
+    // bloom/SSR pipeline. One shared ImGui frame per render() call now (see
+    // editor_ui.hpp's own header comment for why there's exactly one, not
+    // one per UI class): editorUI_.newFrame() starts it,
+    // editorUI_.renderDockspaceShell() submits the always-on
+    // Scene/Assets/Viewport/Inspector placeholder panels, renderDebugUI()
+    // additionally submits debugUI_'s own panel content (still a no-op
+    // unless ENGINE_SHOW_DEBUG_UI/F1 have enabled it -- entirely unchanged
+    // from Phase 8c/8d), and editorUI_.render() rasterizes everything
+    // submitted this frame in one ImGui::Render() +
+    // ImGui_ImplOpenGL3_RenderDrawData() pair.
+    editorUI_.newFrame();
+    editorUI_.renderDockspaceShell();
     renderDebugUI();
+    editorUI_.render();
 }
 
 // Phase 8c: builds and draws the debug overlay -- see this class's own
@@ -2243,7 +2260,10 @@ void Application::renderDebugUI() {
         return;
     }
 
-    debugUI_.newFrame();
+    // Phase 14a: no debugUI_.newFrame() call here any more -- editorUI_
+    // already started this frame's one shared ImGui frame (see render()'s
+    // own tail) before this function runs. Everything below is otherwise
+    // byte-for-byte the same panel this function has drawn since Phase 8c.
 
     // ImGuiCond_FirstUseEver: places the window at a sane on-screen default
     // the first time it ever appears (this engine disables imgui.ini
@@ -2350,7 +2370,10 @@ void Application::renderDebugUI() {
 
     ImGui::End();
 
-    debugUI_.render();
+    // Phase 14a: no debugUI_.render() call here any more -- editorUI_.
+    // render() (see render()'s own tail) rasterizes this panel's draw data
+    // together with editorUI_'s own dockspace/panels in one shared
+    // ImGui::Render() call.
 }
 
 void Application::run() {
