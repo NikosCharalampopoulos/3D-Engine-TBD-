@@ -2290,6 +2290,30 @@ void Application::renderDebugUI() {
         }
     }
 
+    // Cross-phase note (8c x 8e), not caught by either phase's own review in
+    // isolation: for a RigidBody entity (e.g. "falling_cube"), this panel's
+    // DragFloat3 edit and stepPhysics() (called once per frame from
+    // update(), BEFORE render() -- see that function's own Phase 8e comment)
+    // both write the same entity's Transform::position within one frame, in
+    // this order: stepPhysics() first, this panel last (renderDebugUI() is
+    // the final call in render()). So a drag here always "wins" for what the
+    // Transform holds at the end of the frame -- it is never silently
+    // clobbered -- but this same frame's already-drawn 3D view used the
+    // OLDER, physics-computed position (drawn earlier in render(), before
+    // this panel runs), so the drag's effect on-screen is visible one frame
+    // late. That one-frame lag applies to editing ANY entity here, with or
+    // without a RigidBody; what's specific to RigidBody is this: dragging an
+    // entity's position does not touch its RigidBody::velocity, so next
+    // frame's stepPhysics() resumes integrating from the dragged-to position
+    // using whatever velocity the body already had -- e.g. dragging a
+    // falling entity back up mid-fall does not make it come to rest at the
+    // new spot; it keeps falling from there at its prior speed. Whether a
+    // manual reposition should also zero velocity is a physics/product
+    // design call this "gravity + ground collision" phase's own scope never
+    // needed to make (see physics.hpp's own "What this deliberately IS NOT"
+    // list) -- not a bug in either system considered alone, just a real
+    // interaction worth knowing about before relying on this panel to
+    // "place" a falling entity.
     if (ImGui::CollapsingHeader("Scene Entities", ImGuiTreeNodeFlags_DefaultOpen)) {
         registry_.each<Transform>([&](EntityId id, Transform& transform) {
             const NameComponent* nameComponent = registry_.getComponent<NameComponent>(id);
