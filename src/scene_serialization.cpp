@@ -13,6 +13,7 @@
 
 #include <fstream>
 #include <stdexcept>
+#include <unordered_set>
 
 #include "engine/log.hpp"
 
@@ -218,7 +219,48 @@ std::vector<SceneEntityRecord> parseSceneRecords(const std::string& path) {
                 readFloat(colliderJson, "halfExtent", record.colliderHalfExtent, context + ".collider");
         }
 
+        // Phase 14b: "parent" is a plain string naming another entity in
+        // this same file -- see this file's header's own "Parent
+        // references" comment for why a name, not a raw EntityId. Whether
+        // that name actually resolves to another entity in this file is
+        // checked below, in a second pass over every record, once every
+        // entity's name is known -- not here, since the named parent may
+        // not have been parsed yet (a child is allowed to appear before its
+        // parent in "entities").
+        if (entityJson.contains("parent")) {
+            const json& parentJson = entityJson.at("parent");
+            if (!parentJson.is_string()) {
+                throw std::runtime_error(context + ": \"parent\" must be a string entity name");
+            }
+            record.parentName = parentJson.get<std::string>();
+        }
+
         records.push_back(std::move(record));
+    }
+
+    // Phase 14b: second pass, now that every record's "name" is known --
+    // every non-empty parentName must match some OTHER record's name
+    // somewhere in this same file (see this file's header's own "Parent
+    // references" comment). A name that matches nothing is a schema error
+    // worth failing loudly on here, the same "validate at this boundary,
+    // specific message" treatment every other malformed-input case in this
+    // function already gets, rather than silently loading as an
+    // (incorrectly) root-level entity or deferring the failure to
+    // loadScene() where the offending JSON entity index is no longer
+    // directly at hand.
+    std::unordered_set<std::string> allNames;
+    allNames.reserve(records.size());
+    for (const SceneEntityRecord& record : records) {
+        allNames.insert(record.name);
+    }
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        const SceneEntityRecord& record = records[i];
+        if (!record.parentName.empty() && allNames.find(record.parentName) == allNames.end()) {
+            const std::string context = "parseSceneRecords: \"" + path + "\" entities[" + std::to_string(i) + "]";
+            LOG_ERROR(context + ": \"parent\" references unknown entity name \"" + record.parentName + "\"");
+            throw std::runtime_error(context + ": \"parent\" references unknown entity name \"" + record.parentName +
+                                      "\"");
+        }
     }
 
     return records;
@@ -250,6 +292,12 @@ void writeSceneRecords(const std::vector<SceneEntityRecord>& records, const std:
         }
         if (record.hasCollider) {
             entityJson["collider"] = {{"halfExtent", record.colliderHalfExtent}};
+        }
+        // Phase 14b: "parent" is written independently of every other
+        // block, same opt-in-per-entity treatment -- see this file's
+        // header's "Schema" comment.
+        if (!record.parentName.empty()) {
+            entityJson["parent"] = record.parentName;
         }
         entities.push_back(std::move(entityJson));
     }

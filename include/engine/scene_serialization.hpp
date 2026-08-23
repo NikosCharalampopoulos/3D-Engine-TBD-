@@ -61,13 +61,21 @@
 //                                                   // own defaults) --
 //                                                   // "rigidBody": {} is a
 //                                                   // valid, at-rest body.
-//       "collider": { "halfExtent": 0.25 }          // optional block (Phase
+//       "collider": { "halfExtent": 0.25 },         // optional block (Phase
 //                                                   // 8e) -- presence adds
 //                                                   // a Collider component;
 //                                                   // "halfExtent" itself
 //                                                   // optional, defaulting
 //                                                   // to Collider's own
 //                                                   // 0.25 default.
+//       "parent": "some_other_entity_name"          // optional (Phase 14b)
+//                                                   // -- presence adds a
+//                                                   // Parent component
+//                                                   // referencing another
+//                                                   // entity BY NAME (see
+//                                                   // "Parent references"
+//                                                   // below), not by a raw
+//                                                   // EntityId index.
 //     }
 //   ]
 // }
@@ -92,6 +100,48 @@
 // gimbal-lock reason transform.hpp itself already documents; storing
 // Euler angles here would silently reintroduce that problem one file away
 // from where it was originally avoided.
+//
+// --- Parent references: by name, not by raw EntityId (Phase 14b) --------
+// An entity's own EntityId is a fresh, monotonically-increasing index
+// EntityRegistry::create() hands out at LOAD time (see ecs.hpp) -- nothing
+// about it survives a save/load round-trip meaningfully, the same reason
+// NameComponent exists at all (see ecs.hpp's own NameComponent comment).
+// So "parent" is authored as another entity's "name" string within the
+// same file, not a numeric id. Two consequences that shape where the two
+// halves of this feature live:
+//
+//   1. A child can be listed BEFORE its parent in the "entities" array
+//      (assets/scenes/default.json's own "parented_demo_cube" demonstrates
+//      exactly this, listed before "falling_cube") -- parseSceneRecords()
+//      below only knows every entity's name once it has finished parsing
+//      the whole file, so it validates "parent" references (every non-empty
+//      SceneEntityRecord::parentName must match some OTHER record's "name"
+//      in the same file) in a second pass AFTER the main per-entity parsing
+//      loop, not while still parsing the entity that names it. A "parent"
+//      naming an entity that doesn't exist anywhere in the file throws
+//      std::runtime_error (after LOG_ERROR) at this parseSceneRecords()
+//      layer, matching this header's own "validate at the boundary,
+//      specific message" convention for every other malformed-input case
+//      -- see scene_serialization.cpp.
+//   2. Actually turning a validated parentName back into a live EntityId
+//      (and adding the resulting Parent component -- see
+//      transform_hierarchy.hpp) is loadScene()'s job, not
+//      parseSceneRecords()'s: it needs a name -> EntityId map built from
+//      the entities THIS load actually created, which only exists once
+//      EntityRegistry::create() has run for every record (see
+//      scene_loader.cpp). This is exactly this header's own pre-existing
+//      "pure data (scene_serialization.cpp) vs. EntityRegistry-facing
+//      (scene_loader.cpp)" split already documented below -- parentName
+//      resolution is pure data validation (does the name exist at all?),
+//      Parent-component construction is EntityRegistry-facing (what
+//      EntityId does that name resolve to?), so each half lives in the
+//      file already responsible for that kind of work.
+//
+// A cycle of "parent" names (A parents B, B parents A) passes this file's
+// own existence-only validation (both names genuinely exist in the file)
+// -- it's resolveWorldMatrix() (transform_hierarchy.hpp), not this schema
+// layer, that guards against a cycle actually being walked; see that
+// header's own comment for why cycle-safety belongs there instead of here.
 //
 // --- Two-stage load: pure data vs. GL-touching, in two .cpp files -------
 // parseSceneRecords()/writeSceneRecords() (implemented in
@@ -151,6 +201,14 @@ struct SceneEntityRecord {
     glm::vec3 rigidBodyVelocity{0.0f, 0.0f, 0.0f};
     bool hasCollider = false;
     float colliderHalfExtent = 0.25f;
+
+    // Phase 14b: mirrors the optional "parent" field above -- empty when
+    // the entity's JSON had no "parent" field at all (matching modelPath's
+    // own empty-string "no such block" convention), otherwise the OTHER
+    // entity's "name" this one is parented to. See this header's own
+    // "Parent references" comment above for why this is a name, resolved
+    // to an EntityId only later (by loadScene(), not here).
+    std::string parentName;
 };
 
 // Parses `path` as a scene JSON file (see this header's "Schema" comment)
@@ -198,7 +256,20 @@ void writeSceneRecords(const std::vector<SceneEntityRecord>& records, const std:
 // propagate a bare, entity-less error up from deep inside Model's own
 // constructor, since a multi-entity scene file needs to say *which*
 // entity's asset reference was bad. Also propagates parseSceneRecords()'s
-// own exceptions unchanged (missing file / invalid JSON / bad schema).
+// own exceptions unchanged (missing file / invalid JSON / bad schema,
+// including an unresolvable "parent" name -- see this header's own
+// "Parent references" comment).
+//
+// Phase 14b: after every record's entity has been created (a first pass,
+// exactly as before), a second pass adds a Parent component (see
+// transform_hierarchy.hpp) for every record whose parentName is non-empty,
+// resolved through a name -> EntityId map built from THIS load's own
+// entities. parseSceneRecords() already guarantees every non-empty
+// parentName matches some record's name somewhere in the same file, so
+// this map lookup cannot fail for a file that parsed successfully -- see
+// this header's own "Parent references" comment for why that validation
+// lives at the parse layer while the actual EntityId resolution has to
+// happen here instead.
 void loadScene(EntityRegistry& registry, const std::string& path, ResourceManager& resources, Shader& shader);
 
 // Serializes every entity in `registry` that has at least a Transform
@@ -214,6 +285,12 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
 // "rigidBody"/"collider" block for any entity with a RigidBody/Collider
 // component (independently -- see this header's own "Schema" comment),
 // same opt-in-per-entity treatment as ModelComponent already gets.
+// Phase 14b: also writes a "parent" field for any entity with a Parent
+// component, resolved back to that OTHER entity's own name (its
+// NameComponent if it has one, or the same generated "entity_<index>"
+// placeholder this function already falls back to for a name-less entity)
+// -- see this header's own "Parent references" comment for why "parent" is
+// authored/round-tripped by name, never by raw EntityId.
 //
 // Takes `registry` by non-const reference, not const&, even though this
 // function only reads it: EntityRegistry::each<T>()/pool<T>() (see

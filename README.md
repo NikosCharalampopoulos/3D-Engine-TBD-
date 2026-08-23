@@ -3169,6 +3169,207 @@ build-verify-commit-then-check-in-before-push pattern as this one.
     exact limitation as an acceptable answer for a headless-only
     verification environment.
 
+### Phase 14b: real parent/child transform hierarchy
+
+Second sub-phase of the "Phase 14: full editor UI" arc. Pure engine/ECS work
+with no UI of its own -- the Scene Hierarchy panel that will eventually
+*display* this as a tree is Phase 14d, later. This phase's job is only to
+make parenting real: moving/rotating a parent actually moves its children
+with it, the way Unity/Blender's own parent/child transforms behave, as
+opposed to a flat, non-transforming organizational "folder" grouping concept
+-- the user's own explicit choice between the two, made before this phase's
+design was written.
+
+- **`Parent`, a new opt-in component** (`include/engine/transform_hierarchy.hpp`,
+  new file): `struct Parent { EntityId id; };`, registered via
+  `addComponent<Parent>()` exactly the way `ecs.hpp`'s own header comment
+  says a new component type should be -- without touching `ecs.hpp` itself,
+  the same way `RigidBody`/`Collider` (Phase 8e, `physics.hpp`) already
+  didn't. `Parent` gets its own header for the same reason `RigidBody`/
+  `Collider` did rather than living in `ecs.hpp` alongside `ModelComponent`/
+  `NameComponent`, and deliberately drops the "Component" suffix those two
+  carry -- `ecs.hpp`'s own comment explains that suffix exists specifically
+  to avoid a bare `struct Model` colliding with the already-named `Model`
+  class; there is no preexisting `Parent` type to collide with, so `Parent`
+  follows `RigidBody`/`Collider`'s "self-contained concept, no suffix"
+  treatment instead. An entity with no `Parent` component is a root: its own
+  `Transform` **is** its world transform, unchanged from every phase before
+  this one -- every entity that existed before Phase 14b keeps rendering
+  exactly as it did unless it's specifically given a `Parent`.
+- **`resolveWorldMatrix(EntityRegistry&, EntityId)`**
+  (`src/transform_hierarchy.cpp`): walks from an entity up through `Parent`
+  components, collecting each level's own local `getModelMatrix()`, then
+  folds them together as `parentWorldMatrix * thisEntity'sOwnLocalMatrix`,
+  recursively up the chain to whichever ancestor is itself a root -- an
+  iterative walk (not real recursion), so the safety bounds below are loop
+  bounds, not call-stack depth. Returns `glm::mat4(1.0f)` for an entity with
+  no `Transform` at all, matching every render call site's own pre-existing
+  fallback for that case.
+  - **Cycle safety**: a visited-id set catches a cycle of any length
+    (`A.parent = B, B.parent = A`, or longer) -- detected, it stops and
+    treats the entity as an effective root from there, rather than looping
+    forever.
+  - **A hard depth bound** (`kMaxParentChainDepth = 64`) is a second,
+    independent guard on top of the visited-set check, against a
+    pathologically long (but not necessarily cyclic) chain -- belt-and-
+    suspenders, not strictly required for correctness given the visited set
+    alone, but cheap insurance against a future bug that grows the visited
+    set without actually revisiting an id.
+  - **Dangling parent safety**: a `Parent::id` that no longer names a live
+    `Transform` (not reachable yet -- there's no entity-destroy UI before
+    Phase 14f -- but designed for it anyway) is treated the same way: the
+    entity becomes an effective root from that point, not a crash.
+  - All three cases log a warning via `LOG_WARN` (`log.hpp`) **once per
+    offending entity**, not once per frame -- `resolveWorldMatrix()` is
+    called once per `ModelComponent` entity every single frame (see the
+    `application.cpp` call sites below), so a persistent cycle/dangling
+    reference would otherwise re-log identically 60 times a second for as
+    long as the engine runs. A module-level `std::unordered_set` of
+    already-warned entity indices keeps the message genuinely diagnostic.
+- **Physics stays local-space-only -- a deliberate scope boundary, not an
+  oversight** (`physics.cpp`'s own new Phase 14b comment states this
+  explicitly): `stepPhysics()` is **not** made `Parent`-aware. A `RigidBody`
+  entity's gravity integration and ground collision still read/write only
+  its own entity's local `Transform`, exactly as Phase 8e left it -- no
+  `#include` of `transform_hierarchy.hpp` was added to `physics.cpp` at all.
+  A parented, physics-simulated entity (e.g. an object that should fall
+  relative to a moving platform) would need gravity/collision to reason in
+  the parent's own moving reference frame -- relative-velocity transforms,
+  world-space-vs-local-space gravity, etc. -- which is real, separate scope
+  Phase 8e's own "basic physics/collision, not a general solver" boundary
+  doesn't call for and this phase declines to open. What **does** work: a
+  *static* (no `RigidBody`) entity parented under a `RigidBody` entity
+  correctly rides along with it **visually**, because `resolveWorldMatrix()`
+  runs at render time, after `stepPhysics()` has already updated the
+  parent's own local `Transform` for that frame -- no physics code needs to
+  know parenting exists for that to work.
+- **Wired into all three `getModelMatrix()` render call sites**
+  (`application.cpp`): the shadow pass (`renderShadowPass()`), the SSAO
+  g-buffer pass (`renderSSAO()`), and the main color pass (`render()`) each
+  used to do
+  `transform != nullptr ? transform->getModelMatrix() : glm::mat4(1.0f)`;
+  all three now call `resolveWorldMatrix(registry_, id)` instead, so a
+  parented entity renders, casts shadows, and appears in the SSAO g-buffer
+  at its correct **world** position rather than its raw local one. An
+  entity with no `Parent` resolves to exactly its own `getModelMatrix()`, so
+  this is behavior-preserving for every entity that existed before this
+  phase.
+- **Scene JSON schema: an optional `"parent"` field, by name, not by raw
+  `EntityId`** (`scene_serialization.hpp`/`.cpp`, `scene_loader.cpp`) --
+  exactly the "new named block, not a schema rewrite" extension pattern this
+  schema's own comment predicted, the same way Phase 8e's `"rigidBody"`/
+  `"collider"` blocks were. `"parent": "some_other_entity_name"` names
+  another entity in the same file by its `"name"` field, never by a raw
+  numeric index -- an `EntityId` is a fresh, monotonically-increasing index
+  handed out at *load* time (`EntityRegistry::create()`), meaningless across
+  a save/load round-trip, which is the exact reason `NameComponent` exists
+  at all.
+  - **A child can be listed before its parent in the file.**
+    `parseSceneRecords()` (pure data, no `EntityRegistry`) only validates
+    that every non-empty `"parent"` name matches some *other* record's
+    `"name"` **somewhere in the file**, in a second pass after the main
+    per-entity parsing loop -- it doesn't (and can't) resolve an `EntityId`
+    yet. `loadScene()` (the `EntityRegistry`-facing half) does the actual
+    resolution, in its own second pass after every record's entity has been
+    created, via a `name -> EntityId` map built during the first pass. This
+    two-pass shape is required specifically *because* forward references are
+    allowed; `assets/scenes/default.json` demonstrates it for real, not just
+    in a test (see below).
+  - **A `"parent"` naming an entity absent from the whole file throws**
+    `std::runtime_error` (after `LOG_ERROR`) at the `parseSceneRecords()`
+    layer -- this project's established "validate at the boundary, fail with
+    a specific message" convention, same treatment every other malformed-
+    input case in that function already gets.
+  - **A cycle of `"parent"` names** (`A` parents `B`, `B` parents `A`) passes
+    this existence-only schema validation (both names genuinely exist) --
+    catching that is `resolveWorldMatrix()`'s job at read time, not this
+    schema layer's; see the cycle-safety bullet above.
+  - **`saveScene()`** round-trips `"parent"` back to the *other* entity's own
+    name, but only when that entity still resolves to a live `Transform` --
+    a dangling `Parent` (not reachable yet, see above) is deliberately
+    **omitted** from the saved file rather than round-tripping a name that
+    would just fail `parseSceneRecords()`'s own validation on the next load.
+- **`assets/scenes/default.json`** gains one new entity,
+  `"parented_demo_cube"` -- reuses the existing `falling_cube.obj` mesh
+  (scaled to 0.6x, not physics-simulated: no `"rigidBody"`/`"collider"`
+  block) parented to the existing `"scene"` entity (which already carries a
+  fixed ~12° Y rotation, see Phase 8a/8b), at a local offset placed in open
+  ground space well clear of the table/box/pyramid/PBR-sphere-grid's own
+  footprint. Deliberately listed **before** `"scene"` in the `"entities"`
+  array, so the shipped scene file itself demonstrates the forward-reference
+  case above, not only a synthetic test. `falling_cube`'s own physics demo
+  (position, velocity, collider) is untouched.
+- **Tests, 3 -> 4**:
+  - `tests/scene_serialization_test.cpp` gained a `"parent"` round-trip case
+    (a 4th/5th record pair, deliberately pushed **child-before-parent** into
+    the vector so `writeSceneRecords()` preserves that same file order,
+    exercising the two-pass resolution above rather than only the case where
+    files happen to list parents first) and a negative case (a `"parent"`
+    naming nothing in the file throws).
+  - `tests/transform_hierarchy_test.cpp` (new): a hand-computable 3-level
+    hierarchy (root -> middle -> leaf, each level given a **non-identity
+    position, rotation, and scale**, not just a translation, so a wrong
+    composition order or a dropped rotation/scale would show up as a
+    mismatch) asserted against `expectedWorld = root.local * middle.local *
+    leaf.local`, computed independently of `resolveWorldMatrix()`'s own
+    implementation via plain `glm` matrix multiplication; an entity with no
+    `Transform` resolving to identity; a dangling-parent case; a two-entity
+    cycle case; and a chain deliberately longer than `kMaxParentChainDepth`
+    -- for both of the last two, the real assertion is that the test binary
+    *returns at all* rather than hanging or crashing (`ctest` would report a
+    timeout/crash otherwise), with a finite-matrix check as a secondary
+    sanity check on top.
+  - **A real bug caught by writing the hierarchy test, worth recording**:
+    the first version of the 3-level-hierarchy test held the `Transform&`
+    reference each `addComponent<Transform>()` call returns across the
+    *next* `addComponent<Transform>()` call on the same registry/pool. Per
+    `ecs.hpp`'s own `ComponentPool<T>` design, `add()` can reallocate its
+    backing `std::vector<T>` on any insertion into the same pool, silently
+    invalidating an earlier call's returned reference -- exactly the hazard
+    every real call site in this engine already avoids by using the
+    reference immediately and never keeping it past a sibling entity's own
+    `addComponent<Transform>()` call. The symptom was every hand-computed
+    expectation failing with plausible-looking-but-wrong numbers, not a
+    crash (nothing here is checked/sanitizer-instrumented for
+    use-after-realloc on its own). Fixed by capturing each level's own
+    `glm::mat4` immediately after setting its fields, before any sibling
+    `addComponent<Transform>()` call could invalidate the reference it came
+    from -- not by changing `ecs.hpp` itself, since every non-test call site
+    in this engine already follows the "use immediately, don't hold" rule
+    this test had violated.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with
+  **zero warnings** under `-Wall -Wextra`. `ctest` reports **4/4 passing**
+  (`scene_serialization_test`, `input_action_map_test`, `physics_test`,
+  `transform_hierarchy_test`) -- see the note above on how the new test's
+  own bug was caught and fixed before it ever reached this point.
+  `ENGINE_MAX_FRAMES=90 bash tools/run_headless.sh` completes
+  cleanly with zero `[ERROR]` lines and `Frustum culling: 0/14 drawables
+  culled` (up from 13 pre-this-phase, the one new entity). Because Phase
+  14a's always-on dockspace shell now covers the entire window in the
+  ordinary screenshot, the render itself was additionally verified with
+  `EditorUI::renderDockspaceShell()`'s call temporarily commented out for a
+  manual capture only (reverted before committing -- `git diff
+  src/application.cpp` was checked afterward to confirm no trace of that
+  temporary change remains): the new cube renders clearly, sitting in open
+  ground space near the pyramid, correctly offset **and rotated** by the
+  parent `scene` entity's own ~12° Y rotation (confirmed both visually and
+  by logging the resolved world matrix's translation column during manual
+  iteration: local `(-2.2, 0.25, 1.4)` resolved to world
+  `(-1.860848, 0.25, 1.826813)` -- the same magnitude in the XZ-plane
+  (confirming a rotation, not a translation-only bug: `sqrt(2.2^2 + 1.4^2) ==
+  sqrt(1.860848^2 + 1.826813^2)`, both ~2.608). A from-scratch rebuild of
+  pre-14b commit `3ee24e9` in a separate
+  `git worktree`, captured the same way, pixel-diffed against this phase's
+  own capture at zero (>15-intensity-unit) differing pixels outside one
+  small, localized region matching exactly where the new cube and its
+  shadow appear -- confirming the rest of the scene (table/box/pyramid,
+  ground, lighting, and, separately, the falling-cube physics demo, whose
+  own position/velocity/collider are byte-identical in `default.json`) is
+  pixel-unaffected. `ENGINE_LEGACY_SCENE=1` was separately confirmed to
+  still run cleanly (12 drawables, no parenting demonstrated -- unchanged
+  from before this phase, per that flag's own documented "isolate scene-
+  loading problems, not scene-content problems" scope).
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

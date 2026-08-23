@@ -56,3 +56,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME physics_test COMMAND physics_test)
+
+# Phase 14b adds transform_hierarchy_test, testing
+# engine::resolveWorldMatrix() (src/transform_hierarchy.cpp) in isolation --
+# same "plain executable, links only the pure logic file it's testing"
+# shape as physics_test above. transform_hierarchy.cpp depends only on
+# ecs.hpp/transform.hpp/log.hpp (all header-only or GL-free -- see
+# ecs.hpp's own header comment), so this needs no live GL context/GPU
+# either -- just GLM for glm::mat4/vec3/quat.
+add_executable(transform_hierarchy_test
+    transform_hierarchy_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/transform_hierarchy.cpp
+)
+target_include_directories(transform_hierarchy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(transform_hierarchy_test PRIVATE glm::glm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(transform_hierarchy_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME transform_hierarchy_test COMMAND transform_hierarchy_test)

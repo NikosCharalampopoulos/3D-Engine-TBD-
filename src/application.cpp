@@ -30,6 +30,7 @@
 #include "engine/paths.hpp"
 #include "engine/physics.hpp"
 #include "engine/scene_serialization.hpp"
+#include "engine/transform_hierarchy.hpp"
 
 namespace engine {
 
@@ -1495,8 +1496,13 @@ void Application::renderShadowPass(const std::array<glm::mat4, kCascadeCount>& l
 
         registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) {
             if (mc.model) {
-                const Transform* transform = registry_.getComponent<Transform>(id);
-                const glm::mat4 modelMatrix = transform != nullptr ? transform->getModelMatrix() : glm::mat4(1.0f);
+                // Phase 14b: a parented entity's shadow must be cast from
+                // its resolved WORLD position, not its raw local one (see
+                // transform_hierarchy.hpp) -- otherwise a child would cast
+                // its shadow as if it sat at its own local offset from the
+                // scene origin, ignoring wherever its parent actually put
+                // it.
+                const glm::mat4 modelMatrix = resolveWorldMatrix(registry_, id);
                 mc.model->drawDepthOnly(*shadowShader_, modelMatrix);
             }
         });
@@ -1560,8 +1566,11 @@ void Application::renderSSAO(const glm::mat4& view, const glm::mat4& projection)
 
     registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) {
         if (mc.model) {
-            const Transform* transform = registry_.getComponent<Transform>(id);
-            const glm::mat4 modelMatrix = transform != nullptr ? transform->getModelMatrix() : glm::mat4(1.0f);
+            // Phase 14b: same resolved-WORLD-matrix requirement as the
+            // shadow pass above -- the SSAO g-buffer's normal/depth for a
+            // parented entity has to land at its actual world position, or
+            // SSAO would sample occlusion for the wrong place entirely.
+            const glm::mat4 modelMatrix = resolveWorldMatrix(registry_, id);
             mc.model->drawNormalDepth(*gbufferShader_, modelMatrix);
         }
     });
@@ -1898,8 +1907,17 @@ void Application::render() {
     // ecs.hpp.
     registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) {
         if (mc.model) {
-            const Transform* transform = registry_.getComponent<Transform>(id);
-            const glm::mat4 modelMatrix = transform != nullptr ? transform->getModelMatrix() : glm::mat4(1.0f);
+            // Phase 14b: the main color pass draws every entity at its
+            // resolved WORLD matrix, not its raw local one -- see
+            // transform_hierarchy.hpp's own header comment for why a
+            // parented entity's actual position is parentWorldMatrix *
+            // thisEntity'sLocalMatrix, recursively up the chain, rather
+            // than the child's local Transform alone. An entity with no
+            // Parent component (every entity before this phase, and most
+            // after it) resolves to exactly its own getModelMatrix(), so
+            // this is behavior-preserving for the whole scene except the
+            // one new parented demo entity assets/scenes/default.json adds.
+            const glm::mat4 modelMatrix = resolveWorldMatrix(registry_, id);
             mc.model->draw(*shader_, modelMatrix, &frustum, &cullStats);
         }
     });

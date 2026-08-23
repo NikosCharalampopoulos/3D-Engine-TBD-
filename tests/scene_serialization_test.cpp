@@ -58,7 +58,13 @@ void expectQuatNear(const glm::quat& actual, const glm::quat& expected, const st
 // rather than some placeholder. A third entity (Phase 8e) exercises
 // "rigidBody"/"collider" -- both present, with non-default field values, so
 // a bug that silently dropped either block or fell back to RigidBody/
-// Collider's own defaults would show up as a mismatch.
+// Collider's own defaults would show up as a mismatch. A fourth/fifth pair
+// (Phase 14b) exercises "parent" specifically listed CHILD-BEFORE-PARENT in
+// vector (and therefore file) order, proving forward-reference resolution
+// actually works rather than only happening to work when scenes are
+// authored parent-first (see this file's own "Malformed input: 'parent'
+// names an entity that doesn't exist" case, further below, for the sibling
+// negative test).
 std::vector<engine::SceneEntityRecord> makeTestRecords() {
     std::vector<engine::SceneEntityRecord> records;
 
@@ -84,6 +90,26 @@ std::vector<engine::SceneEntityRecord> makeTestRecords() {
     physical.hasCollider = true;
     physical.colliderHalfExtent = 0.35f;  // deliberately non-default (0.25)
     records.push_back(physical);
+
+    // Phase 14b: a fourth entity ("child_of_later") whose "parent" names a
+    // FIFTH entity ("declared_later") that appears AFTER it in this same
+    // vector -- writeSceneRecords() preserves vector order, so this
+    // deliberately produces a JSON file where the child's own object comes
+    // before its parent's, exercising parseSceneRecords()'s two-pass
+    // "resolve parent names only after every entity's name is known"
+    // handling (see scene_serialization.hpp's own "Parent references"
+    // comment) rather than a file that happens to only ever list parents
+    // first.
+    engine::SceneEntityRecord childListedFirst;
+    childListedFirst.name = "child_of_later";
+    childListedFirst.position = glm::vec3(1.0f, 0.0f, 0.0f);
+    childListedFirst.parentName = "declared_later";
+    records.push_back(childListedFirst);
+
+    engine::SceneEntityRecord parentListedSecond;
+    parentListedSecond.name = "declared_later";
+    parentListedSecond.position = glm::vec3(4.0f, 0.0f, 0.0f);
+    records.push_back(parentListedSecond);
 
     return records;
 }
@@ -113,6 +139,7 @@ int main() {
             expectVec3Near(reloaded[i].rigidBodyVelocity, original[i].rigidBodyVelocity, tag + ".rigidBodyVelocity");
             expectTrue(reloaded[i].hasCollider == original[i].hasCollider, tag + ".hasCollider");
             expectTrue(reloaded[i].colliderHalfExtent == original[i].colliderHalfExtent, tag + ".colliderHalfExtent");
+            expectTrue(reloaded[i].parentName == original[i].parentName, tag + ".parentName");
         }
     }
 
@@ -158,6 +185,32 @@ int main() {
     }
     expectTrue(threwForBadSchema, "parseSceneRecords throws when \"entities\" isn't an array");
     std::filesystem::remove(badSchemaPath);
+
+    // --- Malformed input: "parent" names an entity that doesn't exist ----
+    // Phase 14b: this is exactly the "validate at this boundary, specific
+    // message" convention every other malformed-input case above already
+    // gets -- see scene_serialization.hpp's own "Parent references"
+    // comment on why this check has to happen at this (parseSceneRecords)
+    // layer rather than loadScene()'s.
+    const std::filesystem::path unknownParentPath =
+        std::filesystem::temp_directory_path() / "engine_scene_test_unknown_parent.json";
+    {
+        std::ofstream unknownParentFile(unknownParentPath);
+        unknownParentFile << R"({
+            "entities": [
+                { "name": "orphan", "parent": "nobody_by_this_name" }
+            ]
+        })";
+    }
+    bool threwForUnknownParent = false;
+    try {
+        engine::parseSceneRecords(unknownParentPath.string());
+    } catch (const std::exception&) {
+        threwForUnknownParent = true;
+    }
+    expectTrue(threwForUnknownParent,
+               "parseSceneRecords throws when \"parent\" names an entity absent from the whole file");
+    std::filesystem::remove(unknownParentPath);
 
     std::filesystem::remove(tempPath);
 
