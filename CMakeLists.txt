@@ -244,6 +244,7 @@ add_executable(engine_app
     src/physics.cpp
     src/editor_ui.cpp
     src/transform_hierarchy.cpp
+    src/scene_hierarchy.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

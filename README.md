@@ -3711,6 +3711,223 @@ sized from a content-region query that hasn't happened yet within that same
 frame.
 </details>
 
+### Phase 14d: a real Scene Hierarchy panel, click-to-select, and a viewport selection outline
+
+Fourth sub-phase of the "Phase 14: full editor UI" arc. The Scene panel's
+placeholder text ("Scene Hierarchy -- coming in Phase 14d") is replaced by a
+real, clickable tree built from `registry_`'s actual entities, and selecting
+a row now draws a dashed-rectangle-plus-corner-brackets outline around that
+entity in the Viewport panel. Still no Inspector content (Phase 14e) and no
+right-click Create/Delete (Phase 14f) -- this phase is scoped to the tree
+itself, selecting a row, and the outline that selection drives.
+
+- **Real nesting, not a flat "folder" label**: Phase 14b's own commit
+  explicitly chose real `Parent`-component parent/child transform grouping
+  over a flat, non-transforming organizational "folder" concept (see that
+  phase's own README section) -- this phase's tree honors that choice
+  exactly. `buildSceneTree()` (`include/engine/scene_hierarchy.hpp`/
+  `src/scene_hierarchy.cpp`, new) walks `registry_`'s actual `Parent`
+  components to build a forest of `SceneTreeNode`s; an entity with children
+  parented to it *is* the tree's own "folder" -- there is no second,
+  invented grouping concept alongside it. This mirrors
+  `resolveWorldMatrix()`'s own reading of `Parent` (`transform_hierarchy.hpp`)
+  almost exactly, just building a tree to display instead of composing a
+  matrix to draw with, including the same "dangling/self-referential Parent
+  doesn't crash" posture:
+  - A `Parent` pointing at an id this same call doesn't also see (dangling,
+    or something with no `Transform`) is treated as "this entity is a root"
+    -- the same fallback `resolveWorldMatrix()` gives a dangling parent.
+  - A cycle of `Parent` links (of any length) is broken at whichever entity
+    in the cycle `buildSceneTree()` happens to reach first: that one becomes
+    an extra top-level root, and the rest of the cycle nests normally
+    beneath it until the link back to the first entity is reached and
+    simply dropped instead of re-adding a node for it. There's no single
+    "correct" tree shape for a cycle -- the guarantee that actually matters,
+    and the one this phase's own test enforces, is that every entity
+    `registry.each<Transform>()` visits appears in the returned forest
+    **exactly once**, and building the tree always terminates.
+  - **A real bug caught by this phase's own new unit test**: the first
+    implementation marked an id "visited" only once `build()` had already
+    started recursing into it, which let a two-entity cycle (A parents B, B
+    parents A) produce THREE nodes instead of two -- A as a root, B nested
+    under it, and a second, duplicate copy of A nested under B, instead of
+    being dropped there. Fixed by marking an id visited at the exact moment
+    it's *claimed* (by whichever caller -- a root-level loop iteration, or
+    `build()`'s own per-child loop -- reaches it first), strictly before
+    recursing into it, so a second attempt to claim the same id anywhere
+    else in the same call always finds it already taken and skips it,
+    rather than only guarding re-entry into a call already in progress.
+  - Every entity with a `Transform` component is a row (not just ones with a
+    `ModelComponent`) -- the same enumeration `Application::renderDebugUI()`'s
+    own pre-existing "Scene Entities" panel already uses, since a `Parent`
+    only makes sense on something `resolveWorldMatrix()` can resolve a world
+    matrix for in the first place, and a future Transform-only entity (an
+    empty grouping node, or a future light/camera entity) is exactly the
+    kind of thing a real hierarchy panel still needs to list.
+  - Naming matches `saveScene()`'s own placeholder convention exactly
+    (`scene_serialization.hpp`): an entity's `NameComponent` if it has one,
+    else `"entity_<index>"`.
+  - `scene_hierarchy.cpp` depends only on `ecs.hpp`/`transform.hpp`/
+    `transform_hierarchy.hpp`'s `Parent` struct -- none of them GL- or
+    ImGui-touching -- the same "pure logic, its own small file" split
+    `transform_hierarchy.cpp`/`physics.cpp` already established, which is
+    what let `tests/scene_hierarchy_test.cpp` (new; `ctest` is now **5/5**)
+    exercise the nesting/naming/dangling-parent/cycle-safety logic above
+    directly, without a live GL context or Dear ImGui frame -- the same
+    "plain executable, links only the file it's testing" shape as
+    `transform_hierarchy_test`/`physics_test`.
+- **Click-to-select, drawn via ordinary `ImGui::TreeNodeEx()`**:
+  `EditorUI::renderDockspaceShell()` (`src/editor_ui.cpp`) walks the tree
+  returned by `buildSceneTree()` every frame (a handful of entities, so
+  there's no reason to cache/diff it against a previous frame) and renders
+  each node as an `ImGui::TreeNodeEx()` -- `ImGuiTreeNodeFlags_Leaf` for a
+  childless entity (no expand arrow), `ImGuiTreeNodeFlags_Selected` when it's
+  the current selection (ImGui's own built-in highlight/left-accent styling
+  -- this phase's brief explicitly doesn't require hand-matching the
+  mockup's exact hex values, just "visibly selected"), and
+  `ImGui::IsItemClicked()` on that same row to update the selection. No icon
+  glyphs (folder/mesh/light/camera, per the approved mockup): Dear ImGui's
+  default font (no custom font atlas is built anywhere in this engine) only
+  carries the ASCII/Latin-1 glyph range, nowhere near an icon font's Unicode
+  private-use/symbol code points -- vendoring one is real, separate scope
+  this phase's brief doesn't ask for. Indentation, the tree-node's own
+  expand/collapse arrow, and the selected-row highlight carry "group vs.
+  leaf" and "this row is selected" instead -- functionally equivalent to the
+  mockup's own icons/highlight for this phase's actual bar (a real tree +
+  click-to-select), just without pixel-identical iconography.
+- **Where the selection lives, and why**: a new `std::optional<EntityId>
+  selectedEntity_` member on `Application` (`std::nullopt` = no selection,
+  this phase's own documented default/starting state) -- not on `EditorUI`,
+  even though `EditorUI` is the class that actually mutates it in response to
+  a click. `EditorUI` is, and has been since Phase 14a, "just a Dear ImGui
+  wrapper" over data `Application` owns (`registry_`, the viewport texture,
+  ...) -- `selectedEntity_` gets the exact same treatment: `renderDockspaceShell()`
+  gained `EntityRegistry& registry` and `std::optional<EntityId>&
+  selectedEntity` parameters (passed by reference so a click inside that one
+  call updates `Application`'s own member directly), and `Application`
+  exposes it back out via one const `selectedEntity()` getter -- not a
+  mutable reference -- specifically so Phase 14e's real Inspector panel (this
+  phase's own brief requires this be "exposed in a way a later phase can
+  consume") can read what's currently selected without an awkward reach into
+  private state or a second parallel copy of the same optional.
+  - **One frame of latency, same shape and same reason as `viewportWidth_`/
+    `viewportHeight_`** (Phase 14c): `render()` reads `selectedEntity_` and
+    builds this frame's outline from it BEFORE calling
+    `editorUI_.renderDockspaceShell()`, which is the call that could change
+    `selectedEntity_` in response to a click on this same frame's Scene
+    panel. So a newly-clicked row's outline first appears the *following*
+    frame, not the same one -- there is no other order Dear ImGui's
+    immediate-mode API supports here either: the 3D pass whose output the
+    outline projects has to run before the one ImGui frame that could change
+    what it's projecting even exists yet, exactly Phase 14c's own
+    "chicken-and-egg" reasoning, just for selection state instead of panel
+    size.
+- **The outline's screen-space projection**: `Model` gained a new public
+  `boundingSphere(rootTransform)` method (`model.hpp`/`model.cpp`) --
+  aggregates every mesh's own local `BoundingSphere` (Phase 13b) across every
+  node of the model (not just the root node's meshes; `scene.obj`'s "scene"
+  entity alone has three, one per node) into one sphere: centered on the
+  unweighted centroid of every individual mesh sphere's own center, radius
+  set to the farthest any one mesh sphere's own surface reaches from that
+  centroid. Not the tightest possible enclosing sphere (that's a harder,
+  separate computational-geometry problem), but always a conservative
+  superset of the model's real extent -- exactly the same bias
+  `BoundingSphere::transformed()` already has for frustum culling, and
+  exactly what this outline needs: a screen-space rectangle a little larger
+  than the object's exact silhouette reads fine; one that's too small and
+  clips into the object would not.
+  - `Application::render()`'s new `computeSelectionOutlineNDC()` (local to
+    `application.cpp`) takes the selected entity's `Model::boundingSphere()`,
+    already transformed into world space by `resolveWorldMatrix()` (Phase
+    14b -- so a parented entity's outline tracks its resolved WORLD
+    position, matching where it's actually drawn, not its raw local one),
+    and projects it using the "project center +/- radius along the camera's
+    own view-right/view-up axes" technique this phase's own brief calls
+    out: the sphere's center, and two more points offset from it by its own
+    radius along `camera_.right()`/`camera_.up()` (two new `Camera` getters,
+    `camera.hpp` -- both vectors already computed every frame,
+    just not previously exposed), are each projected through the camera's
+    view-projection matrix and divided by `w`; the resulting NDC offsets
+    from the center's own NDC position become the rectangle's half-width/
+    half-height. Chosen over unprojecting a world-space AABB's 8 corners for
+    a concrete reason: this engine already has a per-entity `BoundingSphere`,
+    not an AABB, and a sphere's own screen-facing silhouette IS exactly
+    "center offset by radius along the two axes perpendicular to the view
+    direction" -- an AABB's 8 corners would first need to be derived from
+    this same sphere anyway, for a shape that doesn't need to be any tighter
+    than the sphere already is. Returns "no meaningful outline this frame"
+    (not a crash, not a wrong rectangle) if the center or either offset point
+    projects behind the camera (`clip.w <= ~0`), the same "documented
+    non-error case" treatment as "nothing selected".
+- **Displaying it -- the same window's own draw list, not the global
+  foreground list**: `EditorUI::renderDockspaceShell()` gained a `const
+  SelectionOutline* outline` parameter (`nullptr` = no selection this frame,
+  no rectangle drawn) and, right after the Viewport panel's `ImGui::Image()`
+  call (Phase 14c), maps `outline`'s NDC rect onto that panel's own current
+  on-screen pixel rectangle -- captured via `ImGui::GetCursorScreenPos()`
+  (before `ImGui::Image()` advances the cursor) plus the same
+  `ImGui::GetContentRegionAvail()` the image itself is sized to, since the
+  Viewport panel does **not** fill the whole window (Scene/Assets/Inspector
+  occupy the rest) -- and draws a dashed rectangle (`addDashedRect()`) plus
+  four small L-shaped corner brackets (`addCornerBrackets()`, both new
+  file-local helpers in `editor_ui.cpp`) via `ImGui::GetWindowDrawList()`.
+  Deliberately the *window's own* draw list, not
+  `ImGui::GetForegroundDrawList()`: both composite on top of `ImGui::Image()`
+  either way (a window's own draw commands rasterize in submission order;
+  the foreground list draws on top of every window), but only the window's
+  own draw list is automatically clipped by Dear ImGui to that window's
+  visible rectangle -- the foreground list isn't clipped to any one window
+  at all, so a selection near the Viewport panel's own edge could otherwise
+  paint a stray dashed-line fragment over whatever panel is docked next to
+  it. Confirmed by this phase's own headless screenshot (see Verify below),
+  not just assumed.
+- **A verification aid: `ENGINE_DEBUG_SELECT=<entity name>`**: unset by
+  default, same getenv-gated-off-by-default shape as every other `ENGINE_*`
+  flag in this project, but -- unlike the boolean ones -- carries a *value*
+  (the target entity's `NameComponent` string) rather than being a plain
+  on/off switch. Headless Xvfb has no real mouse to click a Scene Hierarchy
+  row with, so this pre-selects an entity by name once, in the constructor,
+  after the scene has finished loading (so `findEntityByName()`'s linear
+  search over the `NameComponent` pool has something to find) -- an
+  unmatched name is logged as a warning and leaves the selection unset
+  rather than crashing or pointing `selectedEntity_` at a bogus id. Kept in
+  the shipped binary rather than removed after this phase's own review,
+  matching every other verification-oriented `ENGINE_*` flag already
+  documented in this file (`ENGINE_CAMERA_DEMO`, `ENGINE_FRUSTUM_CULL_DEMO`,
+  `ENGINE_CLUSTER_DEBUG`, ...) -- a reusable regression-check tool, not
+  one-off scaffolding.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with
+  **zero new warnings** under `-Wall -Wextra`. `ctest` now reports **5/5**
+  tests passing -- the 4 pre-existing tests plus this phase's own new
+  `scene_hierarchy_test` (see above). `tools/run_headless.sh` at
+  `ENGINE_MAX_FRAMES=60` completed cleanly with **zero `[ERROR]`/GL-error
+  log lines** across repeated runs. Two screenshots were taken and inspected
+  directly:
+  - **Default (no selection)**: the Scene panel shows a real tree -- `scene`
+    and `falling_cube` at the top level, `parented_demo_cube` visibly
+    indented one level under `falling_cube` (matching Phase 14b's own
+    parenting) -- with no row highlighted and no outline anywhere in the
+    Viewport panel, exactly this phase's documented default state.
+  - **`ENGINE_DEBUG_SELECT=falling_cube`**: the constructor logs
+    `"ENGINE_DEBUG_SELECT=\"falling_cube\": pre-selecting entity 2"`; the
+    Scene panel's `falling_cube` row renders with ImGui's selected-row
+    highlight; and the Viewport panel shows a teal dashed rectangle with
+    corner brackets tightly bounding `falling_cube`'s on-screen fragment --
+    at this frame, most of the still-falling cube's own bounding sphere sits
+    above the camera's visible frame, so only a sliver of its checkered
+    underside pokes into view at the very top of the Viewport panel, and the
+    outline's own top edge is correctly clipped exactly at the panel's own
+    top border (not bleeding upward into the Scene panel or the window's
+    title/menu area) while its bottom/left/right edges tightly bound the
+    visible sliver -- confirming both that the projection lands in the right
+    place at the right size, and that the window-draw-list clipping
+    reasoning above holds up in practice, not just in theory.
+  - A third run with `ENGINE_SHOW_DEBUG_UI=1` confirmed `DebugUI`'s own
+    "Engine Debug" panel (Frame Stats/Render Passes/Input Bindings/Scene
+    Entities) still layers correctly on top of the dockspace, listing all
+    three entities, unaffected in content -- exactly as every prior Phase 14
+    sub-phase left it.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

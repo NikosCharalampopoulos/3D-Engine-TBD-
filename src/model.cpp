@@ -7,6 +7,7 @@
 
 #include <glm/gtc/matrix_inverse.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -398,6 +399,44 @@ void Model::drawNodeNormalDepth(Shader& shader, const ModelNode& node, const glm
     for (const ModelNode& child : node.children) {
         drawNodeNormalDepth(shader, child, worldTransform);
     }
+}
+
+void Model::collectBoundingSpheres(const ModelNode& node, const glm::mat4& parentTransform,
+                                    std::vector<BoundingSphere>& out) const {
+    const glm::mat4 worldTransform = parentTransform * node.localTransform;
+    for (const std::size_t meshIndex : node.meshIndices) {
+        out.push_back(meshes_[meshIndex].boundingSphere().transformed(worldTransform));
+    }
+    for (const ModelNode& child : node.children) {
+        collectBoundingSpheres(child, worldTransform, out);
+    }
+}
+
+BoundingSphere Model::boundingSphere(const glm::mat4& rootTransform) const {
+    std::vector<BoundingSphere> spheres;
+    collectBoundingSpheres(root_, rootTransform, spheres);
+    if (spheres.empty()) {
+        // No mesh anywhere in this model (a degenerate/empty scene file) --
+        // an empty sphere at the origin of rootTransform's own space is a
+        // harmless, well-defined answer (radius 0 never intersects anything
+        // meaningfully), rather than dividing by zero below.
+        return BoundingSphere{glm::vec3(rootTransform[3]), 0.0f};
+    }
+
+    // See this method's own header comment (model.hpp) for why an
+    // unweighted centroid + "farthest mesh sphere surface from it" radius,
+    // not a tightest-fit sphere.
+    glm::vec3 centroid(0.0f);
+    for (const BoundingSphere& sphere : spheres) {
+        centroid += sphere.center;
+    }
+    centroid /= static_cast<float>(spheres.size());
+
+    float radius = 0.0f;
+    for (const BoundingSphere& sphere : spheres) {
+        radius = std::max(radius, glm::length(sphere.center - centroid) + sphere.radius);
+    }
+    return BoundingSphere{centroid, radius};
 }
 
 }  // namespace engine

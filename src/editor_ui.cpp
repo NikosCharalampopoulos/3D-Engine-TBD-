@@ -15,7 +15,11 @@
 // setup below mirrors).
 #include <imgui_internal.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include "engine/log.hpp"
+#include "engine/scene_hierarchy.hpp"
 
 namespace engine {
 
@@ -30,6 +34,129 @@ const char* glslVersionString() {
 #else
     return "#version 430 core";
 #endif
+}
+
+// Phase 14d: recursively renders one Scene-Hierarchy row (and, if expanded,
+// its own children) as an ImGui::TreeNodeEx() -- real parent/child nesting
+// via ImGui's own tree indentation, matching this engine's own choice of
+// real Parent-component grouping over a flat "folder" label (see
+// scene_hierarchy.hpp's own header comment). `##<index>` is folded into the
+// node's own ImGui id via PushID(entity index) rather than appended to the
+// visible label text, so two differently-parented entities that happen to
+// share a NameComponent string can't collide as far as ImGui's own
+// id-stack-based widget identity is concerned, without the visible label
+// itself growing a stray "##123" suffix.
+//
+// No icon glyphs (folder/mesh/light/camera, per the approved mockup): Dear
+// ImGui's default font (no custom font atlas is built anywhere in this
+// engine) only carries the ASCII/Latin-1 glyph range, nowhere near the
+// Unicode private-use/symbol code points an icon font would need -- adding
+// one is real, separate scope (a new vendored font asset + atlas
+// configuration) this phase's brief doesn't ask for. Indentation, the
+// tree-node's own expand/collapse arrow, and ImGuiTreeNodeFlags_Selected's
+// highlight are what carry "this is a group vs. a leaf" and "this row is
+// selected" instead -- functionally equivalent to the mockup's own icons/
+// highlight for this phase's purpose (real tree + click-to-select), just
+// without the pixel-identical iconography.
+void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& selectedEntity) {
+    ImGui::PushID(static_cast<int>(node.id.index()));
+
+    const bool isSelected = selectedEntity.has_value() && *selectedEntity == node.id;
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
+                                ImGuiTreeNodeFlags_DefaultOpen;
+    if (node.children.empty()) {
+        // ImGuiTreeNodeFlags_Leaf: no expand arrow drawn for a childless
+        // entity -- NoTreePushOnOpen means TreeNodeEx() doesn't push an
+        // indentation level for it either, so this row doesn't need a
+        // matching TreePop() below.
+        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    }
+    if (isSelected) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+
+    const bool opened = ImGui::TreeNodeEx(node.name.c_str(), flags);
+    // IsItemClicked() covers a click anywhere on this row's own label/
+    // background (not the expand arrow specifically, which TreeNodeEx()
+    // already handles internally for open/close) -- exactly "click this row
+    // to select it", independent of whether the click also happened to
+    // toggle this node open/closed.
+    if (ImGui::IsItemClicked()) {
+        selectedEntity = node.id;
+    }
+    if (opened && !node.children.empty()) {
+        for (const SceneTreeNode& child : node.children) {
+            renderSceneTreeNode(child, selectedEntity);
+        }
+        ImGui::TreePop();
+    }
+
+    ImGui::PopID();
+}
+
+// Phase 14d: the approved mockup's dashed-rectangle-plus-corner-brackets
+// selection look (a simple 2D screen-space gizmo, deliberately NOT a fancy
+// inverted-hull silhouette shader -- see this phase's own brief). Both
+// helpers draw directly into `drawList` in already-resolved screen-pixel
+// coordinates (topLeft/bottomRight), leaving all NDC-to-panel-pixel mapping
+// to their one call site below.
+void addDashedRect(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight, ImU32 color) {
+    constexpr float kDashLength = 6.0f;
+    constexpr float kGapLength = 4.0f;
+    constexpr float kThickness = 1.5f;
+
+    auto dashedLine = [&](ImVec2 from, ImVec2 to) {
+        const ImVec2 delta(to.x - from.x, to.y - from.y);
+        const float length = std::sqrt((delta.x * delta.x) + (delta.y * delta.y));
+        if (length < 1.0f) {
+            return;
+        }
+        const ImVec2 direction(delta.x / length, delta.y / length);
+        float traveled = 0.0f;
+        bool drawing = true;
+        while (traveled < length) {
+            const float segment = std::min(drawing ? kDashLength : kGapLength, length - traveled);
+            if (drawing) {
+                const ImVec2 segmentStart(from.x + (direction.x * traveled), from.y + (direction.y * traveled));
+                const ImVec2 segmentEnd(from.x + (direction.x * (traveled + segment)),
+                                         from.y + (direction.y * (traveled + segment)));
+                drawList->AddLine(segmentStart, segmentEnd, color, kThickness);
+            }
+            traveled += segment;
+            drawing = !drawing;
+        }
+    };
+
+    dashedLine(topLeft, ImVec2(bottomRight.x, topLeft.y));
+    dashedLine(ImVec2(bottomRight.x, topLeft.y), bottomRight);
+    dashedLine(bottomRight, ImVec2(topLeft.x, bottomRight.y));
+    dashedLine(ImVec2(topLeft.x, bottomRight.y), topLeft);
+}
+
+void addCornerBrackets(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight, ImU32 color) {
+    // Each bracket's own two short, solid arms -- not dashed, so they read as
+    // a distinct "handle" accent against the dashed outline itself, matching
+    // the approved mockup's own corner-bracket look.
+    constexpr float kArmLength = 10.0f;
+    constexpr float kThickness = 2.0f;
+
+    const ImVec2 corners[4] = {
+        topLeft,
+        ImVec2(bottomRight.x, topLeft.y),
+        bottomRight,
+        ImVec2(topLeft.x, bottomRight.y),
+    };
+    // Sign of each arm's own direction along x/y, pointing INWARD from that
+    // corner (e.g. the top-left corner's arms extend right and down) so the
+    // brackets sit just inside the dashed rectangle rather than outside it.
+    const float armX[4] = {1.0f, -1.0f, -1.0f, 1.0f};
+    const float armY[4] = {1.0f, 1.0f, -1.0f, -1.0f};
+
+    for (int i = 0; i < 4; ++i) {
+        const ImVec2& corner = corners[i];
+        drawList->AddLine(corner, ImVec2(corner.x + (armX[i] * kArmLength), corner.y), color, kThickness);
+        drawList->AddLine(corner, ImVec2(corner.x, corner.y + (armY[i] * kArmLength)), color, kThickness);
+    }
 }
 
 }  // namespace
@@ -119,7 +246,8 @@ void EditorUI::buildInitialLayout(ImGuiID dockspaceId) {
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
-void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture) {
+void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
+                                     std::optional<EntityId>& selectedEntity, const SelectionOutline* outline) {
     // DockSpaceOverViewport() is the built-in "just cover the whole main
     // viewport" helper (creates its own invisible host window internally) --
     // simpler than manually building a host window + ImGui::DockSpace()
@@ -142,7 +270,20 @@ void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture) {
     }
 
     ImGui::Begin("Scene");
-    ImGui::TextWrapped("Scene Hierarchy -- coming in Phase 14d.");
+    {
+        // Phase 14d: rebuilt fresh every frame -- this engine's own scene has
+        // a handful of entities (three today, see assets/scenes/default.json),
+        // so there is no reason to cache/diff buildSceneTree()'s own small
+        // allocation against a previous frame's tree the way a much larger
+        // scene's editor might need to. Real Parent-component nesting (not a
+        // flat "folder" label) -- see scene_hierarchy.hpp's own header
+        // comment for why, and renderSceneTreeNode() above for how each
+        // root/child row is actually drawn/selected.
+        const std::vector<SceneTreeNode> tree = buildSceneTree(registry);
+        for (const SceneTreeNode& root : tree) {
+            renderSceneTreeNode(root, selectedEntity);
+        }
+    }
     ImGui::End();
 
     ImGui::Begin("Assets");
@@ -160,6 +301,16 @@ void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture) {
         const ImVec2 contentRegion = ImGui::GetContentRegionAvail();
         viewportWidth_ = static_cast<int>(contentRegion.x);
         viewportHeight_ = static_cast<int>(contentRegion.y);
+        // Phase 14d: the Viewport panel's own on-screen top-left corner, in
+        // absolute screen pixels -- captured here, BEFORE ImGui::Image()
+        // below advances the cursor down by the image's own height, since
+        // that's the point at which ImGui::GetCursorScreenPos() reports this
+        // panel's content-region origin rather than somewhere past it. This
+        // (plus contentRegion above) is the panel's whole on-screen
+        // rectangle -- the outline projection below needs both, since the
+        // Viewport panel does NOT fill the whole window (Scene/Assets/
+        // Inspector occupy the rest, see this class's own Phase 14a layout).
+        const ImVec2 panelScreenPos = ImGui::GetCursorScreenPos();
 
         if (viewportColorTexture != 0 && contentRegion.x > 0.0f && contentRegion.y > 0.0f) {
             // uv0=(0,1)/uv1=(1,0): flips vertically. OpenGL's texture
@@ -187,6 +338,51 @@ void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture) {
         // on the matching degenerate-size guard for Application's own
         // render targets) -- there is nothing meaningful to show yet
         // either way.
+
+        // Phase 14d: the selection outline, drawn on top of the image above
+        // via THIS SAME "Viewport" window's own draw list
+        // (ImGui::GetWindowDrawList()) -- not the global foreground draw
+        // list. Both compose on top of ImGui::Image() (a window's own draw
+        // commands are submitted, and therefore rasterized, in the order
+        // they're issued within that window, and the foreground draw list is
+        // drawn on top of every window besides), but only the WINDOW draw
+        // list is automatically clipped to this window's own visible
+        // rectangle by Dear ImGui -- the foreground list is not clipped to
+        // any one window at all, so a selection near the Viewport panel's own
+        // edge could otherwise paint a stray fragment of dashed line over
+        // whatever panel happens to be docked next to it. Confirmed by this
+        // phase's own headless screenshot (see README.md's Phase 14d
+        // section), not just assumed.
+        if (outline != nullptr && contentRegion.x > 0.0f && contentRegion.y > 0.0f) {
+            // NDC ([-1,1], +Y up) -> this panel's own screen pixels (+Y
+            // down): the standard "u/v in [0,1], then scale by the panel's
+            // own size and offset by its own screen-space origin" mapping --
+            // note the Y flip (1.0f - v), same direction (though a distinct
+            // reason) as ImGui::Image()'s own uv0/uv1 flip just above: NDC's
+            // own +Y-up convention is the opposite of ImGui's own +Y-down
+            // screen-pixel convention.
+            const auto ndcToPanelScreen = [&](float ndcX, float ndcY) {
+                const float u = (ndcX * 0.5f) + 0.5f;
+                const float v = 1.0f - ((ndcY * 0.5f) + 0.5f);
+                return ImVec2(panelScreenPos.x + (u * contentRegion.x), panelScreenPos.y + (v * contentRegion.y));
+            };
+            // outline->ndcMaxY is the NDC-space TOP edge (+Y up), which maps
+            // to the smaller screen-Y (closer to the panel's own top) --
+            // i.e. topLeft pairs ndcMinX with ndcMaxY, not ndcMinY.
+            const ImVec2 topLeft = ndcToPanelScreen(outline->ndcMinX, outline->ndcMaxY);
+            const ImVec2 bottomRight = ndcToPanelScreen(outline->ndcMaxX, outline->ndcMinY);
+
+            // Teal accent, matching the approved mockup's own selection
+            // color direction (a modern dark/teal-accented style) -- not a
+            // pixel-perfect match to any one specific hex value (this
+            // phase's brief explicitly doesn't require that), just a bright,
+            // clearly-not-part-of-the-3D-scene color against this engine's
+            // own rendered content.
+            const ImU32 accentColor = IM_COL32(56, 217, 197, 255);
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            addDashedRect(drawList, topLeft, bottomRight, accentColor);
+            addCornerBrackets(drawList, topLeft, bottomRight, accentColor);
+        }
     }
     ImGui::End();
 

@@ -492,6 +492,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -544,6 +545,29 @@ public:
     // std::array parameter renderShadowPass() takes -- both declared in this
     // header, so both need it visible here too.
     static constexpr int kCascadeCount = 3;
+
+    // Phase 14d: the entity currently selected in the Scene Hierarchy panel
+    // (std::nullopt when nothing is selected -- the default/starting state,
+    // per this phase's own brief). Owned here, not by EditorUI, for the same
+    // reason registry_/camera_ are owned here rather than there: EditorUI is
+    // "just a Dear ImGui wrapper" over data Application owns (see
+    // editor_ui.hpp's own header comment) -- it draws/edits this value each
+    // frame (renderDockspaceShell() takes it by reference, see that method's
+    // own Phase 14d comment) but has no reason to be its long-term home, the
+    // same relationship it already has with registry_ itself. Application::
+    // render() is the OTHER reader: it resolves this same entity's world-
+    // space bounding sphere and projects it into the selection-outline rect
+    // EditorUI draws (see render()'s own Phase 14d comment) -- both readers
+    // needing the same value each frame is exactly why this lives on
+    // Application, one level above either of them, rather than on whichever
+    // of the two happened to need it first.
+    //
+    // Exposed via this one const getter (not a mutable reference) for a later
+    // phase to consume -- concretely, Phase 14e's real Inspector panel, which
+    // this phase's own brief says must be able to read "what's currently
+    // selected" without an awkward reach into Application's private state or
+    // a duplicate parallel copy of this same optional.
+    std::optional<EntityId> selectedEntity() const { return selectedEntity_; }
 
 private:
     void update(double deltaTime, const InputState& input);
@@ -915,6 +939,20 @@ private:
     // ComponentPool<Transform>/ComponentPool<ModelComponent> pools, keyed by
     // EntityId, rather than as two fixed fields per vector element.
     EntityRegistry registry_;
+    // Phase 14d: see the public selectedEntity() getter above for the full
+    // ownership rationale. Each render() call reads this value FIRST (to
+    // build this frame's selection outline, from whatever was clicked as of
+    // last frame) and only afterward calls editorUI_.renderDockspaceShell()
+    // (which may overwrite it in place, if this frame's own Scene Hierarchy
+    // click changed it) -- so a newly-clicked selection's outline first
+    // appears the FOLLOWING frame, not the same one, the same one-frame
+    // latency viewportWidth_/viewportHeight_ already have and for the
+    // identical underlying reason (see editor_ui.hpp's own comment on those
+    // two): the outline's 3D projection math has to run before the one
+    // ImGui frame that could change the selection even exists yet, since
+    // Dear ImGui's immediate-mode API has no way to submit the Scene
+    // panel's widgets before the 3D pass whose output they might affect.
+    std::optional<EntityId> selectedEntity_;
     Camera camera_;
     // Phase 8d: the data-driven key-binding table pollInputState() now
     // consults each frame (see input.hpp/input_action_map.hpp) -- owned

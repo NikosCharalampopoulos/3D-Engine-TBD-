@@ -75,3 +75,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME transform_hierarchy_test COMMAND transform_hierarchy_test)
+
+# Phase 14d adds scene_hierarchy_test, testing engine::buildSceneTree()
+# (src/scene_hierarchy.cpp) in isolation -- same "plain executable, links
+# only the pure logic file it's testing" shape as transform_hierarchy_test
+# above. scene_hierarchy.cpp depends only on ecs.hpp/transform.hpp/
+# transform_hierarchy.hpp's Parent struct (a plain, header-only aggregate --
+# no transform_hierarchy.cpp function is ever called), so this needs neither
+# that .cpp file nor a live window/GL context/GPU/Dear ImGui frame.
+add_executable(scene_hierarchy_test
+    scene_hierarchy_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/scene_hierarchy.cpp
+)
+target_include_directories(scene_hierarchy_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(scene_hierarchy_test PRIVATE glm::glm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(scene_hierarchy_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME scene_hierarchy_test COMMAND scene_hierarchy_test)

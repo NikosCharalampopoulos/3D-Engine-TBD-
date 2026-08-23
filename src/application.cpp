@@ -962,6 +962,99 @@ bool showDebugUIFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 14d: ENGINE_DEBUG_SELECT=<entity name>, unset by default -- a debug/
+// verification aid, the same "off unless explicitly requested" getenv-gated
+// shape as every other ENGINE_* flag in this file, letting a headless run
+// (no real mouse under Xvfb to click a Scene Hierarchy row with) pre-select
+// an entity at startup so the selection-outline projection can be
+// screenshot-verified without needing real mouse input. Unlike every
+// boolean flag above, this one carries a *value* (the target entity's
+// NameComponent string, e.g. "falling_cube") rather than being a plain on/
+// off switch -- see the constructor's own use of this for how an unknown
+// name is handled (logged and ignored, not a hard failure). Kept in the
+// shipped binary (not `#ifdef`'d out) rather than removed after this
+// phase's own verification, matching this project's own precedent of
+// keeping every other verification-oriented env var (ENGINE_CAMERA_DEMO,
+// ENGINE_FRUSTUM_CULL_DEMO, ENGINE_CLUSTER_DEBUG, ...) permanently available
+// rather than deleting it once a phase's own review is done -- a real,
+// reusable "prove the outline still projects correctly" tool for any later
+// phase's own regression check, not a one-off scaffold.
+std::string debugSelectEntityNameFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_SELECT");
+    return value != nullptr ? std::string(value) : std::string();
+}
+
+// Phase 14d: linear search over the NameComponent pool for ENGINE_DEBUG_SELECT's
+// own lookup, above -- this engine's whole scene is a handful of entities
+// (three, see assets/scenes/default.json), so there's no reason for anything
+// fancier than each<NameComponent>() plus a string compare. Returns an
+// invalid EntityId (EntityId::valid() == false) if no entity's NameComponent
+// matches `name` exactly.
+EntityId findEntityByName(EntityRegistry& registry, const std::string& name) {
+    EntityId found;
+    registry.each<NameComponent>([&](EntityId id, NameComponent& nameComponent) {
+        if (!found.valid() && nameComponent.name == name) {
+            found = id;
+        }
+    });
+    return found;
+}
+
+// Phase 14d: builds the currently-selected entity's screen-space (NDC,
+// [-1,1] on both axes, +Y up) bounding-box outline -- the "project center
+// +/- radius along the camera's own view-right/view-up axes" technique this
+// phase's own brief calls out, chosen over unprojecting all 8 corners of a
+// world-space AABB for the same reason: this engine already has a per-
+// entity BoundingSphere (mesh.hpp/model.hpp), not an AABB, and a sphere's
+// "silhouette in screen space, as seen from a specific camera" is exactly
+// "the sphere's world-space center, offset by its own radius along whichever
+// two axes are perpendicular to the view direction" -- whereas an AABB's own
+// 8 corners would first need to be *derived* from this same sphere anyway
+// (there is no tighter AABB already lying around to reuse), for a shape this
+// project's own screen-space rectangle overlay doesn't actually need to be
+// any tighter than the sphere already is.
+//
+// Returns false (leaving `outOutline` unmodified) if the sphere's center, or
+// either offset point, projects behind the camera (w <= a small positive
+// epsilon after the view-projection multiply) -- an entity directly behind
+// the camera has no sane on-screen rectangle to draw, and dividing by a
+// near-zero or negative w would otherwise produce a wildly wrong (or
+// infinite/NaN) NDC rect rather than simply skipping the outline for that
+// frame, matching this phase's own "no selection => no outline" default
+// treatment for a case that's really "no MEANINGFUL on-screen outline right
+// now" instead.
+bool computeSelectionOutlineNDC(const BoundingSphere& worldSphere, const Camera& camera, const glm::mat4& view,
+                                 const glm::mat4& projection, SelectionOutline& outOutline) {
+    const glm::mat4 viewProjection = projection * view;
+
+    const auto projectToNDC = [&](const glm::vec3& worldPoint, glm::vec3& outNDC) {
+        const glm::vec4 clip = viewProjection * glm::vec4(worldPoint, 1.0f);
+        if (clip.w <= 1e-4f) {
+            return false;
+        }
+        outNDC = glm::vec3(clip) / clip.w;
+        return true;
+    };
+
+    glm::vec3 ndcCenter{};
+    glm::vec3 ndcRightPoint{};
+    glm::vec3 ndcUpPoint{};
+    if (!projectToNDC(worldSphere.center, ndcCenter) ||
+        !projectToNDC(worldSphere.center + (camera.right() * worldSphere.radius), ndcRightPoint) ||
+        !projectToNDC(worldSphere.center + (camera.up() * worldSphere.radius), ndcUpPoint)) {
+        return false;
+    }
+
+    const float halfWidth = std::abs(ndcRightPoint.x - ndcCenter.x);
+    const float halfHeight = std::abs(ndcUpPoint.y - ndcCenter.y);
+
+    outOutline.ndcMinX = ndcCenter.x - halfWidth;
+    outOutline.ndcMaxX = ndcCenter.x + halfWidth;
+    outOutline.ndcMinY = ndcCenter.y - halfHeight;
+    outOutline.ndcMaxY = ndcCenter.y + halfHeight;
+    return true;
+}
+
 // Phase 8d: display-only helpers for renderDebugUI()'s "Input Bindings"
 // readout below -- not used anywhere rebinding actually happens (there is
 // no rebinding UI in this phase; see README.md's own Phase 8d section for
@@ -1321,6 +1414,31 @@ Application::Application(int width, int height, const std::string& title, std::u
             sceneEntity, ModelComponent{resources_.getModel(kScenePath, *shader_), "assets/models/scene.obj"});
     } else {
         loadScene(registry_, kDefaultScenePath, resources_, *shader_);
+    }
+
+    // Phase 14d: ENGINE_DEBUG_SELECT -- see that env var's own comment above
+    // for why this exists. Resolved once, here, after the scene above has
+    // finished populating registry_ (so every entity's NameComponent -- and
+    // therefore findEntityByName()'s own lookup -- actually exists by the
+    // time this runs); an unset env var leaves selectedEntity_ at its
+    // default std::nullopt (this phase's own "no selection at startup"
+    // state), and a set-but-unmatched name is logged as a warning and
+    // ALSO leaves selectedEntity_ unset, rather than either crashing or
+    // silently pointing selectedEntity_ at an invalid EntityId a later
+    // registry_.getComponent() call would just as silently find nothing for.
+    {
+        const std::string debugSelectName = debugSelectEntityNameFromEnv();
+        if (!debugSelectName.empty()) {
+            const EntityId found = findEntityByName(registry_, debugSelectName);
+            if (found.valid()) {
+                selectedEntity_ = found;
+                LOG_INFO("ENGINE_DEBUG_SELECT=\"" + debugSelectName + "\": pre-selecting entity " +
+                          std::to_string(found.index()));
+            } else {
+                LOG_WARN("ENGINE_DEBUG_SELECT=\"" + debugSelectName +
+                          "\" does not match any entity's name; starting with no selection");
+            }
+        }
     }
 
     // Phase 9 bug-review composition fix: two single-axis rows instead of a
@@ -2404,6 +2522,33 @@ void Application::render() {
         GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
     }
 
+    // Phase 14d: this frame's selection outline -- built from selectedEntity_
+    // as it stood BEFORE editorUI_.renderDockspaceShell() below runs (and
+    // could change it in response to a Scene Hierarchy click this same
+    // frame) -- see selectedEntity_'s own application.hpp comment for why
+    // that ordering means a newly-clicked selection's outline only starts
+    // showing the FOLLOWING frame, not this one. No outline at all (outline
+    // stays nullptr) when nothing is selected, the selected entity has no
+    // ModelComponent (nothing to project a bounding sphere from), or its
+    // sphere/offset points project behind the camera (see
+    // computeSelectionOutlineNDC()'s own comment) -- each is this phase's
+    // own documented "no MEANINGFUL outline this frame" case, not an error.
+    SelectionOutline outline{};
+    bool hasOutline = false;
+    if (selectedEntity_.has_value()) {
+        const ModelComponent* selectedModel = registry_.getComponent<ModelComponent>(*selectedEntity_);
+        if (selectedModel != nullptr && selectedModel->model) {
+            // Phase 14b: the same resolveWorldMatrix() the main color pass
+            // above uses for this entity's actual drawn position -- a
+            // parented entity's outline must track its resolved WORLD
+            // transform, not its raw local one, or it would visibly
+            // disagree with where the entity is actually drawn.
+            const glm::mat4 worldMatrix = resolveWorldMatrix(registry_, *selectedEntity_);
+            const BoundingSphere worldSphere = selectedModel->model->boundingSphere().transformed(worldMatrix);
+            hasOutline = computeSelectionOutlineNDC(worldSphere, camera_, view, projection, outline);
+        }
+    }
+
     // Phase 8c/14a: last thing render() does -- so every ImGui widget (both
     // editorUI_'s always-on dockspace shell and, when enabled, debugUI_'s
     // diagnostic panel) lands on top of everything else this frame drew.
@@ -2412,14 +2557,17 @@ void Application::render() {
     // editorUI_.newFrame() starts it, editorUI_.renderDockspaceShell()
     // submits the Scene/Assets/Viewport/Inspector panels -- Viewport's own
     // body now an ImGui::Image() of viewportColorFramebuffer_'s color
-    // texture (Phase 14c; see editor_ui.cpp) rather than placeholder text --
-    // renderDebugUI() additionally submits debugUI_'s own panel content
-    // (still a no-op unless ENGINE_SHOW_DEBUG_UI/F1 have enabled it --
-    // entirely unchanged from Phase 8c/8d), and editorUI_.render()
-    // rasterizes everything submitted this frame in one ImGui::Render() +
-    // ImGui_ImplOpenGL3_RenderDrawData() pair.
+    // texture (Phase 14c; see editor_ui.cpp) rather than placeholder text,
+    // plus (Phase 14d) `outline`'s dashed-rectangle overlay when hasOutline,
+    // and Scene's own body a real, click-to-select tree (Phase 14d) instead
+    // of placeholder text -- renderDebugUI() additionally submits debugUI_'s
+    // own panel content (still a no-op unless ENGINE_SHOW_DEBUG_UI/F1 have
+    // enabled it -- entirely unchanged from Phase 8c/8d), and
+    // editorUI_.render() rasterizes everything submitted this frame in one
+    // ImGui::Render() + ImGui_ImplOpenGL3_RenderDrawData() pair.
     editorUI_.newFrame();
-    editorUI_.renderDockspaceShell(viewportColorFramebuffer_.colorTextureId());
+    editorUI_.renderDockspaceShell(viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_,
+                                    hasOutline ? &outline : nullptr);
     renderDebugUI();
     editorUI_.render();
 }

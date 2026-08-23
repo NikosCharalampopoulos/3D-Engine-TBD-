@@ -58,10 +58,47 @@
 // its *next* call, before that frame's 3D pipeline runs -- see this header's
 // own comment on those two getters for why "next frame", not "this frame",
 // is correct.
+//
+// Phase 14d: the "Scene" panel's placeholder text is replaced by a real tree
+// (see scene_hierarchy.hpp's buildSceneTree(), and this class's own Phase
+// 14d comment on renderDockspaceShell() below) built from `registry`'s
+// actual Parent-component nesting, with click-to-select; the Viewport panel
+// gains an optional dashed-rectangle-plus-corner-brackets overlay around the
+// selected entity's on-screen bounding box, drawn in the SAME window's own
+// ImGui draw list right after ImGui::Image() so it composites on top of the
+// rendered 3D content and is automatically clipped to the Viewport panel's
+// own rectangle (Dear ImGui clips a window's draw commands to that window's
+// visible bounds by default -- confirmed, not assumed, via this phase's own
+// headless screenshot verification -- see README.md's Phase 14d section)
+// rather than bleeding into the Scene/Assets/Inspector panels around it.
+// EditorUI still owns none of this data itself -- `registry`/`selectedEntity`
+// are Application's own state, passed in by reference each frame, matching
+// this class's pre-existing "just a Dear ImGui wrapper over data Application
+// owns" role (see e.g. viewportColorTexture above).
+
+#include <optional>
+
+#include "engine/ecs.hpp"
+
 struct GLFWwindow;
 typedef unsigned int ImGuiID;
 
 namespace engine {
+
+// Phase 14d: the currently-selected entity's on-screen bounding box, already
+// projected into normalized device coordinates ([-1, 1] on both axes, +Y up
+// -- this engine's ordinary clip-space convention, e.g. Frustum/BoundingSphere)
+// by Application::render() (see that method's own Phase 14d comment for the
+// "project center +/- radius along the camera's own right/up axes" technique
+// used to build it) -- EditorUI does no 3D math of its own, it only maps this
+// already-computed NDC rect onto the Viewport panel's own current on-screen
+// pixel rectangle (see renderDockspaceShell()'s own Phase 14d comment).
+struct SelectionOutline {
+    float ndcMinX = 0.0f;
+    float ndcMinY = 0.0f;
+    float ndcMaxX = 0.0f;
+    float ndcMaxY = 0.0f;
+};
 
 class EditorUI {
 public:
@@ -111,7 +148,36 @@ public:
     // records the panel's own current ImGui::GetContentRegionAvail() every
     // call, regardless of whether an image was drawn -- that's what
     // viewportWidth()/viewportHeight() return.
-    void renderDockspaceShell(unsigned int viewportColorTexture);
+    //
+    // Phase 14d: three new parameters.
+    //   - `registry`: rebuilds the Scene panel's tree fresh every call (via
+    //     scene_hierarchy.hpp's buildSceneTree() -- a handful of entities, so
+    //     no reason to cache/diff this against a previous frame) instead of
+    //     the old placeholder text, and reads/writes `selectedEntity` as the
+    //     user clicks rows.
+    //   - `selectedEntity`: Application's own selection state (see
+    //     application.hpp's own Phase 14d comment for why Application, not
+    //     EditorUI, owns it) -- passed by reference so a click inside this
+    //     one call can update it directly, and so Application::render()
+    //     (which builds `outline` below from this same value, earlier in the
+    //     very same render() call, before renderDockspaceShell() runs) and
+    //     a later Phase 14e Inspector panel can both read the exact same
+    //     value back.
+    //   - `outline`: nullptr when nothing is selected (no rectangle drawn --
+    //     this phase's own "no selection = no outline" default state), else
+    //     the selected entity's screen-space bounding box in NDC (see
+    //     SelectionOutline's own comment above), which this method maps onto
+    //     the Viewport panel's *current* on-screen pixel rectangle (captured
+    //     via ImGui::GetCursorScreenPos() before ImGui::Image() advances the
+    //     cursor, alongside the same ImGui::GetContentRegionAvail() the image
+    //     itself is sized to) and draws as a dashed rectangle + four small
+    //     corner brackets, via ImGui::GetWindowDrawList() so it lands in the
+    //     Viewport window's own draw list -- see this method's own .cpp
+    //     comment for why that, rather than the global foreground draw list,
+    //     is what keeps this overlay from ever bleeding into the panels
+    //     around it.
+    void renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
+                               std::optional<EntityId>& selectedEntity, const SelectionOutline* outline);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()

@@ -142,11 +142,41 @@ public:
     // convention.
     void drawNormalDepth(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
 
+    // Phase 14d: one bounding sphere aggregating every mesh across every
+    // node of this model (not just its root node's own meshes -- scene.obj's
+    // "scene" entity has three, one per node: pyramid/table/box), each
+    // transformed into `rootTransform`'s space by its own accumulated node
+    // transform first (the same worldTransform drawNode() composes for
+    // drawing). Used by the Scene Hierarchy's selection outline
+    // (Application::render(), see this file's own Phase 14d comment) to get
+    // one world-space volume to project onto the screen for a selected
+    // entity's whole model, without the editor UI needing to know how many
+    // meshes/nodes that model actually has.
+    //
+    // Not the tightest possible enclosing sphere (that's a harder,
+    // non-trivial computational-geometry problem -- Welzl's algorithm and
+    // similar) -- this instead centers on the unweighted centroid of every
+    // individual mesh sphere's own center, then sets the radius to the
+    // farthest any single mesh sphere's own surface (center-to-centroid
+    // distance plus that mesh's own radius) reaches from that centroid. That
+    // is always a conservative superset of the model's real extent (matching
+    // BoundingSphere::transformed()'s own "never cull something that should
+    // still be visible" bias, mesh.hpp), which is exactly the property this
+    // phase's outline projection needs -- a screen-space rectangle a little
+    // larger than the object's exact silhouette reads fine visually; one
+    // that's too small and clips into the object would not.
+    BoundingSphere boundingSphere(const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
+
 private:
     void drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform, const Frustum* frustum,
                   CullStats* cullStats) const;
     void drawNodeDepthOnly(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
     void drawNodeNormalDepth(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
+    // Phase 14d: recursive helper for the public boundingSphere() above --
+    // appends one already-`worldTransform`-transformed BoundingSphere per
+    // mesh referenced anywhere in `node`'s own subtree.
+    void collectBoundingSpheres(const ModelNode& node, const glm::mat4& parentTransform,
+                                 std::vector<BoundingSphere>& out) const;
 
     std::vector<Mesh> meshes_;
     std::vector<Material> materials_;
