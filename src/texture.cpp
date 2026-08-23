@@ -14,6 +14,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "engine/gl_debug.hpp"
 #include "engine/log.hpp"
@@ -141,6 +142,7 @@ Texture::Texture(const std::string& path, bool generateMipmaps) {
     width_ = width;
     height_ = height;
     channels_ = channels;
+    path_ = path;  // Phase 14e: kept for display only -- see this class's own header comment.
 
     GLenum format = GL_RGB;
     try {
@@ -212,7 +214,11 @@ Texture::~Texture() {
 }
 
 Texture::Texture(Texture&& other) noexcept
-    : textureId_(other.textureId_), width_(other.width_), height_(other.height_), channels_(other.channels_) {
+    : textureId_(other.textureId_),
+      width_(other.width_),
+      height_(other.height_),
+      channels_(other.channels_),
+      path_(std::move(other.path_)) {
     other.textureId_ = 0;
     other.width_ = 0;
     other.height_ = 0;
@@ -229,6 +235,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
         width_ = other.width_;
         height_ = other.height_;
         channels_ = other.channels_;
+        path_ = std::move(other.path_);
 
         other.textureId_ = 0;
         other.width_ = 0;

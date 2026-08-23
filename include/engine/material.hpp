@@ -110,6 +110,27 @@ public:
     // order: shader_, then diffuseTexture_, then normalMap_, then these) so
     // member-init order and declaration order agree -- -Wreorder is part of
     // -Wextra.
+    //
+    // Phase 14e note: this mutability is exactly why the new Inspector
+    // panel's Material section (editor_ui.cpp) deliberately does NOT expose
+    // `tint`/`shininess` as live-editable ImGui widgets, even though a
+    // DragFloat3 bound directly to `tint` would be a one-line change. The
+    // Material a selected entity's ModelComponent points at is not that
+    // entity's own private copy -- model.hpp's own header comment explains
+    // Model instances are cached and SHARED via ResourceManager whenever
+    // several entities load the same asset path (e.g. both
+    // "parented_demo_cube" and "falling_cube" load
+    // assets/models/falling_cube.obj today, see assets/scenes/default.json),
+    // so mutating `tint` through one entity's Inspector selection would
+    // silently repaint every OTHER entity sharing that same cached Model too
+    // -- a real, surprising footgun for whoever adds live material editing
+    // later, not a hypothetical one. This phase's own scope call: display
+    // Model::primaryMaterial()'s tint/shininess/texture read-only (see
+    // model.hpp's Phase 14e comment) rather than ship that footgun, or
+    // silently editable-in-name-only fields. A future phase that wants real
+    // per-entity material editing needs an actual per-entity material
+    // override/clone step first (e.g. Model gaining a "give me my own
+    // unshared copy of this material" operation) -- there isn't one today.
     glm::vec3 tint;
     float shininess;
 };

@@ -55,12 +55,22 @@ public:
     // upload format rather than silently assuming RGB.
     int channels() const { return channels_; }
     unsigned int id() const { return textureId_; }
+    // Phase 14e: the same `path` string this Texture was constructed from,
+    // kept around purely for display -- e.g. the Inspector panel's Material
+    // section showing which file a selected entity's diffuse texture
+    // actually came from (see editor_ui.cpp's Phase 14e comment). Nothing
+    // GL-facing reads this; bind() never did and still doesn't. Empty for a
+    // Texture that (hypothetically) hasn't been constructed via the normal
+    // path-based constructor -- there is no other constructor today, so this
+    // is always populated in practice.
+    const std::string& path() const { return path_; }
 
 private:
     unsigned int textureId_ = 0;
     int width_ = 0;
     int height_ = 0;
     int channels_ = 0;
+    std::string path_;
 };
 
 }  // namespace engine

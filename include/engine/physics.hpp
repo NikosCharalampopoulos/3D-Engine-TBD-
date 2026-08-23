@@ -49,6 +49,13 @@
 namespace engine {
 
 class EntityRegistry;
+// Phase 14e: forward-declared for setEntityStatic()'s signature below, the
+// same "just the declaration, ecs.hpp itself stays a physics.cpp-only
+// #include" shape EntityRegistry above already has -- this header still
+// depends on nothing but <glm/glm.hpp> for any type it actually defines
+// (RigidBody/Collider), matching physics.cpp's own "no GL/Window dependency
+// at all" header comment.
+class EntityId;
 
 // Gravity's constant downward (-Y) acceleration, world units/second^2 --
 // exposed here (not a physics.cpp-local constant) so a caller computing an
@@ -115,6 +122,52 @@ struct Collider {
 // "transform" block, see scene_serialization.hpp), but addComponent<T>()
 // itself never enforces that pairing.
 void stepPhysics(EntityRegistry& registry, float deltaTime, float groundY);
+
+// Phase 14e: the "Static (Immovable)" mechanism the Inspector panel's toggle
+// uses (see editor_ui.cpp's Phase 14e comment) -- deliberately living here,
+// in the physics module itself, rather than as editor-only/ImGui-facing
+// code. That placement is a direct consequence of this file's own top
+// comment: stepPhysics() only ever iterates registry.each<RigidBody>(), so
+// "static" in this engine's actual architecture already IS "has no
+// RigidBody" -- there is no separate isStatic flag anywhere to set. Toggling
+// that IS exactly this module's own domain, no different in kind from
+// stepPhysics() itself reading/writing these same two component types; a
+// dedicated function here (rather than inlined ImGui-adjacent code that
+// calls addComponent/removeComponent directly) is also what lets this exact
+// mutation be exercised by tests/physics_test.cpp with no live GL context or
+// Dear ImGui frame, the same "pure logic, its own small function" shape this
+// project already applies to stepPhysics() itself.
+//
+// makeStatic == true: removes `id`'s RigidBody component if it has one (so
+// stepPhysics() stops moving it), then ensures it has a Collider -- adding
+// one with Collider{}'s own default halfExtent (0.25) only if it doesn't
+// already have one; an existing Collider's halfExtent is left untouched.
+// This is deliberately a REAL Collider-only physics state, not a flag on
+// RigidBody -- see physics.hpp's own top comment for why "has a Collider but
+// no RigidBody" already means "static" today, with no code change needed
+// here to make that true.
+//
+// makeStatic == false: adds a default-constructed RigidBody back (zero
+// velocity, useGravity = true) if `id` doesn't already have one -- i.e.
+// makes it fall under gravity again starting from wherever its Transform
+// currently sits, not wherever it was when it was last dynamic. Its
+// Collider (if any) is left completely untouched either way: an entity can
+// be dynamic with or without a Collider, exactly as stepPhysics() already
+// tolerates (see physics_test.cpp's own "RigidBody with no Collider" case) --
+// this function has no opinion on whether a newly-dynamic entity should also
+// gain a Collider, since ground collision is a separate, independently
+// opt-in concern from "does gravity move this entity at all".
+//
+// Idempotent either way: calling with the state it's already in is a
+// harmless no-op (addComponent<T>() on an id that already has one just
+// overwrites it with an identical default-constructed value; this function
+// only calls addComponent<RigidBody>()/addComponent<Collider>() when the
+// component is actually absent, so an already-static entity keeps its exact
+// existing Collider::halfExtent rather than having it silently reset).
+// Well-defined (not a crash) for an id unknown to `registry` -- ecs.hpp's
+// own addComponent()/removeComponent() already tolerate that themselves, so
+// this function needs no extra guard of its own.
+void setEntityStatic(EntityRegistry& registry, EntityId id, bool makeStatic);
 
 }  // namespace engine
 

@@ -167,6 +167,36 @@ public:
     // that's too small and clips into the object would not.
     BoundingSphere boundingSphere(const glm::mat4& rootTransform = glm::mat4(1.0f)) const;
 
+    // Phase 14e: read-only access to one representative Material, for the
+    // Inspector panel's Material section (see editor_ui.cpp's Phase 14e
+    // comment) to display a selected entity's texture/tint/shininess.
+    // Deliberately returns `const Material&`, not `Material&` -- see this
+    // class's own header comment above: Model instances are cached and
+    // SHARED across every entity that loaded the same asset path (via
+    // ResourceManager, resource_manager.hpp), so a mutable reference here
+    // would let editing one entity's "material" in the Inspector silently
+    // repaint every other entity sharing this same cached Model. Read-only
+    // display is this phase's own deliberate scope choice for exactly that
+    // reason -- see material.hpp's own Phase 14e comment for the fuller
+    // writeup of the tradeoff this sidesteps.
+    //
+    // Not "the" material of a possibly-multi-mesh model (scene.obj's "scene"
+    // entity alone has three nodes, each with its own material) -- this
+    // returns whichever material meshes_[0] (the first mesh Assimp reported,
+    // not necessarily the root node's own mesh) actually uses, falling back
+    // to defaultMaterial_ if meshMaterialIndex_ is empty (no meshes at all,
+    // defensive only) or out of range (see meshMaterialIndex_'s own comment
+    // below for when that can happen). A single representative sample is
+    // exactly what a "what does this thing generally look like" Inspector
+    // readout needs; a full per-mesh material list is real, separate scope
+    // this phase's own brief doesn't ask for.
+    const Material& primaryMaterial() const {
+        if (meshMaterialIndex_.empty() || meshMaterialIndex_.front() < 0) {
+            return defaultMaterial_;
+        }
+        return materials_[static_cast<std::size_t>(meshMaterialIndex_.front())];
+    }
+
 private:
     void drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform, const Frustum* frustum,
                   CullStats* cullStats) const;

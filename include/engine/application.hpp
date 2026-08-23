@@ -953,6 +953,17 @@ private:
     // Dear ImGui's immediate-mode API has no way to submit the Scene
     // panel's widgets before the 3D pass whose output they might affect.
     std::optional<EntityId> selectedEntity_;
+    // Phase 14e: set from ENGINE_DEBUG_FORCE_STATIC/ENGINE_DEBUG_FORCE_DYNAMIC
+    // (see application.cpp's own comment on those two env vars and
+    // physics.hpp's setEntityStatic()) -- std::nullopt (the default) unless
+    // one of them resolved to a real entity at startup. update() logs this
+    // entity's Transform::position().y periodically when set, purely as a
+    // headless-verification aid proving the Inspector's "Static (Immovable)"
+    // toggle's actual physics EFFECT, not just its UI state. Independent of
+    // selectedEntity_ above -- forcing a physics state doesn't imply
+    // selecting that entity in the Inspector, though a verification run can
+    // set ENGINE_DEBUG_SELECT to the same name to see both at once.
+    std::optional<EntityId> physicsVerifyEntity_;
     Camera camera_;
     // Phase 8d: the data-driven key-binding table pollInputState() now
     // consults each frame (see input.hpp/input_action_map.hpp) -- owned

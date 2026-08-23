@@ -59,4 +59,23 @@ void stepPhysics(EntityRegistry& registry, float deltaTime, float groundY) {
     });
 }
 
+// Phase 14e: see physics.hpp's own extensive comment on this function for
+// the full design rationale -- this is deliberately the one place that ever
+// calls addComponent<RigidBody>()/addComponent<Collider>()/
+// removeComponent<RigidBody>() in service of the Inspector's "Static
+// (Immovable)" toggle, rather than editor_ui.cpp reaching into
+// EntityRegistry's template API directly.
+void setEntityStatic(EntityRegistry& registry, EntityId id, bool makeStatic) {
+    if (makeStatic) {
+        registry.removeComponent<RigidBody>(id);
+        if (!registry.hasComponent<Collider>(id)) {
+            registry.addComponent<Collider>(id, Collider{});
+        }
+    } else {
+        if (!registry.hasComponent<RigidBody>(id)) {
+            registry.addComponent<RigidBody>(id, RigidBody{});
+        }
+    }
+}
+
 }  // namespace engine

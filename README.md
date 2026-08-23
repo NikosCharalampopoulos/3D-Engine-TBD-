@@ -3996,6 +3996,188 @@ itself, selecting a row, and the outline that selection drives.
     all completed cleanly with zero GL-error log lines, matching this
     section's original Verify results exactly.
 
+### Phase 14e: a real, live Inspector panel
+
+Fifth sub-phase of the "Phase 14: full editor UI" arc. The Inspector panel's
+placeholder text ("Inspector -- coming in Phase 14e") is replaced by a real
+editor for whatever entity Phase 14d's Scene Hierarchy panel currently has
+selected: a fully live Transform section, a read-only Material section, and
+a Physics section that exposes this engine's real static/dynamic
+architectural split for the first time as something the Inspector can
+actually flip. Still no real Delete/Browse (Phase 14f/14g) -- both shown
+greyed-out for visual completeness against the approved mockup, wired to
+nothing.
+
+- **Transform -- fully live, Rot-Y only, not full XYZ Euler**: Position and
+  Scale are ordinary `ImGui::DragFloat3`s writing straight back into the
+  selected entity's real `Transform::setPosition()`/`setScale()` every frame
+  they're dragged -- unconditionally safe, since (unlike `ModelComponent`'s
+  `Model`) `Transform` is a genuinely per-entity `ComponentPool<Transform>`
+  entry (`ecs.hpp`), never shared across entities. Rotation is a single
+  `DragFloat("Rot Y", ...)`, matching the approved mockup exactly, rather
+  than DebugUI's own pre-existing "Scene Entities" panel's full XYZ Euler
+  `DragFloat3` (`Application::renderDebugUI()`, Phase 8c) -- a deliberate,
+  *checked* choice, not an assumption: every entity in
+  `assets/scenes/default.json` today stores a rotation quaternion whose only
+  nonzero imaginary component is `y` (a pure rotation around world Y --
+  `"scene"`'s own ~12-degree tilt included), confirmed by hand-decoding each
+  entity's quaternion in the scene file before writing this. A single Rot-Y
+  field is therefore an honest, lossless representation of every rotation
+  this scene actually contains, exactly matching the approved mockup instead
+  of over-building a second full-Euler control this scene has no use for.
+  `glm::eulerAngles()` -- the same decomposition DebugUI's own panel already
+  uses -- reads out just its `.y` component; editing the field always
+  *replaces* the whole rotation with a fresh `angleAxis(Y)` quaternion, so a
+  hypothetical future non-Y rotation would lose its pitch/roll the moment
+  this field is touched (the standard Euler gimbal-lock caveat, restated
+  in-code) -- there is no UI path that can create one today, so this is a
+  documented, not-yet-reachable limitation, the same posture this project
+  already takes with `buildSceneTree()`'s cycle guards.
+- **Material -- read-only by design, not an oversight**: the panel shows a
+  selected entity's `Model::primaryMaterial()` (new, `model.hpp` -- the first
+  mesh's material, or `defaultMaterial_` as a fallback; not a full per-mesh
+  material list, which is real, separate scope) as a disabled `ColorEdit3`
+  swatch (tint), shininess, and the diffuse texture's real resolved path +
+  dimensions (`Texture` gained a `path()` accessor, `texture.hpp`/`.cpp`,
+  purely for this display -- nothing GL-facing reads it). This is
+  deliberately **not** editable this phase, and the reason is a real,
+  concrete footgun rather than a hypothetical one: `model.hpp`'s own header
+  comment already establishes that `Model` instances are cached and *shared*
+  across every entity that loads the same asset path via `ResourceManager`
+  -- and this project's own default scene already exercises that exact
+  sharing (`"parented_demo_cube"` and `"falling_cube"` both load
+  `assets/models/falling_cube.obj`, see `assets/scenes/default.json`). A live
+  `tint`/`shininess` `DragFloat` bound directly to `Material`'s own public
+  mutable fields (`material.hpp`) would have been a one-line change -- and
+  would have silently repainted *every* entity sharing that cached `Model`
+  the instant one of them was edited from the Inspector. `material.hpp` and
+  `model.hpp` both carry a new Phase 14e comment spelling this out for
+  whoever adds real per-entity material editing later (which needs an actual
+  per-entity material clone/override step first -- there isn't one today),
+  and the in-panel text states the same reason plainly, not just in a code
+  comment nobody using the editor would ever see. "Browse..." is a disabled
+  placeholder button (Phase 14g's job).
+- **Physics -- the real static/dynamic split, wired through one new
+  function**: `physics.hpp`/`physics.cpp` gain `setEntityStatic(registry, id,
+  makeStatic)` -- the exact function the Inspector's "Static (Immovable)"
+  checkbox calls, deliberately living in the physics module itself rather
+  than as inline ImGui-adjacent code, for the same reason this function's own
+  header comment gives: `stepPhysics()` only ever iterates
+  `registry.each<RigidBody>()` (Phase 8e), so "static" in this engine's own
+  architecture already **is** "has no RigidBody" -- there is no separate
+  `isStatic` flag anywhere to set, and there never was. Toggling that
+  membership is exactly this module's own domain, no different in kind from
+  `stepPhysics()` itself reading/writing these same two component types:
+  - `makeStatic = true`: removes the entity's `RigidBody` (if any) via
+    `EntityRegistry::removeComponent<RigidBody>()`, then ensures it has a
+    `Collider` -- adding one with `Collider{}`'s own struct default
+    (`halfExtent = 0.25`) only if it doesn't already have one; an existing
+    Collider's `halfExtent` is left completely untouched.
+  - `makeStatic = false`: adds a default-constructed `RigidBody` back (zero
+    velocity, `useGravity = true`) if it doesn't already have one, leaving
+    any `Collider` untouched either way -- an entity can be dynamic with or
+    without a Collider, exactly as `stepPhysics()` already tolerates (see
+    `physics_test.cpp`'s own pre-existing "RigidBody with no Collider" case).
+  - **One checkbox covers all three starting states**, including turning a
+    no-physics-at-all entity into a physics object for the first time: the
+    Inspector computes `isStatic = !hasRigidBody && hasCollider` fresh every
+    frame, so an entity with *neither* component (`"scene"` and
+    `"parented_demo_cube"` both start this way today) reads as unchecked too,
+    labeled `"Static (Immovable) (no physics yet)"`. Checking it calls
+    `setEntityStatic(..., true)`, which -- since there's no `RigidBody` to
+    remove -- just adds a `Collider`, landing exactly on this phase's new
+    Collider-only static state; unchecking it afterward adds a `RigidBody`
+    back, making it fall. This is the concrete mechanism that demonstrates
+    the new static-collider path on an entity that had never exercised it
+    before, not just re-flipping `"falling_cube"`'s pre-existing physics.
+  - `Collider Half-Extent` (`ImGui::DragFloat` bound directly to
+    `Collider::halfExtent`) is shown whenever a Collider exists, in **both**
+    the static and dynamic states; `Use Gravity` (bound to
+    `RigidBody::useGravity`) only when dynamic -- matching the approved
+    mockup exactly. A dynamic entity with a `RigidBody` but no `Collider`
+    (Phase 8e's own tested combination) shows `"No collider on this
+    entity"` instead of a half-extent field, rather than inventing an
+    "add a collider" button for a case this phase's own brief says to keep
+    simple.
+  - **The caveat this phase's brief explicitly requires stating plainly**:
+    the in-panel Physics section always shows a note that this engine has no
+    entity-vs-entity collision system yet (`physics.hpp`'s own "What this
+    deliberately IS / IS NOT" list) -- only per-entity gravity plus a single
+    flat ground-plane check for `RigidBody` entities. A Collider-only static
+    entity is a real, architecturally correct state (nothing ever iterates
+    it to move it, by construction), but nothing currently collides *against*
+    it either; it is not yet load-bearing for gameplay, and the UI says so
+    rather than implying otherwise.
+- **Verifying the toggle's actual EFFECT, not just its UI state**: a checkbox
+  rendering in the right state doesn't by itself prove `addComponent`/
+  `removeComponent` were actually called correctly. Two new env vars, the
+  same getenv-gated-value shape as `ENGINE_DEBUG_SELECT`, force
+  `setEntityStatic()` at startup (after the scene has finished loading) on a
+  *named* entity: `ENGINE_DEBUG_FORCE_STATIC=<name>` /
+  `ENGINE_DEBUG_FORCE_DYNAMIC=<name>` (`application.cpp`). Both call the
+  exact same production `setEntityStatic()` the Inspector checkbox itself
+  calls -- not a parallel hand-rolled toggle -- and record the target entity
+  in a new `physicsVerifyEntity_` member so `update()` can `LOG_INFO` its
+  `Transform::position().y` every `kPhysicsVerifyLogFrameInterval` (10)
+  frames, right after `stepPhysics()` runs. Two runs at `ENGINE_MAX_FRAMES=60`
+  prove both directions numerically, not just visually:
+  - `ENGINE_DEBUG_FORCE_STATIC=falling_cube`: `y` reads exactly `2.500000` at
+    every logged frame (0, 10, 20, ..., 50) -- compare the *default* run's
+    own `falling_cube`, which had already fallen to `y = 2.484` by around
+    frame 50. The Inspector screenshot for this same run shows `Static
+    (Immovable)` checked and `Position` reading `2.500` (frame-latency-static,
+    matching selectedEntity_'s own one-frame-behind design), with no `Use
+    Gravity` toggle shown (no `RigidBody`).
+  - `ENGINE_DEBUG_FORCE_DYNAMIC=scene`: `y` reads `-0.000000`, `-0.149942`,
+    `-0.572385`, `-1.267327`, `-2.234769`, `-3.474712` at frames 0/10/20/30/40/50
+    -- strictly decreasing, matching free-fall under gravity with no ground
+    collision (`"scene"` has no `Collider`, so it falls straight through --
+    the same documented behavior `physics_test.cpp`'s own "RigidBody with no
+    Collider" case already covers). The Inspector screenshot for this run
+    shows `Static (Immovable)` unchecked, `Use Gravity` checked, and `"No
+    collider on this entity"` in place of a half-extent field.
+  - `tests/physics_test.cpp` also gained four new focused cases exercising
+    `setEntityStatic()` directly (dynamic -> static stops `stepPhysics()`
+    from moving it; static (Collider-only) -> dynamic starts falling
+    immediately; an entity with neither component becomes static-from-
+    scratch with the Collider struct's own default half-extent; and calling
+    `makeStatic = true` on an already-static entity is idempotent -- an
+    existing custom `halfExtent` is never reset back to the default) -- all
+    running with no live GL context, the same "plain executable, links only
+    the pure logic file it's testing" shape `physics_test`'s pre-existing
+    cases already use. `ctest` stays **5/5** (no new test *executable* --
+    these are new cases inside the existing `physics_test`, not a sixth
+    target).
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with **zero
+  new warnings** under `-Wall -Wextra`. `ctest` reports **5/5** (including
+  the four new `physics_test` cases above). `tools/run_headless.sh` at
+  `ENGINE_MAX_FRAMES=60` completed cleanly with **zero `[ERROR]` log lines**
+  across six separate runs (default/no-selection,
+  `ENGINE_DEBUG_SELECT=falling_cube`, `ENGINE_DEBUG_SELECT=parented_demo_cube`,
+  `ENGINE_DEBUG_FORCE_STATIC=falling_cube`, `ENGINE_DEBUG_FORCE_DYNAMIC=scene`,
+  and `ENGINE_SHOW_DEBUG_UI=1`), all inspected directly as screenshots:
+  - **No selection**: the Inspector shows `"Inspector -- select an entity in
+    the Scene panel to view/edit it."`, matching the pre-14e placeholder's
+    own tone rather than a blank panel.
+  - **`falling_cube` selected**: Transform shows its live, still-falling
+    position; Material shows the checker texture's real resolved path
+    (`.../assets/textures/checker.png`, `256x256`) and shininess `32.0`;
+    Physics shows `Static (Immovable)` **unchecked**, `Use Gravity`
+    **checked**, and `Collider Half-Extent` **0.250** -- exactly matching
+    `assets/scenes/default.json`'s own `"collider": {"halfExtent": 0.25}`.
+  - **`parented_demo_cube` selected** (no physics components today): Physics
+    shows `Static (Immovable)` unchecked with the explanatory
+    `"This entity has no physics components yet..."` text, confirming the
+    "turn any entity into a physics object" affordance renders sensibly for
+    the exact entity this phase's own brief calls out as the best
+    demonstration case.
+  - The two force-toggle runs and the `ENGINE_SHOW_DEBUG_UI=1` run are
+    described in the "actual EFFECT" bullet above and were all visually
+    confirmed alongside their log output -- including that Phase 14d's Scene
+    Hierarchy tree, click-to-select highlighting, and viewport selection
+    outline (the dashed teal rectangle) all still render correctly,
+    unaffected by this phase's changes.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

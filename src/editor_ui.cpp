@@ -15,11 +15,20 @@
 // setup below mirrors).
 #include <imgui_internal.h>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 #include "engine/log.hpp"
+#include "engine/material.hpp"
+#include "engine/model.hpp"
+#include "engine/physics.hpp"
 #include "engine/scene_hierarchy.hpp"
+#include "engine/texture.hpp"
+#include "engine/transform.hpp"
 
 namespace engine {
 
@@ -157,6 +166,223 @@ void addCornerBrackets(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight,
         drawList->AddLine(corner, ImVec2(corner.x + (armX[i] * kArmLength), corner.y), color, kThickness);
         drawList->AddLine(corner, ImVec2(corner.x, corner.y + (armY[i] * kArmLength)), color, kThickness);
     }
+}
+
+// Phase 14e: the Inspector panel's real content -- replaces the placeholder
+// "Inspector -- coming in Phase 14e" TextWrapped() line at this file's one
+// "Inspector" Begin/End call site below. Reads/writes `registry` directly
+// (this class's pre-existing "just a Dear ImGui wrapper over data
+// Application owns" role, same as renderSceneTreeNode() above) -- there is
+// no EditorUI-owned Inspector state at all, matching selectedEntity_'s own
+// application.hpp comment on why Application, not EditorUI, is the one
+// long-term home for what's selected.
+//
+// Three sections, matching the approved mockup: Transform (always fully
+// live -- Transform is a genuinely per-entity ECS component, no
+// shared-mutation concern), Material (read-only display this phase -- see
+// material.hpp's own Phase 14e comment for exactly why editing it here would
+// be a footgun), and Physics (the real static/dynamic split, wired through
+// physics.hpp's setEntityStatic() -- see that function's own header comment
+// for the full mechanism).
+void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& selectedEntity) {
+    if (!selectedEntity.has_value()) {
+        // Matches this panel's pre-14e placeholder tone (see the removed
+        // "Inspector -- coming in Phase 14e" line) rather than an empty/
+        // blank-looking panel -- this phase's own brief explicitly calls
+        // for that.
+        ImGui::TextWrapped("Inspector -- select an entity in the Scene panel to view/edit it.");
+        return;
+    }
+
+    const EntityId id = *selectedEntity;
+    Transform* transform = registry.getComponent<Transform>(id);
+    if (transform == nullptr) {
+        // Defensive only: every entity buildSceneTree() can ever select
+        // (scene_hierarchy.hpp's own "which entities appear at all" comment)
+        // has a Transform by construction, and nothing in this engine
+        // destroys entities today (ecs.hpp's own EntityId comment) -- so a
+        // selection can't currently outlive the Transform it pointed at.
+        // Kept rather than assumed away so a future entity-destruction phase
+        // (14f+) can't turn a stale selectedEntity_ into a null dereference
+        // here.
+        ImGui::TextWrapped("Selected entity no longer has a Transform.");
+        return;
+    }
+
+    const NameComponent* nameComponent = registry.getComponent<NameComponent>(id);
+    const std::string name =
+        nameComponent != nullptr ? nameComponent->name : ("entity_" + std::to_string(id.index()));
+    const ModelComponent* modelComponent = registry.getComponent<ModelComponent>(id);
+
+    ImGui::TextUnformatted(name.c_str());
+    ImGui::TextDisabled("%s", modelComponent != nullptr ? "Mesh entity" : "Empty entity (no model)");
+    ImGui::Separator();
+
+    // --- Transform -----------------------------------------------------
+    // Fully live: every DragFloat/DragFloat3 below writes straight back into
+    // the selected entity's own Transform component the instant it's
+    // dragged, every frame it's being edited -- safe with no shared-cache
+    // caveat at all, since (unlike ModelComponent's Model) Transform is a
+    // genuinely per-entity ComponentPool<Transform> entry (ecs.hpp).
+    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        glm::vec3 position = transform->position();
+        if (ImGui::DragFloat3("Position", &position.x, 0.01f)) {
+            transform->setPosition(position);
+        }
+
+        // Rot Y only, matching the approved mockup's own single "Rot Y"
+        // field -- not full XYZ Euler like DebugUI's pre-existing "Scene
+        // Entities" panel (Application::renderDebugUI(), application.cpp)
+        // uses. Checked, not assumed: every entity in
+        // assets/scenes/default.json today stores a rotation quaternion
+        // whose only nonzero imaginary component is y (a pure rotation
+        // around world Y -- "scene"'s own ~12-degree tilt included), so a
+        // single Rot-Y field is an honest, lossless representation of every
+        // rotation this scene actually contains, not a simplification that
+        // silently drops information. glm::eulerAngles() is the same
+        // decomposition DebugUI's panel already uses (proven correct there);
+        // reading only its .y component here is exactly as correct for a
+        // pure-Y quaternion, and the standard Euler gimbal-lock caveat still
+        // applies in general (a non-pure-Y rotation reached some other way
+        // -- there is no UI path to create one today -- would decompose
+        // ambiguously/lossily through this one-axis readout, and EDITING
+        // this field always REPLACES the whole rotation with a pure
+        // angleAxis(Y) quaternion, discarding any pitch/roll component that
+        // might otherwise be present). A future phase that needs to author
+        // non-Y rotations from the Inspector should grow this into a full
+        // DragFloat3, the same way DebugUI's own panel already does it.
+        float rotationYDeg = glm::degrees(glm::eulerAngles(transform->rotation()).y);
+        if (ImGui::DragFloat("Rot Y", &rotationYDeg, 0.5f)) {
+            transform->setRotation(glm::angleAxis(glm::radians(rotationYDeg), glm::vec3(0.0f, 1.0f, 0.0f)));
+        }
+
+        glm::vec3 scale = transform->scale();
+        if (ImGui::DragFloat3("Scale", &scale.x, 0.01f, 0.01f, 100.0f)) {
+            transform->setScale(scale);
+        }
+    }
+
+    // --- Material --------------------------------------------------------
+    // Read-only this phase, deliberately -- see material.hpp's own Phase
+    // 14e comment on `tint`/`shininess` for the full "why", restated briefly
+    // in-panel below too so the reason is visible to whoever is looking at
+    // this UI, not just whoever reads this source file.
+    if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (modelComponent != nullptr && modelComponent->model != nullptr) {
+            const Material& material = modelComponent->model->primaryMaterial();
+
+            ImGui::BeginDisabled();
+            glm::vec3 tint = material.tint;
+            ImGui::ColorEdit3("Tint", &tint.x, ImGuiColorEditFlags_NoInputs);
+            ImGui::EndDisabled();
+            ImGui::Text("Shininess: %.1f", static_cast<double>(material.shininess));
+
+            const Texture& diffuse = material.diffuseTexture();
+            ImGui::TextWrapped("Texture: %s (%dx%d)",
+                                diffuse.path().empty() ? "(unknown)" : diffuse.path().c_str(), diffuse.width(),
+                                diffuse.height());
+            ImGui::TextDisabled("Model asset: %s", modelComponent->path.c_str());
+
+            ImGui::BeginDisabled();
+            ImGui::Button("Browse...");
+            ImGui::EndDisabled();
+
+            // See material.hpp's own Phase 14e comment for the full
+            // reasoning: this Model (and therefore this Material) is cached
+            // and shared across every entity that loaded the same asset
+            // path, so editing it here would silently repaint every other
+            // entity using the same model -- a real footgun, not a
+            // hypothetical one, given "parented_demo_cube" and
+            // "falling_cube" already share assets/models/falling_cube.obj in
+            // this project's own default scene.
+            ImGui::TextWrapped(
+                "Read-only: this material is shared by every entity using the same model asset (see "
+                "material.hpp).");
+        } else {
+            ImGui::TextDisabled("No model on this entity.");
+        }
+    }
+
+    // --- Physics -----------------------------------------------------
+    // The real static/dynamic split -- see physics.hpp's own setEntityStatic()
+    // comment for the full mechanism this toggle drives, and this file's own
+    // Phase 14e comment above for the section-by-section design summary.
+    if (ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const bool hadRigidBody = registry.hasComponent<RigidBody>(id);
+        const bool hadCollider = registry.hasComponent<Collider>(id);
+        // "Static" in this engine's own architecture already IS "has a
+        // Collider but no RigidBody" -- see physics.hpp's own top comment
+        // and setEntityStatic()'s comment. An entity with NEITHER component
+        // reads as unchecked here too (not static, not dynamic -- just
+        // nothing yet), distinguished for the user via the label suffix
+        // below rather than a separate widget.
+        bool isStatic = !hadRigidBody && hadCollider;
+
+        std::string staticLabel = "Static (Immovable)";
+        if (!hadRigidBody && !hadCollider) {
+            staticLabel += " (no physics yet)";
+        }
+        // Checking this ON removes any RigidBody and ensures a Collider
+        // exists (added with its own struct default halfExtent, 0.25, if
+        // missing) -- this is how "scene"/"parented_demo_cube" (neither has
+        // ANY physics component today) become this phase's new
+        // Collider-only static state for the first time. Unchecking it adds
+        // a default RigidBody (zero velocity, gravity on) back, leaving any
+        // existing Collider untouched -- see setEntityStatic()'s own header
+        // comment for the exact mechanism.
+        if (ImGui::Checkbox(staticLabel.c_str(), &isStatic)) {
+            setEntityStatic(registry, id, isStatic);
+        }
+
+        if (RigidBody* body = registry.getComponent<RigidBody>(id)) {
+            ImGui::Checkbox("Use Gravity", &body->useGravity);
+        }
+
+        // Shown for BOTH the static and dynamic states (whenever a Collider
+        // exists), unlike Use Gravity above -- a static entity's Collider is
+        // just as real and just as editable as a dynamic one's.
+        if (Collider* collider = registry.getComponent<Collider>(id)) {
+            ImGui::DragFloat("Collider Half-Extent", &collider->halfExtent, 0.01f, 0.01f, 10.0f);
+        } else if (hadRigidBody) {
+            // Phase 8e's own test coverage exercises exactly this
+            // combination (a RigidBody with no Collider falls straight
+            // through the ground, never colliding) -- a real, valid state,
+            // just with nothing here to edit a half-extent for.
+            ImGui::TextDisabled("No collider on this entity.");
+        }
+
+        if (!hadRigidBody && !hadCollider) {
+            ImGui::TextWrapped(
+                "This entity has no physics components yet. Check \"Static (Immovable)\" above to give it a "
+                "Collider (an immovable physics object); uncheck it afterward to make it fall under gravity "
+                "instead.");
+        }
+
+        // The caveat this phase's own brief explicitly requires stating
+        // plainly, not hiding: see physics.hpp's own "What this deliberately
+        // IS / IS NOT" comment -- this engine has no general entity-vs-
+        // entity collision system yet, only per-entity gravity + a single
+        // flat ground plane for RigidBody entities. A Collider-only static
+        // entity is a real, correct architectural state (nothing ever
+        // iterates it to move it, by construction -- stepPhysics() only
+        // walks entities with a RigidBody), but nothing currently collides
+        // against it either; it isn't yet load-bearing for gameplay.
+        ImGui::TextWrapped(
+            "Note: this engine has no entity-vs-entity collision yet. A static Collider here is a real "
+            "physics state, but nothing currently collides against it -- only dynamic (RigidBody) entities "
+            "get ground-plane collision.");
+    }
+
+    ImGui::Separator();
+    // Real deletion is Phase 14f's job -- see this phase's own "What NOT to
+    // do" brief. Shown greyed-out (not omitted) purely for visual
+    // completeness against the approved mockup; BeginDisabled()/EndDisabled()
+    // makes ImGui itself reject any click, so there is no dangling
+    // "does nothing" click handler to accidentally wire up later.
+    ImGui::BeginDisabled();
+    ImGui::Button("Delete Object");
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("Deletion is Phase 14f.");
 }
 
 }  // namespace
@@ -387,7 +613,7 @@ void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityReg
     ImGui::End();
 
     ImGui::Begin("Inspector");
-    ImGui::TextWrapped("Inspector -- coming in Phase 14e.");
+    renderInspectorPanel(registry, selectedEntity);
     ImGui::End();
 }
 

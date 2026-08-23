@@ -984,6 +984,28 @@ std::string debugSelectEntityNameFromEnv() {
     return value != nullptr ? std::string(value) : std::string();
 }
 
+// Phase 14e: ENGINE_DEBUG_FORCE_STATIC=<entity name> / ENGINE_DEBUG_FORCE_DYNAMIC=
+// <entity name>, unset by default -- the same getenv-gated-value shape as
+// ENGINE_DEBUG_SELECT just above (a target entity's NameComponent string,
+// not a plain on/off switch), but for setEntityStatic() (physics.hpp)
+// instead of selection. Exists specifically so a headless run can prove the
+// Inspector's "Static (Immovable)" toggle's actual EFFECT on the physics
+// simulation -- not just that the checkbox renders in the right state --
+// without needing a real mouse to click it: applied once, in the
+// constructor, after the scene has finished loading, exactly mirroring
+// ENGINE_DEBUG_SELECT's own resolution. Both can be set at once (they name
+// independent entities in every verification run this phase actually uses),
+// so there's no ordering conflict to resolve between them the way
+// cameraDemoMode_/frustumCullDemoMode_ have to pick one when both are set.
+std::string debugForceStaticEntityNameFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_FORCE_STATIC");
+    return value != nullptr ? std::string(value) : std::string();
+}
+std::string debugForceDynamicEntityNameFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_FORCE_DYNAMIC");
+    return value != nullptr ? std::string(value) : std::string();
+}
+
 // Phase 14d: linear search over the NameComponent pool for ENGINE_DEBUG_SELECT's
 // own lookup, above -- this engine's whole scene is a handful of entities
 // (three, see assets/scenes/default.json), so there's no reason for anything
@@ -1172,6 +1194,13 @@ std::array<ClusterLightInput, std::tuple_size<LightTable>::value> toClusterLight
 // update()'s kFramesPerStep) or across an ENGINE_FRUSTUM_CULL_DEMO run,
 // without flooding the log with a near-identical line every single frame.
 constexpr std::uint64_t kCullLogFrameInterval = 15;
+
+// Phase 14e: how often update() logs ENGINE_DEBUG_FORCE_STATIC/_DYNAMIC's
+// target entity's y position -- see that log call's own comment. 10 frames
+// (not 15, like kCullLogFrameInterval above) purely so a short
+// ENGINE_MAX_FRAMES=60 verification run still yields several data points
+// (frames 0, 10, 20, ...) rather than just three or four.
+constexpr std::uint64_t kPhysicsVerifyLogFrameInterval = 10;
 
 }  // namespace
 
@@ -1469,6 +1498,45 @@ Application::Application(int width, int height, const std::string& title, std::u
         }
     }
 
+    // Phase 14e: ENGINE_DEBUG_FORCE_STATIC / ENGINE_DEBUG_FORCE_DYNAMIC --
+    // see debugForceStaticEntityNameFromEnv()'s own comment above for why
+    // this exists. Applied once, here, after the scene above has finished
+    // populating registry_ (same reasoning as ENGINE_DEBUG_SELECT
+    // immediately above) via setEntityStatic() (physics.hpp) -- the exact
+    // same function the Inspector's "Static (Immovable)" checkbox calls, so
+    // this exercises the real production code path, not a parallel
+    // hand-rolled toggle. physicsVerifyEntity_ records whichever one
+    // resolved (an unset/unmatched env var leaves it at std::nullopt) so
+    // update() can log its Transform::position().y periodically -- see that
+    // function's own Phase 14e comment.
+    {
+        const std::string forceStaticName = debugForceStaticEntityNameFromEnv();
+        if (!forceStaticName.empty()) {
+            const EntityId found = findEntityByName(registry_, forceStaticName);
+            if (found.valid()) {
+                setEntityStatic(registry_, found, /*makeStatic=*/true);
+                physicsVerifyEntity_ = found;
+                LOG_INFO("ENGINE_DEBUG_FORCE_STATIC=\"" + forceStaticName + "\": forced entity " +
+                          std::to_string(found.index()) + " static (RigidBody removed, Collider ensured)");
+            } else {
+                LOG_WARN("ENGINE_DEBUG_FORCE_STATIC=\"" + forceStaticName + "\" does not match any entity's name");
+            }
+        }
+
+        const std::string forceDynamicName = debugForceDynamicEntityNameFromEnv();
+        if (!forceDynamicName.empty()) {
+            const EntityId found = findEntityByName(registry_, forceDynamicName);
+            if (found.valid()) {
+                setEntityStatic(registry_, found, /*makeStatic=*/false);
+                physicsVerifyEntity_ = found;
+                LOG_INFO("ENGINE_DEBUG_FORCE_DYNAMIC=\"" + forceDynamicName + "\": forced entity " +
+                          std::to_string(found.index()) + " dynamic (RigidBody added, gravity on)");
+            } else {
+                LOG_WARN("ENGINE_DEBUG_FORCE_DYNAMIC=\"" + forceDynamicName + "\" does not match any entity's name");
+            }
+        }
+    }
+
     // Phase 9 bug-review composition fix: two single-axis rows instead of a
     // packed 4x4 matrix -- see kSphereRowLength/kSphereGridDistanceFromCamera's
     // comment above for why. Columns are laid out using the camera's own
@@ -1631,6 +1699,27 @@ void Application::update(double deltaTime, const InputState& input) {
     // this same frame, from run()) so the object's Transform is already at
     // its new position by the time this frame actually draws it.
     stepPhysics(registry_, std::min(static_cast<float>(deltaTime), kMaxPhysicsTimestep), kGroundY);
+
+    // Phase 14e: numeric proof that ENGINE_DEBUG_FORCE_STATIC/_DYNAMIC's
+    // setEntityStatic() call actually changed how stepPhysics() (just above)
+    // treats this entity -- not just that it flipped a component flag. Logs
+    // every kPhysicsVerifyLogFrameInterval frames (same periodic-log shape
+    // as kCullLogFrameInterval elsewhere in this file) rather than every
+    // frame, so a headless run's log stays readable while still showing a
+    // clear trajectory over time: a forced-static entity's y should read
+    // exactly the same every time; a forced-dynamic entity's y should read
+    // strictly lower each time, exactly like physics_test.cpp's own
+    // hand-computed free-fall expectations. Silent (no log line at all)
+    // unless one of those two env vars actually resolved to a real entity --
+    // this must never fire in an ordinary run.
+    if (physicsVerifyEntity_.has_value() && frameCount_ % kPhysicsVerifyLogFrameInterval == 0) {
+        const Transform* transform = registry_.getComponent<Transform>(*physicsVerifyEntity_);
+        if (transform != nullptr) {
+            LOG_INFO("Phase 14e physics-verify: frame " + std::to_string(frameCount_) + ", entity " +
+                      std::to_string(physicsVerifyEntity_->index()) + " y = " +
+                      std::to_string(transform->position().y));
+        }
+    }
 
     if (frustumCullDemoMode_) {
         // Phase 13b: the camera's fixed "facing away from the scene" pose

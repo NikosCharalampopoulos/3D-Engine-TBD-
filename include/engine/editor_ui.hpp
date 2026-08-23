@@ -75,6 +75,22 @@
 // are Application's own state, passed in by reference each frame, matching
 // this class's pre-existing "just a Dear ImGui wrapper over data Application
 // owns" role (see e.g. viewportColorTexture above).
+//
+// Phase 14e: the "Inspector" panel's placeholder text is replaced by a real,
+// live editor for whatever entity `selectedEntity` currently points at --
+// renderDockspaceShell()'s own parameter list is UNCHANGED this phase
+// (`registry`/`selectedEntity` were already threaded through for Phase 14d's
+// tree/outline, and this phase's Inspector reads/writes those exact same two
+// references, nothing new to plumb). Transform (position/Rot-Y/scale) is
+// fully live; Material is read-only display (see material.hpp's own Phase
+// 14e comment for why: Model instances are cached/shared across entities via
+// ResourceManager, so a mutable Material reference here would let editing
+// one entity silently repaint every other entity sharing the same cached
+// Model); Physics exposes the real static/dynamic split via physics.hpp's
+// new setEntityStatic() -- toggling "Static (Immovable)" genuinely adds/
+// removes a RigidBody component, not a cosmetic flag. See editor_ui.cpp's
+// own Phase 14e comment (at renderInspectorPanel()) for the full
+// section-by-section design.
 
 #include <optional>
 
