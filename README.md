@@ -3654,6 +3654,40 @@ that deferral ends here.
   panel (Frame Stats/Render Passes/Input Bindings/Scene Entities, listing
   `parented_demo_cube`/`scene`/`falling_cube`) still layers correctly on top
   of the dockspace, unaffected in content, exactly as Phase 14a left it.
+- **Post-14c bug-review fix: a small enough window crashed the process at
+  startup, before a single frame ever rendered**. The constructor's own
+  initializer list built `brightFramebuffer_`/`pingpongFramebuffer0_`/`1_`
+  and `ssaoGBuffer_`/`ssaoRaw_`/`ssaoBlurred_` at `viewportWidth_ /
+  kBloomDownsampleFactor` etc. *without* the `std::max(1, ...)` floor
+  `resizeViewportTargetsIfNeeded()`'s own copy of this same division already
+  had, on the theory (recorded in this phase's original commit as a code
+  comment) that "this engine has never run at a window size small enough for
+  `/ 2` of that to reach 0, so no clamp is needed on this one-time initial
+  value." That theory was never actually tested against this engine's own
+  documented `ENGINE_WINDOW_WIDTH`/`ENGINE_WINDOW_HEIGHT` override knobs
+  (Phase 14a) -- `main.cpp`'s own validation for both only rejects `<= 0`,
+  so `ENGINE_WINDOW_WIDTH=1` (or `=1` on either dimension) is an explicitly
+  supported, accepted value, and `viewportWidth_`/`viewportHeight_` seed
+  directly from `window_.getSize()` before any resize-path clamp ever runs.
+  At width (or height) `1`, `1 / kBloomDownsampleFactor` (`2`) floors to `0`
+  in the constructor's own unclamped initializer, so `Framebuffer`'s
+  constructor builds a `0`-sized FBO, `glCheckFramebufferStatus()` never
+  reports it complete, and `Framebuffer` throws -- crashing the whole
+  process (`Fatal: Framebuffer: HDR framebuffer incomplete`) before
+  `Application::run()`'s main loop ever starts. Confirmed by actually
+  running `engine_app` at `ENGINE_WINDOW_WIDTH=1 ENGINE_WINDOW_HEIGHT=1`
+  (and separately at `1x600`/`600x1`) before this fix -- all three crashed
+  the same way. Fixed by factoring the division into one shared
+  `clampedDownsampleDimension(dimension, factor)` helper
+  (`std::max(1, dimension / factor)`) used by *both* the constructor's own
+  initializer list and `resizeViewportTargetsIfNeeded()`, closing the gap
+  between the two instead of leaving the constructor as a second,
+  un-clamped copy of logic the resize path already had right. Re-verified:
+  `ENGINE_WINDOW_WIDTH=1 ENGINE_WINDOW_HEIGHT=1` (and `1x600`/`600x1`) now
+  run cleanly to completion with zero `[ERROR]` log lines; a normal
+  `800x600` run still resizes to `431x565` exactly once (no regression to
+  the steady-state "resize once, then stable" behavior above); `ctest`
+  still 4/4.
 
 <br>
 

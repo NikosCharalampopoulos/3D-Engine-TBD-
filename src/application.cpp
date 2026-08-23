@@ -317,6 +317,32 @@ constexpr int kSSAOKernelSize = 32;
 // scene's contact-crease scale, confirmed by the screenshot/pixel-sample
 // verification this phase's own review requires.
 constexpr int kSSAODownsampleFactor = 2;
+
+// Phase 14c bug-review fix: shared by the constructor's own initializer list
+// (below) and resizeViewportTargetsIfNeeded() (this file, further down) for
+// computing bloom's/SSAO's downsampled target dimensions from whatever the
+// viewport's own current width/height happen to be. Plain integer division
+// alone (`dimension / factor`) floors to 0 whenever `dimension < factor` --
+// concretely, a 1-pixel-tall viewport divided by kBloomDownsampleFactor (2)
+// -- and a 0-sized Framebuffer is invalid GL (glCheckFramebufferStatus never
+// reports GL_FRAMEBUFFER_COMPLETE for one, so Framebuffer's own constructor
+// throws). resizeViewportTargetsIfNeeded() already guarded its own copy of
+// this division with std::max(1, ...); the constructor's initializer list
+// below used to divide viewportWidth_/viewportHeight_ directly, unguarded,
+// on the (incorrect -- see this project's own Phase 14c bug-review) theory
+// that "this engine has never run at a window size small enough for this to
+// reach 0" -- ENGINE_WINDOW_WIDTH=1 ENGINE_WINDOW_HEIGHT=1 (a value
+// main.cpp's own windowDimensionFromEnv() validation accepts: it only
+// rejects <= 0) reaches exactly that constructor-time 0x0 Framebuffer and
+// crashes the whole process on startup with "Framebuffer: HDR framebuffer
+// incomplete" before a single frame ever renders -- confirmed by actually
+// running the app at that window size. Both call sites now share this one
+// clamped helper instead of each hand-rolling (or, as the constructor did,
+// omitting) the same std::max(1, ...) floor.
+int clampedDownsampleDimension(int dimension, int factor) {
+    return std::max(1, dimension / factor);
+}
+
 // kSSAONoiseDim: the tileable rotation-noise texture's width/height (a
 // square NxN texture) -- 4 is the standard size this technique's reference
 // implementations use, small enough to tile many times across an
@@ -1107,16 +1133,21 @@ Application::Application(int width, int height, const std::string& title, std::u
       // up) matches every dimension this engine actually runs at (800x600
       // and other common even sizes); a stray odd input resolution would
       // round down by one texel here, which has no visible consequence for
-      // a soft blur target. (resizeViewportTargetsIfNeeded() clamps this
-      // division's result to >= 1 on every later resize -- see that
-      // method -- but the constructor's own initial viewportWidth_/
-      // viewportHeight_ are already clamped to >= 1 themselves, and this
-      // engine has never run at a window size small enough for `/ 2` of
-      // that to reach 0, so no clamp is needed on this one-time initial
-      // value.)
-      brightFramebuffer_(viewportWidth_ / kBloomDownsampleFactor, viewportHeight_ / kBloomDownsampleFactor),
-      pingpongFramebuffer0_(viewportWidth_ / kBloomDownsampleFactor, viewportHeight_ / kBloomDownsampleFactor),
-      pingpongFramebuffer1_(viewportWidth_ / kBloomDownsampleFactor, viewportHeight_ / kBloomDownsampleFactor),
+      // a soft blur target.
+      //
+      // Phase 14c bug-review fix: goes through clampedDownsampleDimension()
+      // (this file, above) rather than dividing viewportWidth_/
+      // viewportHeight_ directly -- a small enough initial window (e.g.
+      // ENGINE_WINDOW_WIDTH=1, which main.cpp's own validation accepts) can
+      // still reach 0 here even though viewportWidth_/viewportHeight_
+      // themselves are always >= 1; see that helper's own comment for the
+      // concrete crash this fixes.
+      brightFramebuffer_(clampedDownsampleDimension(viewportWidth_, kBloomDownsampleFactor),
+                          clampedDownsampleDimension(viewportHeight_, kBloomDownsampleFactor)),
+      pingpongFramebuffer0_(clampedDownsampleDimension(viewportWidth_, kBloomDownsampleFactor),
+                             clampedDownsampleDimension(viewportHeight_, kBloomDownsampleFactor)),
+      pingpongFramebuffer1_(clampedDownsampleDimension(viewportWidth_, kBloomDownsampleFactor),
+                             clampedDownsampleDimension(viewportHeight_, kBloomDownsampleFactor)),
       // Phase 13f: SSAO's own three render targets, all sized at
       // 1/kSSAODownsampleFactor of the viewport's own render resolution --
       // see that constant's own comment for why. Only ssaoGBuffer_ needs
@@ -1124,10 +1155,15 @@ Application::Application(int width, int height, const std::string& title, std::u
       // are ordinary single-sample Framebuffers, their own (harmless,
       // unused) depth renderbuffer the same accepted waste
       // brightFramebuffer_/pingpongFramebuffer0_/1_ above already carry.
-      ssaoGBuffer_(viewportWidth_ / kSSAODownsampleFactor, viewportHeight_ / kSSAODownsampleFactor, /*samples=*/0,
+      // Phase 14c bug-review fix: same clampedDownsampleDimension() fix as
+      // brightFramebuffer_ above, same reason.
+      ssaoGBuffer_(clampedDownsampleDimension(viewportWidth_, kSSAODownsampleFactor),
+                   clampedDownsampleDimension(viewportHeight_, kSSAODownsampleFactor), /*samples=*/0,
                    /*depthAsTexture=*/true),
-      ssaoRaw_(viewportWidth_ / kSSAODownsampleFactor, viewportHeight_ / kSSAODownsampleFactor),
-      ssaoBlurred_(viewportWidth_ / kSSAODownsampleFactor, viewportHeight_ / kSSAODownsampleFactor),
+      ssaoRaw_(clampedDownsampleDimension(viewportWidth_, kSSAODownsampleFactor),
+               clampedDownsampleDimension(viewportHeight_, kSSAODownsampleFactor)),
+      ssaoBlurred_(clampedDownsampleDimension(viewportWidth_, kSSAODownsampleFactor),
+                   clampedDownsampleDimension(viewportHeight_, kSSAODownsampleFactor)),
       // Phase 14c: the final tonemap/postprocess pass's own render target,
       // full viewport resolution, single-sample, no special flags -- see
       // this member's own application.hpp comment.
@@ -1787,23 +1823,23 @@ void Application::resizeViewportTargetsIfNeeded() {
     // the old GL handles before taking ownership of the new ones, so this
     // is exactly as safe as the constructor's own one-time construction,
     // just repeated. Same per-target size ratios as the constructor's own
-    // initializer list above; downsampled dimensions are clamped to >= 1
-    // (std::max) since viewportWidth_/viewportHeight_ are only guaranteed
-    // >= 1 themselves, and e.g. 1 / kBloomDownsampleFactor would otherwise
-    // floor to 0 -- a case the constructor's own one-time initial value
-    // never has to worry about (see that initializer's own comment) but a
-    // live-resized value legitimately could, if a user shrank the Viewport
-    // panel down far enough.
+    // initializer list above; downsampled dimensions go through the same
+    // clampedDownsampleDimension() helper the constructor's own initializer
+    // list now uses (this file, near kSSAODownsampleFactor) since
+    // viewportWidth_/viewportHeight_ are only guaranteed >= 1 themselves,
+    // and e.g. 1 / kBloomDownsampleFactor would otherwise floor to 0 -- a
+    // live-resized value can legitimately reach this if a user shrinks the
+    // Viewport panel down far enough.
     hdrFramebuffer_ = Framebuffer(viewportWidth_, viewportHeight_, kRequestedMsaaSamples);
     hdrResolveFramebuffer_ = Framebuffer(viewportWidth_, viewportHeight_, /*samples=*/0, /*depthAsTexture=*/false,
                                           /*mipmappedColor=*/true);
-    const int bloomWidth = std::max(1, viewportWidth_ / kBloomDownsampleFactor);
-    const int bloomHeight = std::max(1, viewportHeight_ / kBloomDownsampleFactor);
+    const int bloomWidth = clampedDownsampleDimension(viewportWidth_, kBloomDownsampleFactor);
+    const int bloomHeight = clampedDownsampleDimension(viewportHeight_, kBloomDownsampleFactor);
     brightFramebuffer_ = Framebuffer(bloomWidth, bloomHeight);
     pingpongFramebuffer0_ = Framebuffer(bloomWidth, bloomHeight);
     pingpongFramebuffer1_ = Framebuffer(bloomWidth, bloomHeight);
-    const int ssaoWidth = std::max(1, viewportWidth_ / kSSAODownsampleFactor);
-    const int ssaoHeight = std::max(1, viewportHeight_ / kSSAODownsampleFactor);
+    const int ssaoWidth = clampedDownsampleDimension(viewportWidth_, kSSAODownsampleFactor);
+    const int ssaoHeight = clampedDownsampleDimension(viewportHeight_, kSSAODownsampleFactor);
     ssaoGBuffer_ = Framebuffer(ssaoWidth, ssaoHeight, /*samples=*/0, /*depthAsTexture=*/true);
     ssaoRaw_ = Framebuffer(ssaoWidth, ssaoHeight);
     ssaoBlurred_ = Framebuffer(ssaoWidth, ssaoHeight);
