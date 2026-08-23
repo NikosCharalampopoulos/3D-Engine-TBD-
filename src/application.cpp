@@ -1062,11 +1062,20 @@ Application::Application(int width, int height, const std::string& title, std::u
       // temporary ShadowMap(width, height).
       shadowCascades_{{ShadowMap(kShadowMapWidth, kShadowMapHeight), ShadowMap(kShadowMapWidth, kShadowMapHeight),
                        ShadowMap(kShadowMapWidth, kShadowMapHeight)}},
-      // Phase 7b: sized from window_'s own real framebuffer size (already
-      // constructed at this point -- see this header's declaration-order
-      // comment) rather than the constructor's width/height parameters
-      // directly, so this stays correct even on a HiDPI display where the
-      // framebuffer is larger than the window's requested size.
+      // Phase 7b: sized from viewportWidth_/viewportHeight_ (already
+      // constructed at this point -- both are in-class-default-initialized
+      // from window_'s own real framebuffer size, see this header's
+      // declaration-order comment) rather than the constructor's width/
+      // height parameters directly.
+      //
+      // Phase 14c: no longer the window's real framebuffer size for the
+      // rest of this class's life -- resizeViewportTargetsIfNeeded() (called
+      // from the top of every render()) rebuilds this and every Framebuffer
+      // member below it at editorUI_'s own Viewport-panel-reported size the
+      // moment that differs from what's here. This constructor's own
+      // initial size only matters for the handful of frames before that
+      // panel size is first known (see viewportWidth_/viewportHeight_'s own
+      // header comment).
       //
       // MSAA HDR framebuffer bug fix: constructed multisampled now, at
       // engine::kRequestedMsaaSamples (window.hpp) -- the same count
@@ -1075,7 +1084,7 @@ Application::Application(int width, int height, const std::string& title, std::u
       // default (0, single-sample) every other Framebuffer in this class
       // still uses. Framebuffer itself clamps this to what the driver
       // actually grants and logs both values (see framebuffer.cpp).
-      hdrFramebuffer_(window_.getSize().first, window_.getSize().second, kRequestedMsaaSamples),
+      hdrFramebuffer_(viewportWidth_, viewportHeight_, kRequestedMsaaSamples),
       // MSAA HDR framebuffer bug fix: a same-size, single-sample sibling
       // hdrFramebuffer_ resolves into every frame (see render()) -- default
       // (0) sample count, same as every pre-existing Framebuffer instance
@@ -1089,34 +1098,40 @@ Application::Application(int width, int height, const std::string& title, std::u
       // ray-marched, per-fragment-varying UV is the only reader in this
       // engine of any Framebuffer's color texture that isn't a fixed,
       // 1:1-with-the-target fullscreen-quad UV.
-      hdrResolveFramebuffer_(window_.getSize().first, window_.getSize().second, /*samples=*/0,
+      hdrResolveFramebuffer_(viewportWidth_, viewportHeight_, /*samples=*/0,
                               /*depthAsTexture=*/false, /*mipmappedColor=*/true),
       // Phase 11: bloom's own off-screen targets, sized at
-      // 1/kBloomDownsampleFactor of the window's real framebuffer
-      // resolution -- see this header's Phase 11 comment on
-      // brightFramebuffer_/pingpongFramebuffer0_/1_ for why half-res. `/ 2`
-      // (not e.g. rounding up) matches every dimension this engine actually
-      // runs at (800x600 and other common even sizes); a stray odd input
-      // resolution would round down by one texel here, which has no
-      // visible consequence for a soft blur target.
-      brightFramebuffer_(window_.getSize().first / kBloomDownsampleFactor,
-                          window_.getSize().second / kBloomDownsampleFactor),
-      pingpongFramebuffer0_(window_.getSize().first / kBloomDownsampleFactor,
-                             window_.getSize().second / kBloomDownsampleFactor),
-      pingpongFramebuffer1_(window_.getSize().first / kBloomDownsampleFactor,
-                             window_.getSize().second / kBloomDownsampleFactor),
+      // 1/kBloomDownsampleFactor of the viewport's own render resolution --
+      // see this header's Phase 11 comment on brightFramebuffer_/
+      // pingpongFramebuffer0_/1_ for why half-res. `/ 2` (not e.g. rounding
+      // up) matches every dimension this engine actually runs at (800x600
+      // and other common even sizes); a stray odd input resolution would
+      // round down by one texel here, which has no visible consequence for
+      // a soft blur target. (resizeViewportTargetsIfNeeded() clamps this
+      // division's result to >= 1 on every later resize -- see that
+      // method -- but the constructor's own initial viewportWidth_/
+      // viewportHeight_ are already clamped to >= 1 themselves, and this
+      // engine has never run at a window size small enough for `/ 2` of
+      // that to reach 0, so no clamp is needed on this one-time initial
+      // value.)
+      brightFramebuffer_(viewportWidth_ / kBloomDownsampleFactor, viewportHeight_ / kBloomDownsampleFactor),
+      pingpongFramebuffer0_(viewportWidth_ / kBloomDownsampleFactor, viewportHeight_ / kBloomDownsampleFactor),
+      pingpongFramebuffer1_(viewportWidth_ / kBloomDownsampleFactor, viewportHeight_ / kBloomDownsampleFactor),
       // Phase 13f: SSAO's own three render targets, all sized at
-      // 1/kSSAODownsampleFactor of the window's real framebuffer resolution
-      // -- see that constant's own comment for why. Only ssaoGBuffer_ needs
+      // 1/kSSAODownsampleFactor of the viewport's own render resolution --
+      // see that constant's own comment for why. Only ssaoGBuffer_ needs
       // depthAsTexture = true (see framebuffer.hpp); ssaoRaw_/ssaoBlurred_
       // are ordinary single-sample Framebuffers, their own (harmless,
       // unused) depth renderbuffer the same accepted waste
       // brightFramebuffer_/pingpongFramebuffer0_/1_ above already carry.
-      ssaoGBuffer_(window_.getSize().first / kSSAODownsampleFactor,
-                   window_.getSize().second / kSSAODownsampleFactor, /*samples=*/0, /*depthAsTexture=*/true),
-      ssaoRaw_(window_.getSize().first / kSSAODownsampleFactor, window_.getSize().second / kSSAODownsampleFactor),
-      ssaoBlurred_(window_.getSize().first / kSSAODownsampleFactor,
-                   window_.getSize().second / kSSAODownsampleFactor),
+      ssaoGBuffer_(viewportWidth_ / kSSAODownsampleFactor, viewportHeight_ / kSSAODownsampleFactor, /*samples=*/0,
+                   /*depthAsTexture=*/true),
+      ssaoRaw_(viewportWidth_ / kSSAODownsampleFactor, viewportHeight_ / kSSAODownsampleFactor),
+      ssaoBlurred_(viewportWidth_ / kSSAODownsampleFactor, viewportHeight_ / kSSAODownsampleFactor),
+      // Phase 14c: the final tonemap/postprocess pass's own render target,
+      // full viewport resolution, single-sample, no special flags -- see
+      // this member's own application.hpp comment.
+      viewportColorFramebuffer_(viewportWidth_, viewportHeight_),
       // Phase 13f: SSAO's hemisphere kernel + tileable rotation-noise
       // texture -- see ssao.hpp.
       ssaoKernel_(kSSAOKernelSize, kSSAONoiseDim),
@@ -1183,20 +1198,26 @@ Application::Application(int width, int height, const std::string& title, std::u
         camera_.setPositionLookingAt(kDefaultCameraPosition, kSceneCenter);
     }
 
-    // Phase 13d: build every cluster's view-space AABB exactly once, here,
-    // rather than every frame in render() -- see clusterLightCuller_'s own
-    // application.hpp comment for why that's correct (a cluster's AABB is a
-    // pure function of the projection matrix + window size, neither of
-    // which this engine ever changes after this constructor runs; only
-    // light *culling* against those fixed AABBs needs to happen every
-    // frame, since the view matrix changes whenever the camera moves).
-    {
-        const auto [fbWidth, fbHeight] = window_.getSize();
-        const float aspect = fbHeight != 0 ? static_cast<float>(fbWidth) / static_cast<float>(fbHeight) : 1.0f;
-        const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
-        clusterLightCuller_.computeClusterAABBs(
-            projection, camera_.nearPlane(), glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
-    }
+    // Phase 13d: build every cluster's view-space AABB once here -- see
+    // clusterLightCuller_'s own application.hpp comment for why that's
+    // correct (a cluster's AABB is a pure function of the projection matrix
+    // + screen size in pixels; only light *culling* against those fixed
+    // AABBs needs to happen every frame, since the view matrix changes
+    // whenever the camera moves).
+    //
+    // Phase 14c: factored out into recomputeClusterAABBs() (declared with
+    // resizeViewportTargetsIfNeeded() below) because it's no longer only a
+    // constructor-time, run-exactly-once thing -- the projection/screen size
+    // it depends on now tracks the Viewport panel's own size
+    // (viewportWidth_/viewportHeight_), which can change (in practice: once,
+    // between this constructor's own placeholder initial value and
+    // editorUI_'s first real reported panel size -- see viewportWidth_'s own
+    // header comment) after this constructor has already run. Called here
+    // for the same reason it always was (something must seed the AABBs
+    // before the first frame's own cullLights() call reads them), and again
+    // from resizeViewportTargetsIfNeeded() every time viewportWidth_/
+    // viewportHeight_ actually change thereafter.
+    recomputeClusterAABBs();
 
     // Phase 13f: ssaoKernel_'s hemisphere samples are fixed for this
     // engine's whole run (see ssao.hpp/ssao.cpp) -- uploaded once here,
@@ -1713,9 +1734,99 @@ void Application::renderSSRComposite(const glm::mat4& view, const glm::mat4& pro
     GL_CHECK(glDepthFunc(GL_LESS));
 }
 
+void Application::recomputeClusterAABBs() {
+    const float aspect =
+        viewportHeight_ != 0 ? static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_) : 1.0f;
+    const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
+    clusterLightCuller_.computeClusterAABBs(
+        projection, camera_.nearPlane(), glm::vec2(static_cast<float>(viewportWidth_), static_cast<float>(viewportHeight_)));
+}
+
+void Application::resizeViewportTargetsIfNeeded() {
+    // Phase 14c: editorUI_'s own last-recorded Viewport panel content-region
+    // size (see editor_ui.hpp's own header comment on why this reads *last*
+    // frame's size, not this frame's). 0 before renderDockspaceShell() has
+    // ever run once -- in that case (and the much rarer case of a user
+    // dragging a panel divider all the way shut mid-run), keep whatever
+    // viewportWidth_/viewportHeight_ already held (seeded at window_'s own
+    // initial size by this class's in-class default member initializers,
+    // see application.hpp) rather than ever shrinking a render target to
+    // 0x0 -- a 0-sized FBO is undefined/invalid in OpenGL. This is the
+    // documented choice for that degenerate case: keep rendering at the
+    // last known-good size (nothing visibly changes in the Viewport panel
+    // that frame) rather than clamping to a jarring 1x1 image or skipping
+    // the 3D render entirely and showing nothing.
+    const int reportedWidth = editorUI_.viewportWidth();
+    const int reportedHeight = editorUI_.viewportHeight();
+    if (reportedWidth > 0 && reportedHeight > 0) {
+        viewportWidth_ = reportedWidth;
+        viewportHeight_ = reportedHeight;
+    }
+    // Defensive floor even after the above -- guards both the "never
+    // reported yet" 0 case (if this class's own initial window size were
+    // ever 0, which main.cpp already refuses) and any stray future caller
+    // that assigns viewportWidth_/viewportHeight_ directly.
+    viewportWidth_ = std::max(1, viewportWidth_);
+    viewportHeight_ = std::max(1, viewportHeight_);
+
+    // hdrFramebuffer_ is this class's own "are we already built at the
+    // right size" reference point -- every Framebuffer in this resize group
+    // is always rebuilt together (see application.hpp's own comment on this
+    // group), so checking just the first one is exactly as reliable as
+    // checking all of them and far cheaper than doing so every frame.
+    if (hdrFramebuffer_.width() == viewportWidth_ && hdrFramebuffer_.height() == viewportHeight_) {
+        return;
+    }
+
+    LOG_INFO("Viewport resized: rebuilding offscreen render targets at " + std::to_string(viewportWidth_) + "x" +
+              std::to_string(viewportHeight_) + " (was " + std::to_string(hdrFramebuffer_.width()) + "x" +
+              std::to_string(hdrFramebuffer_.height()) + ")");
+
+    // Move-assigns a freshly constructed Framebuffer over each existing one
+    // -- Framebuffer's own move-assignment operator (framebuffer.hpp) frees
+    // the old GL handles before taking ownership of the new ones, so this
+    // is exactly as safe as the constructor's own one-time construction,
+    // just repeated. Same per-target size ratios as the constructor's own
+    // initializer list above; downsampled dimensions are clamped to >= 1
+    // (std::max) since viewportWidth_/viewportHeight_ are only guaranteed
+    // >= 1 themselves, and e.g. 1 / kBloomDownsampleFactor would otherwise
+    // floor to 0 -- a case the constructor's own one-time initial value
+    // never has to worry about (see that initializer's own comment) but a
+    // live-resized value legitimately could, if a user shrank the Viewport
+    // panel down far enough.
+    hdrFramebuffer_ = Framebuffer(viewportWidth_, viewportHeight_, kRequestedMsaaSamples);
+    hdrResolveFramebuffer_ = Framebuffer(viewportWidth_, viewportHeight_, /*samples=*/0, /*depthAsTexture=*/false,
+                                          /*mipmappedColor=*/true);
+    const int bloomWidth = std::max(1, viewportWidth_ / kBloomDownsampleFactor);
+    const int bloomHeight = std::max(1, viewportHeight_ / kBloomDownsampleFactor);
+    brightFramebuffer_ = Framebuffer(bloomWidth, bloomHeight);
+    pingpongFramebuffer0_ = Framebuffer(bloomWidth, bloomHeight);
+    pingpongFramebuffer1_ = Framebuffer(bloomWidth, bloomHeight);
+    const int ssaoWidth = std::max(1, viewportWidth_ / kSSAODownsampleFactor);
+    const int ssaoHeight = std::max(1, viewportHeight_ / kSSAODownsampleFactor);
+    ssaoGBuffer_ = Framebuffer(ssaoWidth, ssaoHeight, /*samples=*/0, /*depthAsTexture=*/true);
+    ssaoRaw_ = Framebuffer(ssaoWidth, ssaoHeight);
+    ssaoBlurred_ = Framebuffer(ssaoWidth, ssaoHeight);
+    viewportColorFramebuffer_ = Framebuffer(viewportWidth_, viewportHeight_);
+
+    // The cluster grid's AABBs are a pure function of the projection matrix
+    // + screen size in pixels (see cluster_light_culler.hpp) -- both just
+    // changed, so they must be rebuilt now, not left stale until whenever
+    // this method next runs.
+    recomputeClusterAABBs();
+}
+
 void Application::render() {
-    const auto [fbWidth, fbHeight] = window_.getSize();
-    const float aspect = fbHeight != 0 ? static_cast<float>(fbWidth) / static_cast<float>(fbHeight) : 1.0f;
+    // Phase 14c: reads/updates viewportWidth_/viewportHeight_ and rebuilds
+    // every viewport-sized render target if they changed since the last
+    // call -- must run before anything below that depends on either (the
+    // aspect ratio just below, every renderX() call, every glViewport()/
+    // Framebuffer::bindForWriting() this function makes). See this method's
+    // own application.hpp comment.
+    resizeViewportTargetsIfNeeded();
+
+    const float aspect =
+        viewportHeight_ != 0 ? static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_) : 1.0f;
 
     // Phase 13c: the camera's own aspect ratio (computed above) feeds
     // computeCascades()'s per-cascade sub-frustum construction (see
@@ -1731,11 +1842,13 @@ void Application::render() {
 
     // The directional light's cascaded shadow maps are rendered first, into
     // their own depth-only FBOs/viewport; glViewport is restored to the
-    // window's real framebuffer size immediately after, since
-    // renderShadowPass() leaves it pointed at whichever cascade it wrote to
-    // last (all the same, generally different-from-the-window, resolution).
+    // viewport's own render resolution immediately after (Phase 14c: no
+    // longer the window's real framebuffer size -- see this function's own
+    // Phase 14c comment above), since renderShadowPass() leaves it pointed
+    // at whichever cascade it wrote to last (all the same, generally
+    // different, resolution).
     renderShadowPass(lightSpaceMatrices);
-    GL_CHECK(glViewport(0, 0, fbWidth, fbHeight));
+    GL_CHECK(glViewport(0, 0, viewportWidth_, viewportHeight_));
 
     const glm::mat4 view = camera_.getViewMatrix();
     const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
@@ -1830,10 +1943,14 @@ void Application::render() {
     // Phase 13d: clustered lighting's own per-frame uniforms -- basic.frag's
     // computeClusterIndex() needs the same screen size/near/far the compute
     // shaders built the cluster grid against (see
-    // clusterLightCuller_.computeClusterAABBs()'s call site in the
-    // constructor) to pick the same cluster for a given fragment that its
-    // light list was actually culled against.
-    shader_->setVec2("uScreenSize", glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
+    // clusterLightCuller_.computeClusterAABBs()'s call site in
+    // recomputeClusterAABBs()) to pick the same cluster for a given fragment
+    // that its light list was actually culled against. Phase 14c: this is
+    // viewportWidth_/viewportHeight_ now, not the window's real framebuffer
+    // size -- the whole 3D pass below (and gl_FragCoord within it) runs at
+    // the viewport's own resolution, matching what recomputeClusterAABBs()
+    // itself now builds the cluster grid against.
+    shader_->setVec2("uScreenSize", glm::vec2(static_cast<float>(viewportWidth_), static_cast<float>(viewportHeight_)));
     shader_->setFloat("uClusterNearPlane", camera_.nearPlane());
     shader_->setFloat("uClusterFarPlane", ClusterLightCuller::kClusterFarDistance);
     shader_->setInt("uClusterDebug", clusterDebugMode_ ? 1 : 0);
@@ -1969,8 +2086,10 @@ void Application::render() {
     pbrShader_->setVec3("uLightColor", kLightColor);
     pbrShader_->setVec3("uViewPos", camera_.position());
 
-    // Phase 13d: see shader_'s identical upload above.
-    pbrShader_->setVec2("uScreenSize", glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
+    // Phase 13d: see shader_'s identical upload above (Phase 14c: also
+    // viewportWidth_/viewportHeight_ now, same reasoning).
+    pbrShader_->setVec2("uScreenSize",
+                         glm::vec2(static_cast<float>(viewportWidth_), static_cast<float>(viewportHeight_)));
     pbrShader_->setFloat("uClusterNearPlane", camera_.nearPlane());
     pbrShader_->setFloat("uClusterFarPlane", ClusterLightCuller::kClusterFarDistance);
     pbrShader_->setInt("uClusterDebug", clusterDebugMode_ ? 1 : 0);
@@ -2177,21 +2296,29 @@ void Application::render() {
         // reads now lives.
     }
 
-    // Phase 7b: resolve hdrResolveFramebuffer_'s HDR color buffer to the
-    // window's real (default) framebuffer via one fullscreen tonemap +
-    // gamma-correct pass -- see assets/shaders/postprocess.vert/.frag. Both
-    // buffers are cleared first (color: nothing else draws here so any
-    // prior frame's leftover pixels must go; depth: this pass's own
-    // fullscreen quad is depth-tested against whatever the default
-    // framebuffer's depth buffer last held, which is otherwise
+    // Phase 7b: resolve hdrResolveFramebuffer_'s HDR color buffer via one
+    // fullscreen tonemap + gamma-correct pass -- see assets/shaders/
+    // postprocess.vert/.frag. Both buffers are cleared first (color:
+    // nothing else draws here so any prior frame's leftover pixels must go;
+    // depth: this pass's own fullscreen quad is depth-tested against
+    // whatever this target's depth buffer last held, which is otherwise
     // stale/unrelated to this frame) so this draw can't be silently
     // rejected by a leftover depth value from a previous frame.
+    //
+    // Phase 14c: this pass's own render target is now
+    // viewportColorFramebuffer_ (viewportWidth_ x viewportHeight_), not the
+    // default framebuffer at the window's real size -- bindForWriting()
+    // binds its FBO and sets the viewport to its own size in one call,
+    // mirroring every other Framebuffer target this function already writes
+    // into (hdrFramebuffer_ etc. above). EditorUI's Viewport panel displays
+    // this target's color texture via ImGui::Image() (see this function's
+    // own tail, below) instead of this pass ever touching the window's real
+    // framebuffer directly.
     //
     // MSAA HDR framebuffer bug fix: reads hdrResolveFramebuffer_ (this
     // frame's already-resolved, single-sample HDR color) rather than
     // hdrFramebuffer_ directly -- see the resolveTo() call above.
-    GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
-    GL_CHECK(glViewport(0, 0, fbWidth, fbHeight));
+    viewportColorFramebuffer_.bindForWriting();
     GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
 
     postProcessShader_->use();
@@ -2217,24 +2344,46 @@ void Application::render() {
     postProcessQuad_.bind();
     postProcessQuad_.draw();
 
-    // Phase 8c/14a: last thing render() does, after the tonemap/bloom
-    // postprocess pass right above has already resolved onto the default
-    // framebuffer (still bound from that pass, at the window's own
-    // viewport) -- so every ImGui widget (both editorUI_'s always-on
-    // dockspace shell and, when enabled, debugUI_'s diagnostic panel) lands
-    // straight on the final tonemapped image rather than through the HDR/
-    // bloom/SSR pipeline. One shared ImGui frame per render() call now (see
-    // editor_ui.hpp's own header comment for why there's exactly one, not
-    // one per UI class): editorUI_.newFrame() starts it,
-    // editorUI_.renderDockspaceShell() submits the always-on
-    // Scene/Assets/Viewport/Inspector placeholder panels, renderDebugUI()
-    // additionally submits debugUI_'s own panel content (still a no-op
-    // unless ENGINE_SHOW_DEBUG_UI/F1 have enabled it -- entirely unchanged
-    // from Phase 8c/8d), and editorUI_.render() rasterizes everything
-    // submitted this frame in one ImGui::Render() +
+    // Phase 14c: the 3D pipeline is entirely done for this frame -- its
+    // final tonemapped output now lives in viewportColorFramebuffer_ (just
+    // above), not the default framebuffer. Rebind the default framebuffer at
+    // the window's own *real* size (window_.getSize(), not viewportWidth_/
+    // viewportHeight_ -- this is ImGui's own chrome now, which always covers
+    // the whole real window, not just the Viewport panel's sub-region) and
+    // clear it -- there is no other draw call left this frame that touches
+    // it directly (editorUI_.render() below draws ImGui's own geometry,
+    // including the ImGui::Image() the Viewport panel now shows, but never
+    // clears first), so any of this buffer's own leftover pixels from a
+    // previous frame need to go, same "nothing else clears this" reasoning
+    // the old direct-to-window postprocess draw relied on before this
+    // phase. The clear color is an arbitrary neutral dark gray -- visible
+    // only in the (thin, if any) gaps between docked panels, since the
+    // Scene/Assets/Viewport/Inspector panels' own opaque backgrounds cover
+    // the rest.
+    {
+        const auto [windowWidth, windowHeight] = window_.getSize();
+        GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+        GL_CHECK(glViewport(0, 0, windowWidth, windowHeight));
+        GL_CHECK(glClearColor(0.08f, 0.08f, 0.09f, 1.0f));
+        GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    }
+
+    // Phase 8c/14a: last thing render() does -- so every ImGui widget (both
+    // editorUI_'s always-on dockspace shell and, when enabled, debugUI_'s
+    // diagnostic panel) lands on top of everything else this frame drew.
+    // One shared ImGui frame per render() call (see editor_ui.hpp's own
+    // header comment for why there's exactly one, not one per UI class):
+    // editorUI_.newFrame() starts it, editorUI_.renderDockspaceShell()
+    // submits the Scene/Assets/Viewport/Inspector panels -- Viewport's own
+    // body now an ImGui::Image() of viewportColorFramebuffer_'s color
+    // texture (Phase 14c; see editor_ui.cpp) rather than placeholder text --
+    // renderDebugUI() additionally submits debugUI_'s own panel content
+    // (still a no-op unless ENGINE_SHOW_DEBUG_UI/F1 have enabled it --
+    // entirely unchanged from Phase 8c/8d), and editorUI_.render()
+    // rasterizes everything submitted this frame in one ImGui::Render() +
     // ImGui_ImplOpenGL3_RenderDrawData() pair.
     editorUI_.newFrame();
-    editorUI_.renderDockspaceShell();
+    editorUI_.renderDockspaceShell(viewportColorFramebuffer_.colorTextureId());
     renderDebugUI();
     editorUI_.render();
 }

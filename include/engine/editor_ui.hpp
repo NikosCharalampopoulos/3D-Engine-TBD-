@@ -40,13 +40,24 @@
 // What this class deliberately does NOT do (this phase's own scope --
 // README.md's Phase 14a section, and the later Phase 14 sub-phases each own
 // panel's real content): no real scene hierarchy (Phase 14d), no real
-// asset browser, no render-to-texture 3D viewport (Phase 14c -- "Viewport"
-// here is placeholder text only; the actual 3D scene keeps rendering
-// straight to the default framebuffer, same as every prior phase, entirely
-// independent of this dockspace -- see application.cpp's render()), no real
-// inspector (Phase 14e), no Play/Pause/Restart or other toolbar/menu-bar
-// chrome. Every one of the four panels is ImGui::Begin()/End() with a
-// single ImGui::TextWrapped() placeholder line inside.
+// asset browser, no real inspector (Phase 14e), no Play/Pause/Restart or
+// other toolbar/menu-bar chrome. Scene/Assets/Inspector are still each
+// ImGui::Begin()/End() with a single ImGui::TextWrapped() placeholder line
+// inside, exactly as Phase 14a left them.
+//
+// Phase 14c: the Viewport panel is no longer placeholder text -- it now
+// displays Application's own viewport-sized render target via
+// ImGui::Image() (see renderDockspaceShell()'s new parameter below and
+// application.cpp's render()/resizeViewportTargetsIfNeeded()). This class
+// still owns no 3D rendering itself (it only ever draws a texture Application
+// handed it, the same "just a Dear ImGui wrapper" role it always had) -- but
+// it does now own the *size* the rest of the engine renders that 3D content
+// at: the Viewport panel's own ImGui::GetContentRegionAvail(), recorded each
+// time renderDockspaceShell() runs and exposed via viewportWidth()/
+// viewportHeight() below for Application::render() to read at the top of
+// its *next* call, before that frame's 3D pipeline runs -- see this header's
+// own comment on those two getters for why "next frame", not "this frame",
+// is correct.
 struct GLFWwindow;
 typedef unsigned int ImGuiID;
 
@@ -78,13 +89,50 @@ public:
     void newFrame();
 
     // Submits the full-window dockspace host (ImGui::DockSpaceOverViewport())
-    // plus the four placeholder panels (Scene, Assets, Viewport, Inspector),
-    // docked into their approved-mockup layout via ImGui's DockBuilder API
-    // the first time this ever runs (guarded by an internal
-    // layoutBuilt_ flag, not re-run every frame) so a user's own later
-    // drag-to-rearrange isn't stomped on the next frame. Call once per
-    // frame, after newFrame() and before render().
-    void renderDockspaceShell();
+    // plus the four panels (Scene, Assets, Viewport, Inspector), docked into
+    // their approved-mockup layout via ImGui's DockBuilder API the first
+    // time this ever runs (guarded by an internal layoutBuilt_ flag, not
+    // re-run every frame) so a user's own later drag-to-rearrange isn't
+    // stomped on the next frame. Call once per frame, after newFrame() and
+    // before render().
+    //
+    // Phase 14c: `viewportColorTexture` is the raw GL texture id of
+    // Application's own viewport-sized render target (Framebuffer::
+    // colorTextureId(), see application.cpp's render()) -- this frame's
+    // already-finished 3D render, at whatever size the Viewport panel
+    // reported *last* frame (see viewportWidth()/viewportHeight() below).
+    // Drawn via ImGui::Image(), flipped vertically (uv0=(0,1), uv1=(1,0)) to
+    // correct for OpenGL's bottom-left texture origin vs. Dear ImGui's
+    // top-left image convention -- confirmed visually, not just assumed (see
+    // this phase's README section). Pass 0 to skip the image entirely (no
+    // 3D render exists yet to show, or its texture id isn't known -- neither
+    // currently happens in Application's own call sequence, but this keeps
+    // the method well-defined rather than sampling texture id 0). Still
+    // records the panel's own current ImGui::GetContentRegionAvail() every
+    // call, regardless of whether an image was drawn -- that's what
+    // viewportWidth()/viewportHeight() return.
+    void renderDockspaceShell(unsigned int viewportColorTexture);
+
+    // The Viewport panel's own most recently recorded
+    // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()
+    // call -- 0 before that has ever run once. Application::render() reads
+    // these at the very top of every frame, BEFORE that frame's 3D pipeline
+    // runs, to size/resize every offscreen render target and to pick the
+    // camera's own projection aspect ratio (see application.cpp's own Phase
+    // 14c comment). That means a given frame's 3D content is always sized to
+    // the Viewport panel's *previous* frame's dimensions, one frame stale --
+    // deliberate, not a bug: the panel's size only actually changes when a
+    // user drags a divider/redocks a panel (rare after initial layout), so
+    // this is the same "read last frame's known layout, apply it to this
+    // frame's render" latency every real engine editor's own render-to-
+    // texture viewport has (there is no other order that doesn't require
+    // either rendering the 3D scene *after* submitting the ImGui panel that
+    // displays it within the same ImGui frame, which Dear ImGui's own
+    // immediate-mode API doesn't support, or moving this whole class's
+    // newFrame()/renderDockspaceShell() pair to the very top of render(),
+    // which would just relocate the same one-frame gap, not remove it).
+    int viewportWidth() const { return viewportWidth_; }
+    int viewportHeight() const { return viewportHeight_; }
 
     // Finishes the frame newFrame() started (ImGui::Render()) and rasterizes
     // its combined draw data -- this class's own dockspace/panels plus
@@ -99,6 +147,13 @@ private:
     void buildInitialLayout(ImGuiID dockspaceId);
 
     bool layoutBuilt_ = false;
+    // Phase 14c: see viewportWidth()/viewportHeight() above. 0 until
+    // renderDockspaceShell() has run at least once -- Application's own
+    // constructor seeds its mirror of these (viewportWidth_/viewportHeight_,
+    // application.hpp) from the window's initial size instead, so a 0 read
+    // here never reaches an actual framebuffer construction/resize call.
+    int viewportWidth_ = 0;
+    int viewportHeight_ = 0;
 };
 
 }  // namespace engine

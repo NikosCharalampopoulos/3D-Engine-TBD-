@@ -127,6 +127,18 @@ public:
     // an ordinary sampler2D-compatible texture.
     void bindColorTexture(unsigned int unit) const;
 
+    // Phase 14c: the raw GL color-texture handle itself, rather than bound
+    // to any particular texture unit -- needed so Application can hand this
+    // target's *rendered* image straight to Dear ImGui's `ImGui::Image()`
+    // (which takes an opaque texture id/`ImTextureRef`, not a texture-unit
+    // index -- see editor_ui.cpp's own Phase 14c comment) instead of routing
+    // it through a `sampler2D` in one of this engine's own shaders the way
+    // every other reader of a Framebuffer's color texture does. Every other
+    // accessor here binds the texture as a side effect of "this shader is
+    // about to sample it"; this one exists purely to *hand out* the id, so
+    // it deliberately does nothing else (no binding, no unit argument).
+    unsigned int colorTextureId() const { return colorTexture_; }
+
     // Phase 13g bug fix: regenerates the color texture's mipmap chain from
     // its current (just-rendered-into) base level -- must be called once
     // after each frame's draw into this target and before anything samples

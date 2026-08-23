@@ -262,16 +262,21 @@ demo path, before `render()`:
    second time so the steps below see this pass's own result.
 7. Runs Phase 11's bloom pipeline against `hdrResolveFramebuffer_`: a
    bright-pass extraction, then a ping-ponged separable blur.
-8. Resolves the final image to the window with one fullscreen tonemap/
-   gamma-correct/bloom-composite pass (`postProcessShader_` +
-   `postProcessQuad_`).
-9. Draws Phase 14a's always-on `EditorUI` dockspace shell
-   (Scene/Assets/Viewport/Inspector placeholder panels) straight onto the
-   default framebuffer, on top of the now-final tonemapped image, then
-   (unless `ENGINE_SHOW_DEBUG_UI`/F1 have it off) the Phase 8c Dear ImGui
-   debug overlay (`renderDebugUI()`) as a normal free-floating window in
-   that same ImGui frame -- see "Phase 14a" below for why these two share
-   one ImGui context/frame instead of each owning their own.
+8. Resolves the final image with one fullscreen tonemap/gamma-correct/
+   bloom-composite pass (`postProcessShader_` + `postProcessQuad_`) into
+   `viewportColorFramebuffer_` -- a dedicated off-screen target sized to the
+   editor's Viewport panel (Phase 14c), not the default framebuffer.
+9. Rebinds the default framebuffer at the window's own real size and clears
+   it, then draws `EditorUI`'s always-on dockspace shell
+   (Scene/Assets/Inspector placeholder panels, and -- since Phase 14c -- a
+   real `ImGui::Image()` of `viewportColorFramebuffer_`'s color texture
+   filling the Viewport panel) on top, followed by (unless
+   `ENGINE_SHOW_DEBUG_UI`/F1 have it off) the Phase 8c Dear ImGui debug
+   overlay (`renderDebugUI()`) as a normal free-floating window in that same
+   ImGui frame -- see "Phase 14a" below for why these two share one ImGui
+   context/frame instead of each owning their own, and "Phase 14c" for how
+   the Viewport panel's own on-screen size now feeds back into steps 1-8
+   above (one frame later) rather than the window's real size doing so.
 
 ## Directory layout
 
@@ -3455,6 +3460,222 @@ design was written.
     the same pre-existing "names aren't unique" looseness Phase 8b's own
     review already found, now also reachable through `"parent"` rather than
     a new problem this phase introduced.
+
+### Phase 14c: real render-to-texture Viewport panel
+
+Third sub-phase of the "Phase 14: full editor UI" arc. Phase 14a's Viewport
+panel was placeholder text floating over a 3D scene still rendered straight
+to the window's default framebuffer, unaffected by the dockspace at all; this
+phase makes that real -- the 3D scene now renders into an off-screen color
+target sized to the Viewport panel's own on-screen rectangle, displayed
+inside that panel via `ImGui::Image()`. This is the deferral Phase 14a's own
+commit explicitly called out ("live resize... can make the final on-screen
+image look visually stretched... until those buffers are themselves
+resize-aware -- deferred to Phase 14c's render-to-texture viewport work");
+that deferral ends here.
+
+- **What "the render resolution" means, redefined**: before this phase, every
+  offscreen render target this engine owns (`hdrFramebuffer_`,
+  `hdrResolveFramebuffer_`, bloom's `brightFramebuffer_`/
+  `pingpongFramebuffer0_`/`1_`, SSAO's `ssaoGBuffer_`/`ssaoRaw_`/
+  `ssaoBlurred_`) was sized once, at construction, from `window_.getSize()` --
+  the OS window's own real framebuffer size -- and the final tonemap pass
+  wrote straight onto the default framebuffer at that same size. After this
+  phase, all of that tracks two new `Application` members,
+  `viewportWidth_`/`viewportHeight_`: the Viewport ImGui panel's own content-
+  region size, which is almost always smaller than (and a different aspect
+  ratio than) the whole window, since Scene/Assets/Inspector also occupy
+  part of it. The window's real size still matters for exactly one thing:
+  ImGui's own chrome (the dockspace host + all four panels), rendered
+  separately, at the very end of `render()`, straight onto the default
+  framebuffer at `window_.getSize()` -- unrelated to the 3D pipeline's own
+  resolution from this phase on.
+- **Why last frame's size, not this frame's -- and why that's correct, not a
+  bug**: `Application::render()` needs to know the Viewport panel's size
+  *before* it does any 3D rendering work this frame (so it can size/resize
+  every render target and pick the right projection aspect ratio), but Dear
+  ImGui only reports a panel's actual laid-out content-region size *while*
+  that panel's own `ImGui::Begin()`/`End()` runs -- and this engine's own
+  panel-submission call (`editorUI_.renderDockspaceShell()`) has always run
+  at the *tail* of `render()`, after the whole 3D pass, so that ImGui's
+  chrome lands on top of the already-tonemapped image. Restructuring so the
+  ImGui frame starts *before* the 3D pass would just relocate the same
+  chicken-and-egg problem (you'd then need the Viewport panel's `ImGui::Image()`
+  call, submitted before the 3D render that frame has even happened, to show
+  *this* frame's still-nonexistent output) without actually removing the one
+  frame of latency anywhere in the loop. So `EditorUI` now exposes
+  `viewportWidth()`/`viewportHeight()` -- the panel's own
+  `ImGui::GetContentRegionAvail()`, recorded every time
+  `renderDockspaceShell()` runs -- and `Application::render()` reads those at
+  its very top, before its 3D pipeline, applying *last* frame's reported size
+  to *this* frame's render. The panel's size only actually changes when a
+  user drags a divider or redocks a panel (rare after the initial layout
+  settles), so in practice this reads as "pick a size once, keep using it" --
+  the same one-frame-stale "read last frame's laid-out size, size this
+  frame's render target to it" pattern every real engine editor's own
+  render-to-texture viewport uses (Unity, Unreal, Godot all have this same
+  property), not a defect specific to this implementation.
+- **`resizeViewportTargetsIfNeeded()` (`Application`, called first thing in
+  `render()`)**: reads `editorUI_.viewportWidth()`/`viewportHeight()`; if
+  either is `> 0`, adopts it into `viewportWidth_`/`viewportHeight_` (0 means
+  "the Viewport panel hasn't rendered a single frame yet, or a user dragged a
+  divider all the way shut" -- see the degenerate-size note below); either
+  way, clamps both to `>= 1` via `std::max` before anything else touches
+  them, since a 0-sized FBO is undefined/invalid in OpenGL. Then, only if
+  that size actually differs from `hdrFramebuffer_`'s own current
+  `width()`/`height()` (used as this whole group's single "are we already
+  built right" reference point, since every target in the group is always
+  rebuilt together), move-assigns a freshly constructed `Framebuffer` over
+  every one of: `hdrFramebuffer_`, `hdrResolveFramebuffer_`,
+  `brightFramebuffer_`/`pingpongFramebuffer0_`/`1_` (at
+  `viewportWidth_ / kBloomDownsampleFactor` etc., `std::max(1, ...)`-clamped),
+  `ssaoGBuffer_`/`ssaoRaw_`/`ssaoBlurred_` (same clamp, `kSSAODownsampleFactor`),
+  and the new `viewportColorFramebuffer_` (below) -- then calls
+  `recomputeClusterAABBs()` (next point). `Framebuffer`'s own pre-existing
+  move-assignment operator (Phase 7b) does exactly the right thing here: it
+  frees the old instance's GL handles before taking ownership of the new
+  one's, so "rebuild at a new size" is just "construct a temporary at the new
+  size, move-assign it over the member" -- no new `Framebuffer` API needed at
+  all. Shadow maps were checked and confirmed independent of any of this (see
+  the Phase 14a-era header comment on `shadowCascades_`/`ShadowMap`): they're
+  a fixed resolution unrelated to window or viewport size, so nothing about
+  them changes this phase.
+- **Cluster light culling's AABBs are no longer a true one-time
+  precompute**: `ClusterLightCuller::computeClusterAABBs()`'s own header
+  comment (Phase 13d) reasoned that a cluster's view-space AABB is a pure
+  function of the projection matrix + screen size in pixels, and since this
+  engine's window size never changed after construction, that meant
+  "computed once, ever" was correct. The projection's aspect ratio (and the
+  screen size fed alongside it) is exactly what changed meaning this phase --
+  it's now `viewportWidth_`/`viewportHeight_`'s aspect, not the window's --
+  so a stale AABB set built against the wrong screen size would silently
+  desync from `basic.frag`/`pbr.frag`'s own `gl_FragCoord`-based cluster-index
+  computation (which *does* now use the new, correct `uScreenSize`), making
+  per-fragment shading sample the wrong cluster's light list. Fixed by
+  factoring the old constructor-only computation out into a new
+  `Application::recomputeClusterAABBs()` method, called both from the
+  constructor (seeding the very first, placeholder-sized AABB set, exactly as
+  before) and from `resizeViewportTargetsIfNeeded()` every time the viewport
+  actually resizes -- in practice, this means it runs twice total in a normal
+  run: once at construction (against the window's initial size, before
+  `editorUI_` has ever reported a real panel size) and once more the first
+  time the real Viewport panel size is known (frame 1's
+  `resizeViewportTargetsIfNeeded()` call, per the point above), then never
+  again unless a user actually resizes the panel later.
+- **A new dedicated Framebuffer, `viewportColorFramebuffer_`**: the final
+  tonemap/bloom-composite postprocess pass used to write straight onto the
+  default framebuffer (`glBindFramebuffer(GL_FRAMEBUFFER, 0)`, at the
+  window's own size); it now writes into this new, single-sample, no-special-
+  flags `Framebuffer` instead, sized at `viewportWidth_`/`viewportHeight_` --
+  the same shape as `brightFramebuffer_`/`pingpongFramebuffer0_`/`1_` (Phase
+  11), just full-resolution rather than downsampled. `Framebuffer` gained one
+  small new accessor for this phase, `colorTextureId()` -- the raw GL texture
+  handle, not bound to any texture unit -- since every existing accessor
+  (`bindColorTexture(unit)`) exists to bind the texture as a side effect of
+  "a shader is about to sample it", and `ImGui::Image()` instead needs the
+  bare id/`ImTextureRef` directly; this is the first `Framebuffer` consumer in
+  this engine that isn't one of this engine's own shaders.
+- **Displaying it -- `EditorUI::renderDockspaceShell()` gained a parameter**:
+  now takes the viewport color texture's raw GL id, and the Viewport panel's
+  body calls `ImGui::Image(id, contentRegion, uv0, uv1)` sized to fill
+  `ImGui::GetContentRegionAvail()` -- filling the panel exactly, whatever its
+  current size -- instead of `TextWrapped()`. **The UV flip gotcha, confirmed
+  visually, not assumed**: OpenGL's texture coordinate origin is the
+  bottom-left texel (the convention every one of this engine's own fullscreen
+  shader passes already relies on -- e.g. `postprocess.frag` sampling
+  `hdrResolveFramebuffer_` with unflipped `[0,1]` UVs has always reproduced
+  the scene right-side-up), but Dear ImGui's `ImGui::Image()` treats UV
+  `(0,0)` as an image's top-left corner, the same convention its own font
+  atlas uses. Handing it this engine's render target with the default
+  `uv0=(0,0)/uv1=(1,1)` would display the 3D scene upside down; passing
+  `uv0=(0,1)/uv1=(1,0)` instead flips it back to right-side-up. Caught and
+  fixed by actually looking at the first headless screenshot taken with this
+  change (it showed the scene correctly oriented once the flip was in place,
+  inverted without it) rather than assuming the "obvious" default UVs were
+  correct -- exactly the kind of check this phase's own brief called out as
+  the highest-risk, most important thing to verify empirically.
+- **The degenerate-size guard, and the documented choice for what happens
+  visually**: the Viewport panel's content region can be `0` in some
+  dimension on the very first frame (before ImGui's docking layout has
+  settled) or if a user drags a panel divider all the way shut.
+  `resizeViewportTargetsIfNeeded()` handles this by *not updating*
+  `viewportWidth_`/`viewportHeight_` at all when `editorUI_`'s reported size
+  is `<= 0` in either dimension -- keeping whatever size those members
+  already held (seeded at the window's own initial size by `Application`'s
+  in-class default member initializers, so this is never actually `0` even
+  on frame one) -- rather than ever clamping down to a jarring `1x1` render
+  or skipping the 3D render entirely and showing nothing. The chosen behavior
+  is therefore: **keep rendering at the last known-good size**; the Viewport
+  panel's displayed image simply doesn't change that frame. `EditorUI`'s own
+  `ImGui::Image()` call has an independent, narrower guard for the same
+  underlying condition -- it skips the call (leaving the panel body blank)
+  only if the *panel's own* content region is currently `<= 0`, which can
+  only actually happen before `Application` has ever rendered a single valid
+  frame to hand it a texture.
+- **`uScreenSize` and the aspect ratio -- every reference to the window's
+  size in the 3D pipeline itself is gone**: `render()`'s aspect ratio
+  (feeding `Camera::getProjectionMatrix()`), the CSM cascade split
+  computation, the `glViewport()` calls bracketing the shadow pass, and both
+  `shader_`/`pbrShader_`'s own `uScreenSize` uniform uploads (clustered
+  lighting's per-fragment cluster-index computation) all switched from
+  `window_.getSize()` to `viewportWidth_`/`viewportHeight_`. The one
+  remaining `window_.getSize()` read in `render()` is the new tail block that
+  rebinds the default framebuffer and clears it (an arbitrary neutral dark
+  gray, visible only in any thin gaps between docked panels) before
+  `editorUI_`'s own ImGui calls draw the chrome -- that one genuinely does
+  need the window's real size, since ImGui's chrome covers the whole window,
+  not just the Viewport sub-region.
+- **Verify**: a clean `-DCMAKE_BUILD_TYPE=Debug` rebuild compiles with
+  **zero new warnings** under `-Wall -Wextra`; `ctest` still reports all
+  **4/4** tests passing (`scene_serialization_test`, `input_action_map_test`,
+  `physics_test`, `transform_hierarchy_test` -- this phase touches no tested
+  logic). `tools/run_headless.sh` at `ENGINE_MAX_FRAMES=60` (800x600 window,
+  same as every prior phase's headless path) completed cleanly with **zero
+  `[ERROR]`/GL-error log lines** across repeated runs, logging
+  `Viewport resized: rebuilding offscreen render targets at 431x565 (was
+  800x600)` on frame 1 -- confirming the Viewport panel's real reported
+  content-region size at this window size and dockspace-column-width split
+  (left column 22%, right 28%, leaving roughly the center 50% minus panel
+  padding/borders for Viewport) is **431x565**, with bloom/SSAO's own
+  downsampled targets correctly rebuilt at half that, **215x282**. The
+  resulting screenshot is a real, dense, colorful render again --
+  **~262KB**, back in the same size range every pre-Phase-14a phase's own
+  screenshot was (Phase 14a/14b's own screenshots, with the Viewport panel
+  still just flat dark background, were ~11-13KB) -- and, inspected
+  directly: the 3D scene (checkerboard ground plane, the dark table with its
+  red-and-black pyramid and blue box, the 2x4 PBR sphere grid, all correctly
+  lit with visible soft shadow gradients under the table/pyramid/box and
+  contact-AO darkening under each sphere, and a soft bloom halo around the
+  point light source) renders right-side-up, correctly proportioned (round
+  spheres, not stretched into ovals by an aspect mismatch) inside the
+  Viewport panel's own rectangle, while Scene/Assets/Inspector around it
+  still show their own unchanged Phase 14a/14b placeholder text. A second run
+  with `ENGINE_SHOW_DEBUG_UI=1` confirmed `DebugUI`'s own "Engine Debug"
+  panel (Frame Stats/Render Passes/Input Bindings/Scene Entities, listing
+  `parented_demo_cube`/`scene`/`falling_cube`) still layers correctly on top
+  of the dockspace, unaffected in content, exactly as Phase 14a left it.
+
+<br>
+
+<details>
+<summary><strong>Everyday shorthand vs. what's actually true</strong> (click to expand)</summary>
+<br>
+
+Saying "the Viewport panel renders the 3D scene" is the natural way to
+describe this phase, and it's how the rest of this section talks about it --
+but it can make it sound as though `EditorUI`/Dear ImGui does the rendering,
+or that the panel's own size takes effect immediately. Neither is quite
+right: `EditorUI` only ever displays a texture `Application` already finished
+rendering elsewhere (`viewportColorFramebuffer_`, built by the ordinary
+shadow/SSAO/HDR/bloom/SSR/tonemap pipeline exactly as before, just now
+writing to this new target instead of the default framebuffer) -- it has no
+3D rendering code of its own, then or now. And "the panel's size" driving
+that render is always *last* frame's reported size, one frame stale, for the
+structural reason explained above -- there is no way, within Dear ImGui's
+immediate-mode API as this engine uses it, for a frame's own 3D render to be
+sized from a content-region query that hasn't happened yet within that same
+frame.
+</details>
 
 ## Libraries used and why
 

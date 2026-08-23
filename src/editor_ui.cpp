@@ -119,7 +119,7 @@ void EditorUI::buildInitialLayout(ImGuiID dockspaceId) {
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
-void EditorUI::renderDockspaceShell() {
+void EditorUI::renderDockspaceShell(unsigned int viewportColorTexture) {
     // DockSpaceOverViewport() is the built-in "just cover the whole main
     // viewport" helper (creates its own invisible host window internally) --
     // simpler than manually building a host window + ImGui::DockSpace()
@@ -150,12 +150,44 @@ void EditorUI::renderDockspaceShell() {
     ImGui::End();
 
     ImGui::Begin("Viewport");
-    ImGui::TextWrapped(
-        "3D viewport (render-to-texture) -- coming in Phase 14c.\n\n"
-        "For this phase, the actual 3D scene still renders directly to the "
-        "window underneath/alongside this docked panel rather than into a "
-        "texture sampled here -- see this class's own header comment and "
-        "README.md's Phase 14a section.");
+    {
+        // Phase 14c: the panel's own available content-region size -- both
+        // what ImGui::Image() below is sized to fill and what
+        // viewportWidth()/viewportHeight() report for Application to read
+        // next frame (see this class's own header comment on why next
+        // frame, not this one). Recorded every call, even when the image
+        // below is skipped.
+        const ImVec2 contentRegion = ImGui::GetContentRegionAvail();
+        viewportWidth_ = static_cast<int>(contentRegion.x);
+        viewportHeight_ = static_cast<int>(contentRegion.y);
+
+        if (viewportColorTexture != 0 && contentRegion.x > 0.0f && contentRegion.y > 0.0f) {
+            // uv0=(0,1)/uv1=(1,0): flips vertically. OpenGL's texture
+            // coordinate origin is the bottom-left texel, matching how
+            // every one of this engine's own fullscreen shader passes
+            // already samples a Framebuffer's color texture (e.g.
+            // postprocess.frag) -- that convention reproduces the rendered
+            // image right-side-up when drawn as a fullscreen NDC quad. Dear
+            // ImGui's ImGui::Image(), however, treats uv (0,0) as the
+            // image's top-left corner (the same convention its own font
+            // atlas and every other UI texture use) -- so handing it this
+            // texture with the default uv0=(0,0)/uv1=(1,1) would display
+            // Application's 3D render upside down. Confirmed visually via
+            // this phase's own headless screenshot, not just assumed --
+            // see README.md's Phase 14c section.
+            ImGui::Image(static_cast<ImTextureID>(viewportColorTexture), contentRegion, ImVec2(0.0f, 1.0f),
+                         ImVec2(1.0f, 0.0f));
+        }
+        // else: nothing rendered into viewportColorTexture yet, or the
+        // panel's content region is currently degenerate (0 in some
+        // dimension -- the very first frame before ImGui's docking layout
+        // has settled, or a user dragging a divider all the way shut).
+        // Leaving the panel body blank this frame is the documented,
+        // simple choice here (see application.hpp's own Phase 14c comment
+        // on the matching degenerate-size guard for Application's own
+        // render targets) -- there is nothing meaningful to show yet
+        // either way.
+    }
     ImGui::End();
 
     ImGui::Begin("Inspector");
