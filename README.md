@@ -291,12 +291,17 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        scene_serialization.cpp, scene_loader.cpp -- both
                        extended Phase 15e with PointLight/DirectionalLight/
                        CameraComponent (de)serialization and saveScene()'s
-                       first real caller, debug_ui.cpp,
-                       input_action_map.cpp, physics.cpp, editor_ui.cpp,
+                       first real caller, extended again Phase 15f with
+                       MaterialOverride (de)serialization, debug_ui.cpp,
+                       input_action_map.cpp, physics.cpp, editor_ui.cpp --
+                       extended Phase 15f with the Material Inspector's real
+                       "Browse..." texture picker,
                        light.cpp -- Phase 15a, extended Phase 15b with
                        DirectionalLight/resolveActiveDirectionalLight(),
                        scene_hierarchy.cpp -- Phase 14d, asset_browser.cpp --
-                       Phase 15d's buildAssetTree())
+                       Phase 15d's buildAssetTree(),
+                       material_override.cpp -- Phase 15f's new
+                       resolveDiffuseTextureOverride())
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -304,14 +309,19 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
                        scene_serialization -- extended Phase 15e's schema (see
-                       src/ note above), debug_ui, input_action_map, physics,
-                       editor_ui, light -- Phase 15a's new PointLight ECS
-                       component, extended Phase 15b with DirectionalLight,
+                       src/ note above), extended again Phase 15f with the
+                       "materialOverride" block, debug_ui, input_action_map,
+                       physics, editor_ui, light -- Phase 15a's new PointLight
+                       ECS component, extended Phase 15b with DirectionalLight,
                        camera_component -- Phase 15c's new CameraComponent,
                        deliberately its own header rather than folded into
                        light.hpp, asset_browser -- Phase 15d's new
                        AssetTreeNode/buildAssetTree(), same "own header,
-                       genuinely different kind of thing" precedent)
+                       genuinely different kind of thing" precedent,
+                       material_override -- Phase 15f's new MaterialOverride
+                       component/resolveDiffuseTextureOverride(), same
+                       "own header, genuinely different kind of thing"
+                       precedent once more)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -333,7 +343,9 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
 tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
                        15e with PointLight/DirectionalLight/CameraComponent
-                       round-trip coverage),
+                       round-trip coverage, extended again Phase 15f with
+                       MaterialOverride round-trip + malformed-input
+                       coverage),
                        input_action_map_test.cpp (Phase 8d),
                        physics_test.cpp (Phase 8e), ecs_test.cpp (Phase 14f),
                        transform_hierarchy_test.cpp (Phase 14b),
@@ -341,7 +353,8 @@ tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
                        light_test.cpp (Phase 15a, extended Phase 15b with
                        resolveActiveDirectionalLight() coverage),
                        camera_component_test.cpp (Phase 15c),
-                       asset_browser_test.cpp (Phase 15d) + its own
+                       asset_browser_test.cpp (Phase 15d),
+                       material_override_test.cpp (Phase 15f) + its own
                        CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
@@ -5334,6 +5347,335 @@ at all.
      new `if (record.has...)` branch this phase added is simply never taken
      for them). Frustum culling still reads `1/14 -> 0/14` drawables culled,
      matching Phase 15c/15d's own recorded baseline exactly.
+
+### Phase 15f: Material assignment
+
+The Material Inspector's "Browse..." button had been `BeginDisabled()`'d
+since Phase 14e first built the panel -- its own comment already named the
+exact reason why: a `ModelComponent::model` is a cached, shared
+`std::shared_ptr<Model>` (`ResourceManager::getModel()`, keyed by asset
+path), so every entity that loads the same path shares the exact same
+`Model`, and therefore the exact same `Material` instances Model owns by
+value. Mutating one entity's diffuse texture through the Inspector would
+have silently repainted every other entity sharing that cached `Model` --
+not a hypothetical hazard: this project's own default scene already has
+`falling_cube` and `parented_demo_cube` both loading
+`assets/models/falling_cube.obj`. Phase 15d's own Asset Browser (a real file
+tree over `assets/textures/`) made the missing half of this feature obvious
+-- there was finally something to pick a texture FROM -- but 15d's own
+"Deliberately not done this phase" list explicitly left the Inspector wiring
+for a later phase, precisely because the shared-cache hazard needed a real
+design decision, not a quick wire-up. This phase makes that decision and
+closes the gap.
+
+- **The architectural decision: a per-entity `MaterialOverride` component,
+  not clone-on-edit.** Two designs were on the table (see
+  `include/engine/material_override.hpp`'s own header comment for the full
+  writeup):
+  - **(a) Per-entity override (chosen).** A new, genuinely separate
+    `MaterialOverride` component (`std::shared_ptr<Texture>
+    diffuseTexture` + `std::string diffuseTexturePath`) that, when present
+    on an entity AND non-null, wins over that entity's `ModelComponent::
+    model`'s own baked-in diffuse texture for exactly that entity's own draw
+    call -- resolved by one small, pure function,
+    `resolveDiffuseTextureOverride(registry, id)`. The shared, cached
+    `Model`/`Material` is never mutated: `Material::bind()` grew an optional
+    `const Texture* diffuseOverride` parameter that shadows
+    `diffuseTexture_` for the duration of one call without ever writing to
+    it, and `Model::draw()`/`drawNode()` thread that same optional pointer
+    straight through to every mesh's `bind()` call. `Application::render()`'s
+    `ModelComponent` draw loop calls `resolveDiffuseTextureOverride()` once
+    per entity, so an override on `falling_cube` can never leak into
+    `parented_demo_cube`'s own, separate `draw()` call later in the same
+    loop, even though both calls read the identical shared `Model`.
+    `ResourceManager`'s cache itself is completely untouched -- `getModel()`/
+    `getTexture()` still hand back the exact same shared instances they
+    always have; this override is pure, additive ECS-side state layered on
+    top.
+  - **(b) Clone-on-first-edit (rejected).** Deep-copy the entity's `Model`
+    (or just its `Material`) out of the cache the first time it's edited, so
+    it stops aliasing the shared original. Checked directly against what's
+    actually in `model.hpp`/`material.hpp` before deciding, per this
+    project's own "read first" discipline: both classes are deliberately
+    move-only (`Model(const Model&) = delete`, same for `Material`), each
+    with its own header comment explaining that's a considered choice, not
+    an oversight -- "nothing here currently needs to copy a Material, so the
+    safer/more consistent default... is kept rather than opening that door
+    speculatively." Building this option would mean adding a real
+    copy/clone operation to two GL-resource-owning classes purely to serve
+    one Inspector button, AND would break `ModelComponent::path`'s existing
+    contract (`ecs.hpp`'s own comment: "the asset path `model` was loaded
+    from... a *reloadable* reference") the moment an entity's `Model`
+    diverged from what its own path would reload -- a real complication for
+    Phase 15e's scene serialization, exactly as this phase's own brief
+    predicted. (a) sidesteps both problems entirely, and is a smaller,
+    additive change that fits this codebase's own "smallest correct
+    increment" discipline far better.
+- **Scope: diffuse texture only, `tint`/`shininess` stay read-only,
+  explicitly.** The exact same shared-cache hazard this whole phase exists
+  to solve applies to `tint`/`shininess` too, and the Asset Browser this
+  phase's picker reuses has nothing analogous to "browse for a tint" -- there
+  is no file to pick. Extending `MaterialOverride` with optional
+  tint/shininess fields (plus a plain `ColorEdit3`/`DragFloat` pair writing
+  into them, reusing `bind()`'s own override-argument shape) is the natural
+  next slice, not something this phase's own "Browse..." brief asked for --
+  see `material.hpp`'s own updated Phase 14e comment and the in-panel text
+  itself, which now names the diffuse texture as the one field that's safe
+  to change and says why the other two still aren't.
+- **The Inspector's Material section, made real
+  (`editor_ui.cpp`/`editor_ui.hpp`).** "Browse..." now opens a real popup
+  (`ImGui::OpenPopup("Choose Diffuse Texture")` /
+  `renderTextureBrowsePopup()`) listing every file under
+  `assets/textures/` as a flat `ImGui::Selectable()` list inside a small
+  fixed-size scrolling child -- deliberately not a nested tree or a
+  searchable/filterable control, matching this phase's own "just a working
+  list" brief (drag-and-drop is separate, future Phase 15g scope, exactly as
+  called out). The list is built by walking `assetTree_`, Phase 15d's own
+  already-built forest (`collectTextureFiles()`), not by re-walking the
+  filesystem a second time. Clicking an entry doesn't touch
+  `ResourceManager`/`registry` directly -- `EditorUI` still owns neither
+  (the same "just a Dear ImGui wrapper over data Application owns" role this
+  class has had since Phase 14a) -- it reports the picked path back through
+  `renderDockspaceShell()`'s new `textureAssignRequested` out-parameter, the
+  identical "EditorUI reports intent, Application acts on it" shape
+  `saveSceneRequested`/`CreateEntityKind` already established.
+  `Application::render()` is what turns a non-empty result into a real
+  `resources_.getTexture()` call and a `MaterialOverride` component on
+  `selectedEntity_`, right after `renderDockspaceShell()` returns. The
+  Material section's texture readout now prefers this entity's own override
+  (if present) over the shared `Model`'s baked-in texture -- the identical
+  "override wins if present, else fall back" rule
+  `resolveDiffuseTextureOverride()` applies at draw time, just read here for
+  display -- tagged `[override]` when it's showing one, with a "Clear
+  Override" button (`registry.removeComponent<MaterialOverride>(id)`) next
+  to it so a user isn't left with no way back to the shared material once
+  they've assigned one.
+- **`ENGINE_DEBUG_ASSIGN_TEXTURE=<entity name>:<texture path>`
+  (`application.cpp`)**, unset by default -- the debug-env-var counterpart
+  to the real "Browse..." popup, following this project's established "a
+  debug env var calls the exact same function/does the exact same thing the
+  real UI action does" precedent every other `ENGINE_DEBUG_*` var already
+  sets. Placed in the constructor after `ENGINE_DEBUG_DELETE` (so it can
+  target an entity `CREATE`/`SELECT`/`FORCE_STATIC`/`FORCE_DYNAMIC`/`DELETE`
+  just acted on within the same run) and before `ENGINE_DEBUG_SAVE_SCENE`
+  (so one headless run can assign an override AND prove it survives a save,
+  in one process). The texture path uses the same relative,
+  `resolveAssetPath()`-at-the-call-site convention every other asset path in
+  this engine already uses. An unresolvable entity name, a missing `:`
+  separator, or a texture that fails to load are all handled with a
+  `LOG_WARN`/`LOG_ERROR` and the run continues -- confirmed directly (see
+  Verify below), not just assumed.
+- **Round-trips through Save Scene, from this phase's own start -- not
+  deferred the way `pointLight`/`directionalLight`/`camera` were
+  (`scene_serialization.hpp`/`.cpp`, `scene_loader.cpp`).** Those three were
+  left out of the schema for a phase or two after each component existed
+  because, at the time, nothing yet wrote one through the editor.
+  `MaterialOverride` is different: it's created directly by a live Inspector
+  action the SAME phase it's introduced, so leaving it unserialized would
+  mean Save Scene silently discarding a user's own just-made edit -- a real,
+  immediately user-visible regression, not a "nothing exercises this yet"
+  gap. So `SceneEntityRecord` gains `hasMaterialOverride` +
+  `materialOverrideDiffuseTexturePath`, and the schema gains one more
+  independently opt-in `"materialOverride"` block
+  (`{"diffuseTexture": "assets/textures/foo.png"}`), following the exact
+  `has*`-flag pattern every prior block already established -- with one
+  deliberate difference: unlike `"rigidBody": {}` or `"pointLight": {}`,
+  which are valid, meaningfully-defaulted empty blocks,
+  `"materialOverride"`'s own `"diffuseTexture"` field is REQUIRED once the
+  block is present, since there is no meaningful "empty override" default
+  the way every other block has one. `loadScene()`/`saveScene()`
+  (`scene_loader.cpp`) turn this into/out of a real `MaterialOverride`
+  component the identical way `modelPath`/`ModelComponent::path` already do
+  for the model itself (`resolveAssetPath()` then `resources.getTexture()`
+  on load; the stored relative path, verbatim, on save) -- `saveScene()`
+  only ever writes the block when `diffuseTexture` is actually non-null,
+  matching `resolveDiffuseTextureOverride()`'s own "null means no override"
+  contract exactly, so a stray empty `MaterialOverride` a future caller
+  might add never round-trips as a schema-invalid empty block.
+- **Test coverage, matching this project's established "pure logic function,
+  unit-tested in isolation" pattern.** `resolveDiffuseTextureOverride()`
+  (`material_override.hpp`/`.cpp`) is exactly this phase's own version of
+  `light.cpp`'s `resolveActiveDirectionalLight()`/`collectPointLights()` --
+  a small, pure ECS-pool lookup with no GL/rendering dependency at all, so
+  `tests/material_override_test.cpp` exercises "does entity X's material
+  come from its own override or the shared Model's" (an entity with no
+  `MaterialOverride`; one with a real override; a sibling entity that never
+  had one added, proving no cross-entity leakage; one with a
+  `MaterialOverride` present but a null `diffuseTexture`, proving that
+  correctly still resolves to "no override"; and two simultaneously
+  overridden entities resolving independently) without a live GL context, a
+  real loaded `Texture`, or a Dear ImGui frame -- a custom no-op-deleter
+  `std::shared_ptr<Texture>` aliasing a fake, non-null sentinel address
+  proves pointer identity round-trips correctly without a real,
+  GPU-resident `Texture` object anywhere in the test binary (`Texture`
+  itself needs a live GL context to construct for real). `tests/
+  scene_serialization_test.cpp` gained a tenth fabricated entity (a
+  `materialOverride` block written TOGETHER with a `model` block, the real
+  shape an Inspector-assigned override actually appears in) plus two new
+  malformed-input cases (`"materialOverride"` present but not an object;
+  present but missing its required `"diffuseTexture"` field).
+- **Deliberately NOT done this phase**, the same conservative default this
+  whole project's "smallest correct increment" discipline expects:
+  **drag-and-drop** (a real, separate, much bigger feature -- Phase 15g, per
+  Phase 15d's own already-recorded plan); **tint/shininess editing** (see
+  above -- the identical shared-cache hazard still applies, and the Asset
+  Browser this picker reuses has nothing to browse for a color/scalar with);
+  **a "Save As new material" / material-asset-library concept** (this
+  engine has no standalone material-asset type at all -- Phase 15d's own
+  header comment already notes materials live inline in each model's
+  `.mtl` file, not as a placeable asset kind `ResourceManager` caches on its
+  own); **any change to `ResourceManager`'s own caching model** (no
+  conditional caching, no cache invalidation -- the override layers on top
+  of the existing get-or-load cache exactly as it always worked, never
+  reaches into it); **thumbnails in the texture picker** (the identical
+  "own GPU-upload/caching cost profile, real separate feature" reasoning
+  Phase 15d's own header comment already gives for not thumbnailing the
+  Assets panel itself, restated here for a second picker built directly on
+  top of that same tree).
+- **Post-15f bug-review fix: the override applied to EVERY mesh in a
+  multi-mesh entity, not just the one the Inspector shows.** The first-pass
+  `Model::drawNode()` (`model.cpp`) forwarded `diffuseTextureOverride`
+  unconditionally to every mesh in the whole node subtree, with no per-mesh
+  scoping at all. The Inspector's own Material section only ever displays
+  `Model::primaryMaterial()` -- one representative sample, per that method's
+  own pre-existing comment -- but `assets/models/scene.obj` (the default
+  scene's own "scene" entity) has 3 meshes/4 materials (Table, Box, Pyramid,
+  each visually distinct: brown/black-striped, solid blue, red/black
+  checker). Reviewer reproduced it directly: selecting "scene" in the
+  Inspector and assigning ANY texture override silently replaced the
+  Pyramid's AND the Box's own materials too, even though the Inspector never
+  showed the user more than one texture, and never implied a "Browse..."
+  pick would retexture three unrelated meshes at once. Fixed by scoping the
+  override to apply ONLY to the exact mesh `primaryMaterial()` itself reads
+  from -- a new `Model::kPrimaryMeshIndex` private `static constexpr`
+  (`model.hpp`, always `0`, i.e. `meshes_[0]`, matching
+  `primaryMaterial()`'s own existing "whichever mesh Assimp reported first"
+  behavior) is now the one shared source of truth both `primaryMaterial()`
+  and `drawNode()`'s override check read, so "the mesh the override affects"
+  and "the mesh the Inspector displays" can never independently drift apart.
+  `drawNode()` now passes `diffuseTextureOverride` to `Material::bind()`
+  only when `meshIndex == kPrimaryMeshIndex`; every other mesh in the same
+  node/subtree draws with `nullptr` -- its own original, untouched Material
+  -- regardless of what override is active for that entity.
+  A GL-free unit test isn't feasible for this specific bug (it's about
+  actual per-mesh draw-call behavior in `Model::drawNode()`, which needs a
+  live GL context to even construct a `Mesh`/`Model` -- unlike
+  `resolveDiffuseTextureOverride()`, which is pure ECS-pool lookup with no
+  GL dependency at all and already has `material_override_test.cpp`
+  coverage), so this is verified via a headless screenshot/pixel-diff proof
+  instead -- see "Verify" below for the exact repro and results.
+- **Verify**: `cmake --build build -j"$(nproc)"` compiles with **zero new
+  warnings** under `-Wall -Wextra`. `ctest` reports **10/10**
+  (`material_override_test` new; `scene_serialization_test` extended as
+  described above). `tools/run_headless.sh` proof, run against this
+  project's own real `assets/scenes/default.json` (never modified in the
+  repo -- `git diff -- assets/scenes/default.json` shows nothing at the end,
+  confirmed directly):
+  1. A plain baseline (`ENGINE_MAX_FRAMES=60`, no debug vars) logs
+     clustered-lighting occupancy `2136 -> 2153/2304` clusters occupied, avg
+     `3.565543 -> 3.580121` lights/occupied cluster and frustum culling
+     `1/14 -> 0/14` drawables culled -- byte-identical to Phase 15e's own
+     recorded baseline, zero `[ERROR]` lines -- direct confirmation this
+     phase's changes are a complete no-op for the normal, no-override case
+     (every new `resolveDiffuseTextureOverride()` call in the render loop
+     returns `nullptr` for every entity in this file, since none of its
+     three entities has a `materialOverride` block).
+  2. **The critical sibling-non-corruption proof.**
+     `ENGINE_MAX_FRAMES=10 ENGINE_DEBUG_ASSIGN_TEXTURE="falling_cube:
+     assets/textures/rusted_metal_albedo.png" ENGINE_DEBUG_SELECT=
+     "falling_cube"` logs `ENGINE_DEBUG_ASSIGN_TEXTURE: entity
+     "falling_cube" now overrides its diffuse texture with
+     "assets/textures/rusted_metal_albedo.png"`, zero `[ERROR]` lines, and
+     clustered-lighting occupancy unchanged from the plain baseline (a
+     texture swap touches nothing about light clustering, as expected). The
+     screenshot shows the Inspector's Material section for `falling_cube`
+     reading `Texture: .../rusted_metal_albedo.png (256x256) [override]`,
+     with both "Browse..." and "Clear Override" now real, enabled buttons.
+     A SECOND, independent run against the exact same
+     `ENGINE_DEBUG_ASSIGN_TEXTURE` but `ENGINE_DEBUG_SELECT=
+     "parented_demo_cube"` instead -- the sibling entity that loads the
+     IDENTICAL `assets/models/falling_cube.obj` and therefore points at the
+     exact same cached `Model`/`Material` -- shows that entity's own
+     Material section reading `Texture: .../checker.png (256x256)`, with NO
+     `[override]` tag and no "Clear Override" button, i.e. completely
+     unaffected by the override assigned to its sibling in the same run.
+     This is the exact hazard this whole phase's design exists to solve,
+     and it's confirmed to actually hold, not just architecturally argued
+     for.
+  3. **The save/reload round-trip proof**
+     (`tools/run_headless.sh`, restoring the build directory's own copy of
+     `default.json` between steps -- `assets/scenes/default.json` under
+     `build/` is a plain `POST_BUILD`-copied file, confirmed distinct from
+     the repo's own checked-in copy, which this whole run never touches).
+     `ENGINE_DEBUG_ASSIGN_TEXTURE="falling_cube:assets/textures/
+     rusted_metal_albedo.png" ENGINE_DEBUG_SAVE_SCENE=1` logs `Saved scene
+     to ".../build/assets/scenes/default.json"`; inspecting the written file
+     directly (not just trusting the log line) shows a real
+     `"materialOverride": {"diffuseTexture":
+     "assets/textures/rusted_metal_albedo.png"}` block on exactly the
+     `falling_cube` entity's own record, and NO such block on
+     `parented_demo_cube`'s -- the override that only ever applied to one
+     entity in memory is written back out attached to only that same one
+     entity. A SECOND, wholly independent run -- no
+     `ENGINE_DEBUG_ASSIGN_TEXTURE` at all, just `ENGINE_MAX_FRAMES=10
+     ENGINE_DEBUG_SELECT="falling_cube"` against the now-modified file --
+     logs zero `[ERROR]`/`[WARN]` lines, and its own screenshot shows the
+     Inspector's Material section for the reloaded `falling_cube` reading
+     the identical `.../rusted_metal_albedo.png (256x256) [override]` --
+     direct proof `loadScene()` reconstructs a real `MaterialOverride`
+     component from disk, not just that `saveScene()` wrote plausible-
+     looking JSON.
+  4. Robustness, run and confirmed rather than assumed:
+     `ENGINE_DEBUG_ASSIGN_TEXTURE="nonexistent_entity:assets/
+     textures/checker.png"` logs a `LOG_WARN` ("does not match any entity's
+     name") and the run still completes normally;
+     `ENGINE_DEBUG_ASSIGN_TEXTURE="falling_cube:assets/textures/
+     does_not_exist.png"` logs `Texture`'s own `[ERROR]` (the identical
+     failure `Model`'s own texture loading already surfaces for a bad path)
+     followed by this phase's own `LOG_WARN`, and the run still completes
+     normally with no override actually installed;
+     `ENGINE_DEBUG_ASSIGN_TEXTURE="malformed_no_colon"` (no `:` separator)
+     logs a `LOG_WARN` naming the expected format and is otherwise ignored.
+     None of the three crashes or hangs.
+  5. **The multi-mesh scoping proof (post-bug-review)**, reproducing the
+     reviewer's own repro exactly: `ENGINE_DEBUG_ASSIGN_TEXTURE="scene:
+     assets/textures/scuffed_plastic_albedo.png"` against the `"scene"`
+     entity (3 meshes/4 materials -- Table/Box/Pyramid). Two `ENGINE_MAX_
+     FRAMES=5` runs against the identical unmodified `default.json` (one
+     plain, one with the override) are compared pixel-for-pixel
+     (`compare -metric AE`, ImageMagick) over three hand-picked crop regions
+     of the same two screenshots: the Pyramid's own checker body (interior
+     only, clear of any table-boundary pixels), the Box's own top face
+     (interior only, same), and the Table's own visible top surface. A
+     control comparison (two INDEPENDENT plain-baseline runs, no override on
+     either) established the noise floor for this headless/software-render
+     setup first -- **0** pixels differ in all three crop regions between two
+     unmodified runs, confirming llvmpipe rendering here is fully
+     deterministic run-to-run at this frame count, so any nonzero diff below
+     is real, not timing noise. Result: Pyramid interior **0** px differ,
+     Box top-face interior **0** px differ -- both entities' own materials
+     are byte-identical whether or not `"scene"` has an active override --
+     while the Table's own visible surface differs across **5,675 of 8,800**
+     px in its crop (the dark brown/black-striped wood-grain material
+     visibly replaced by the assigned texture, tinted by Table's own `Kd`).
+     (An earlier, looser pair of crops that happened to also catch a sliver
+     of the Table's own cast-shadow boundary showed small nonzero diffs
+     there too -- correctly re-attributed to the Table's own pixels, not the
+     Pyramid's/Box's, once the crop bounds were tightened to each mesh's
+     own interior; the noise-floor control above is what confirms that
+     re-attribution rather than just asserting it.) This directly confirms
+     the fix: assigning an override to a multi-mesh entity now changes
+     ONLY the mesh `primaryMaterial()` itself shows in the Inspector, never
+     any other mesh sharing that entity.
+  6. **The original sibling-non-corruption proof (item 2 above) re-confirmed
+     unaffected by this fix**: re-run verbatim after the `kPrimaryMeshIndex`
+     fix, same commands, same results (`falling_cube` shows `[override]`
+     `rusted_metal_albedo.png`; `parented_demo_cube` shows the plain
+     `checker.png`, unaffected) -- expected, since `falling_cube.obj` is a
+     single-mesh model (this fix only changes behavior for a model with MORE
+     than one mesh) and the fix touches only `drawNode()`'s own per-mesh
+     override-forwarding, nothing about `resolveDiffuseTextureOverride()` or
+     the ECS/serialization layers the sibling proof exercises.
 
 ## Libraries used and why
 

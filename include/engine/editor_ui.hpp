@@ -192,6 +192,20 @@
 // surface that fixes that -- one menu, one item -- rather than either
 // nothing (undiscoverable) or a full menu bar's worth of items this engine
 // has no other actions to put there yet.
+//
+// Phase 15f: the Material Inspector's own "Browse..." button (Phase 14e --
+// disabled ever since, with an explanatory "read-only, shared Model" comment
+// -- see editor_ui.cpp's own Phase 14e comment) is real now: it opens a
+// popup listing every file under assets/textures/, reusing this class's own
+// assetTree_ (Phase 15d, below) rather than re-walking the filesystem a
+// second time. Picking one reports the chosen path back via
+// renderDockspaceShell()'s new `textureAssignRequested` parameter (below);
+// Application::render() is what turns that into a real MaterialOverride
+// component (material_override.hpp) on the selected entity -- see that
+// header's own header comment for the full "per-entity override, not
+// clone-on-edit" design this closes the shared-cache hazard with, and
+// editor_ui.cpp's own Phase 15f comment (at renderInspectorPanel()) for the
+// Material section's own updated layout.
 
 #include <optional>
 #include <string>
@@ -381,10 +395,23 @@ public:
     // wrapper" reasoning `createRequest`'s own comment above already gives)
     // -- Application::render() is what actually calls saveCurrentScene()
     // when this comes back true, immediately after this call returns.
+    // Phase 15f: `textureAssignRequested` -- unconditionally reset to
+    // std::nullopt at the top of every call, then set to the picked file's
+    // assets/-relative path (e.g. "assets/textures/foo.png") only on the
+    // frame a user clicks an entry in the Material Inspector's new
+    // "Browse..." popup (see editor_ui.cpp's own renderTextureBrowsePopup()/
+    // renderInspectorPanel() Phase 15f comments). A read/write reference,
+    // mirroring `saveSceneRequested`'s own shape immediately above and for
+    // the identical reason: EditorUI has no ResourceManager to actually load
+    // a Texture through (only Application does), so this call only ever
+    // reports WHICH path was picked -- Application::render() is what turns
+    // a non-nullopt result into a real resources_.getTexture() call and a
+    // MaterialOverride component (material_override.hpp) on
+    // `selectedEntity`, immediately after this call returns.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
-                                           std::optional<EntityId> activeDirectionalLight,
-                                           bool& saveSceneRequested);
+                                           std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
+                                           std::optional<std::string>& textureAssignRequested);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()

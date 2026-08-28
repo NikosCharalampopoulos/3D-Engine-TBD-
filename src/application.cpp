@@ -29,6 +29,7 @@
 #include "engine/hdri_loader.hpp"
 #include "engine/light.hpp"
 #include "engine/log.hpp"
+#include "engine/material_override.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
 #include "engine/physics.hpp"
@@ -1130,6 +1131,49 @@ bool debugSaveSceneFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 15f: ENGINE_DEBUG_ASSIGN_TEXTURE=<entity name>:<texture path>, unset
+// by default -- the debug-env-var counterpart to the Material Inspector's
+// own real "Browse..." popup (editor_ui.cpp), so a headless run (no real
+// mouse to click a popup list entry with under Xvfb) can prove a
+// MaterialOverride (material_override.hpp) actually reaches ONE entity's
+// draw call, and -- critically -- that every OTHER entity sharing the same
+// cached Model renders completely unaffected. See README.md's own Phase 15f
+// Verify section for the exact sibling-non-corruption proof this makes
+// possible (assigning a texture to just "falling_cube" while
+// "parented_demo_cube", which loads the identical assets/models/
+// falling_cube.obj, stays visually untouched).
+// `<entity name>` is resolved the same way ENGINE_DEBUG_SELECT/
+// _FORCE_STATIC/_FORCE_DYNAMIC/_DELETE already are, below (findEntityByName());
+// `<texture path>` is the SAME relative, reloadable string form
+// ModelComponent::path/MaterialOverride::diffuseTexturePath already use
+// (e.g. "assets/textures/rusted_metal_albedo.png"), resolved via
+// resolveAssetPath() at this constructor's own call site below, exactly
+// like every other asset path this engine loads (paths.hpp). The FIRST ':'
+// splits name from path -- an entity name authored by this project never
+// contains one, and none of assets/textures/'s own filenames do either, so
+// this is unambiguous for every name/path this engine's own scenes actually
+// use. Returns a pair of empty strings (the unset/malformed case) rather
+// than std::optional<std::pair<...>> -- the caller below already treats "an
+// empty entity name" as "nothing to do," the identical empty-string-means-
+// absent convention every other ENGINE_DEBUG_* string var here already
+// uses (debugDeleteEntityNameFromEnv() immediately above, ENGINE_DEBUG_SELECT
+// below), so a second optional wrapper would add nothing this call site
+// doesn't already check for on its own.
+std::pair<std::string, std::string> debugAssignTextureFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_ASSIGN_TEXTURE");
+    if (value == nullptr || *value == '\0') {
+        return {};
+    }
+    const std::string raw(value);
+    const std::size_t colon = raw.find(':');
+    if (colon == std::string::npos) {
+        LOG_WARN("ENGINE_DEBUG_ASSIGN_TEXTURE=\"" + raw +
+                  "\" is missing its ':' separator (expected \"<entity name>:<texture path>\"); ignored");
+        return {};
+    }
+    return {raw.substr(0, colon), raw.substr(colon + 1)};
+}
+
 // Phase 14d: linear search over the NameComponent pool for ENGINE_DEBUG_SELECT's
 // own lookup, above -- this engine's whole scene is a handful of entities
 // (three, see assets/scenes/default.json), so there's no reason for anything
@@ -1797,6 +1841,46 @@ Application::Application(int width, int height, const std::string& title, std::u
                           std::to_string(found.index()) + " (children, if any, orphaned to root)");
             } else {
                 LOG_WARN("ENGINE_DEBUG_DELETE=\"" + debugDeleteName + "\" does not match any entity's name");
+            }
+        }
+    }
+
+    // Phase 15f: ENGINE_DEBUG_ASSIGN_TEXTURE -- see
+    // debugAssignTextureFromEnv()'s own comment above for why this exists.
+    // Applied after DELETE (so it can target an entity CREATE/SELECT/
+    // FORCE_STATIC/FORCE_DYNAMIC/DELETE just acted on within this same run)
+    // and before SAVE_SCENE (so one headless run can assign an override AND
+    // prove it survives a save -- SAVE_SCENE's own comment already explains
+    // why it, in turn, needs to run last of all).
+    {
+        const auto [assignName, assignTexturePath] = debugAssignTextureFromEnv();
+        if (!assignName.empty()) {
+            const EntityId found = findEntityByName(registry_, assignName);
+            if (found.valid()) {
+                // resources_.getTexture() (like every Texture load in this
+                // engine, see resource_manager.cpp) takes an already-
+                // resolved path; resolveAssetPath() here mirrors exactly
+                // what loadScene()/spawnEntityFromCreateMenu() already do
+                // for model paths (see either's own comment) -- resolve
+                // once, right before the GL-touching call, while storing
+                // the ORIGINAL relative form in diffuseTexturePath below so
+                // it stays a reloadable reference (see
+                // material_override.hpp's own MaterialOverride comment).
+                const std::string resolvedTexturePath = resolveAssetPath(assignTexturePath);
+                try {
+                    MaterialOverride& materialOverride =
+                        registry_.addComponent<MaterialOverride>(found, MaterialOverride{});
+                    materialOverride.diffuseTexture = resources_.getTexture(resolvedTexturePath);
+                    materialOverride.diffuseTexturePath = assignTexturePath;
+                    LOG_INFO("ENGINE_DEBUG_ASSIGN_TEXTURE: entity \"" + assignName +
+                              "\" now overrides its diffuse texture with \"" + assignTexturePath + "\"");
+                } catch (const std::exception& e) {
+                    LOG_WARN("ENGINE_DEBUG_ASSIGN_TEXTURE: failed to load texture \"" + assignTexturePath +
+                              "\" for entity \"" + assignName + "\": " + std::string(e.what()));
+                }
+            } else {
+                LOG_WARN("ENGINE_DEBUG_ASSIGN_TEXTURE=\"" + assignName + ":" + assignTexturePath +
+                          "\" does not match any entity's name");
             }
         }
     }
@@ -2651,7 +2735,18 @@ void Application::render() {
             // this is behavior-preserving for the whole scene except the
             // one new parented demo entity assets/scenes/default.json adds.
             const glm::mat4 modelMatrix = resolveWorldMatrix(registry_, id);
-            mc.model->draw(*shader_, modelMatrix, &frustum, &cullStats);
+            // Phase 15f: this is the ONE call site where a per-entity
+            // MaterialOverride (material_override.hpp) actually reaches the
+            // rendered frame -- resolveDiffuseTextureOverride() returns
+            // non-null only for `id` itself (never for another entity that
+            // happens to share `mc.model` with it, since that pool lookup is
+            // keyed by `id`), so passing its result into THIS entity's own
+            // draw() call cannot affect any other entity's own draw() call
+            // later in this same each<ModelComponent>() loop -- see
+            // material_override.hpp's own header comment for the full
+            // "shared cache stays untouched" design this depends on.
+            const Texture* diffuseOverride = resolveDiffuseTextureOverride(registry_, id);
+            mc.model->draw(*shader_, modelMatrix, &frustum, &cullStats, diffuseOverride);
         }
     });
 
@@ -3050,9 +3145,10 @@ void Application::render() {
     // tree/already-finished 3D pass.
     editorUI_.newFrame();
     bool saveSceneRequested = false;
+    std::optional<std::string> textureAssignRequested;
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr,
-        activeDirectionalLight_, saveSceneRequested);
+        activeDirectionalLight_, saveSceneRequested, textureAssignRequested);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
     }
@@ -3062,6 +3158,34 @@ void Application::render() {
     // rather than acting on it directly.
     if (saveSceneRequested) {
         saveCurrentScene();
+    }
+    // Phase 15f: the Material Inspector's "Browse..." popup's own real
+    // trigger path -- see editor_ui.hpp's own Phase 15f comment for why
+    // EditorUI only ever reports which path was picked rather than loading
+    // it itself. Only acted on when an entity is actually selected (the
+    // popup can only be opened from a selected entity's own Inspector in
+    // the first place, but selectedEntity_ is re-checked here defensively --
+    // the same "don't assume a UI invariant still holds a function call
+    // later" discipline every other ENGINE_DEBUG_*/UI-request handler in
+    // this constructor/render() already follows).
+    if (textureAssignRequested.has_value() && selectedEntity_.has_value()) {
+        // See ENGINE_DEBUG_ASSIGN_TEXTURE's own constructor-time comment
+        // (debugAssignTextureFromEnv()) for why resolveAssetPath() runs here,
+        // right before the GL-touching resources_.getTexture() call, while
+        // the ORIGINAL relative path is what's stored on the component --
+        // the identical split modelPath/ModelComponent::path already uses.
+        const std::string resolvedTexturePath = resolveAssetPath(*textureAssignRequested);
+        try {
+            MaterialOverride& materialOverride =
+                registry_.addComponent<MaterialOverride>(*selectedEntity_, MaterialOverride{});
+            materialOverride.diffuseTexture = resources_.getTexture(resolvedTexturePath);
+            materialOverride.diffuseTexturePath = *textureAssignRequested;
+            LOG_INFO("Inspector: entity " + std::to_string(selectedEntity_->index()) +
+                      " now overrides its diffuse texture with \"" + *textureAssignRequested + "\"");
+        } catch (const std::exception& e) {
+            LOG_WARN("Inspector: failed to load texture \"" + *textureAssignRequested +
+                      "\" for entity " + std::to_string(selectedEntity_->index()) + ": " + std::string(e.what()));
+        }
     }
     renderDebugUI();
     editorUI_.render();

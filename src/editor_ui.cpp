@@ -27,6 +27,7 @@
 #include "engine/light.hpp"
 #include "engine/log.hpp"
 #include "engine/material.hpp"
+#include "engine/material_override.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
 #include "engine/physics.hpp"
@@ -48,6 +49,83 @@ const char* glslVersionString() {
 #else
     return "#version 430 core";
 #endif
+}
+
+// Phase 15f: recursively collects every non-directory AssetTreeNode
+// (asset_browser.hpp) reachable under `node` into `out`, in the same
+// directories-before-files/alphabetical order buildAssetTree() already
+// sorted them into -- the Material Inspector's texture-picker popup
+// (renderInspectorPanel()'s own Material section below) needs a flat list
+// of PICKABLE entries (leaf files, e.g. "checker.png" or
+// "skybox/right.png"), not the nested tree renderAssetTreeNode() renders for
+// the Assets panel itself; walking the already-built assetTree_ this way
+// (rather than re-walking the filesystem a second time) is exactly the
+// "asset tree is a cache" discipline asset_browser.hpp's own header comment
+// establishes for the Assets panel, applied to a second consumer.
+void collectTextureFiles(const AssetTreeNode& node, std::vector<const AssetTreeNode*>& out) {
+    if (node.isDirectory) {
+        for (const AssetTreeNode& child : node.children) {
+            collectTextureFiles(child, out);
+        }
+    } else {
+        out.push_back(&node);
+    }
+}
+
+// Phase 15f: the Material Inspector's texture-picker popup body -- opened by
+// the Material section's own "Browse..." button (see renderInspectorPanel()
+// below) via a matching ImGui::OpenPopup("Choose Diffuse Texture") call
+// there. Deliberately a flat ImGui::Selectable() list inside a small fixed-
+// height scrolling child, not a nested tree/a searchable-filterable
+// control: this phase's own brief explicitly calls for "just a working
+// list" (drag-and-drop, a fancier picker, and thumbnails are all separate,
+// later scope -- see asset_browser.hpp's own Phase 15d "Deliberately not
+// done this phase" list for the identical reasoning already applied to the
+// Assets panel itself). Clicking an entry records its assets/-relative path
+// (the "textures/..." AssetTreeNode::relativePath, prefixed with "assets/"
+// to match ModelComponent::path/MaterialOverride::diffuseTexturePath's own
+// convention -- see ecs.hpp/material_override.hpp) into
+// `textureAssignRequested` and closes the popup; nothing here touches
+// ResourceManager/registry directly (see renderInspectorPanel()'s own Phase
+// 15f comment for why that's Application::render()'s job instead).
+void renderTextureBrowsePopup(const std::vector<AssetTreeNode>& assetTree,
+                               std::optional<std::string>& textureAssignRequested) {
+    if (!ImGui::BeginPopup("Choose Diffuse Texture")) {
+        return;
+    }
+
+    std::vector<const AssetTreeNode*> textureFiles;
+    for (const AssetTreeNode& top : assetTree) {
+        // "textures" -- see asset_browser.hpp's own header comment for why
+        // this is one of exactly two top-level categories buildAssetTree()
+        // ever produces (the other, "models", isn't a texture and has no
+        // business appearing in this specific picker).
+        if (top.isDirectory && top.relativePath == "textures") {
+            collectTextureFiles(top, textureFiles);
+        }
+    }
+
+    if (textureFiles.empty()) {
+        // Genuinely reachable, not just defensive: a fresh checkout missing
+        // assets/textures/ entirely (asset_browser.hpp's own "a missing
+        // category directory is silently skipped, not an error") would
+        // leave this popup with nothing to offer -- telling the user that
+        // plainly beats an empty, unexplained scrollbox.
+        ImGui::TextDisabled("No textures found under assets/textures/.");
+    } else {
+        ImGui::BeginChild("TextureBrowseList", ImVec2(320.0f, 200.0f), true);
+        for (const AssetTreeNode* file : textureFiles) {
+            ImGui::PushID(file->relativePath.c_str());
+            if (ImGui::Selectable(file->relativePath.c_str())) {
+                textureAssignRequested = "assets/" + file->relativePath;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+    }
+
+    ImGui::EndPopup();
 }
 
 // Phase 14d: recursively renders one Scene-Hierarchy row (and, if expanded,
@@ -329,8 +407,25 @@ CreateEntityKind renderCreateEntityMenuItems() {
 // this is (Application's own activeDirectionalLight_, read-only here) and
 // why it's threaded through as a third parameter rather than looked up some
 // other way.
+//
+// Phase 15f: two more parameters, both specifically for the Material
+// section's newly-real "Browse..." button. `assetTree` is EditorUI's own
+// `assetTree_` (Phase 15d, built once in the constructor) -- the Material
+// section's texture-picker popup below walks its "textures" subtree to list
+// candidates, reusing that already-built forest rather than re-walking the
+// filesystem a second time (see asset_browser.hpp's own "Caching" comment
+// for why assetTree_ is a cache in the first place). `textureAssignRequested`
+// mirrors `saveSceneRequested`'s own "EditorUI reports intent, Application
+// acts on it" shape (editor_ui.hpp's own Phase 15e comment) -- EditorUI has
+// no ResourceManager to actually load a Texture through, so clicking a
+// popup entry only records WHICH asset-relative path was picked; only
+// Application::render() turns that into a real resources_.getTexture() call
+// and a MaterialOverride component (material_override.hpp) on the selected
+// entity, right after this whole call returns.
 void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& selectedEntity,
-                           std::optional<EntityId> activeDirectionalLight) {
+                           std::optional<EntityId> activeDirectionalLight,
+                           const std::vector<AssetTreeNode>& assetTree,
+                           std::optional<std::string>& textureAssignRequested) {
     if (!selectedEntity.has_value()) {
         // Matches this panel's pre-14e placeholder tone (see the removed
         // "Inspector -- coming in Phase 14e" line) rather than an empty/
@@ -409,10 +504,19 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
     }
 
     // --- Material --------------------------------------------------------
-    // Read-only this phase, deliberately -- see material.hpp's own Phase
-    // 14e comment on `tint`/`shininess` for the full "why", restated briefly
-    // in-panel below too so the reason is visible to whoever is looking at
-    // this UI, not just whoever reads this source file.
+    // Phase 15f: the diffuse texture is real/live now -- "Browse..." opens a
+    // popup listing every file under assets/textures/ (reusing `assetTree`,
+    // Phase 15d's own already-built forest -- see renderTextureBrowsePopup()
+    // above), and picking one installs a MaterialOverride component
+    // (material_override.hpp) on JUST this entity, never mutating the
+    // shared, cached Model/Material every other entity loading the same
+    // asset path also points at -- see material_override.hpp's own header
+    // comment for the full "per-entity override, not clone-on-edit" design
+    // this sidesteps the shared-cache hazard with. Tint/shininess stay
+    // exactly as read-only as Phase 14e left them, deliberately -- see
+    // material.hpp's own Phase 15f update to its Phase 14e comment for why
+    // (briefly: the identical shared-cache hazard still applies to them, and
+    // this phase's own brief only asks for the texture-assignment slice).
     if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (modelComponent != nullptr && modelComponent->model != nullptr) {
             const Material& material = modelComponent->model->primaryMaterial();
@@ -423,27 +527,55 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
             ImGui::EndDisabled();
             ImGui::Text("Shininess: %.1f", static_cast<double>(material.shininess));
 
-            const Texture& diffuse = material.diffuseTexture();
-            ImGui::TextWrapped("Texture: %s (%dx%d)",
+            // Phase 15f: prefer this entity's own MaterialOverride diffuse
+            // texture, if it has one, over the shared Model's own baked-in
+            // material.diffuseTexture() -- the exact same "override wins if
+            // present, else fall back to the shared Model" rule
+            // resolveDiffuseTextureOverride() (material_override.hpp) applies
+            // at draw time, just read here for DISPLAY instead of for a
+            // texture unit bind.
+            const MaterialOverride* materialOverride = registry.getComponent<MaterialOverride>(id);
+            const bool hasOverride = materialOverride != nullptr && materialOverride->diffuseTexture != nullptr;
+            const Texture& diffuse = hasOverride ? *materialOverride->diffuseTexture : material.diffuseTexture();
+            ImGui::TextWrapped("Texture: %s (%dx%d)%s",
                                 diffuse.path().empty() ? "(unknown)" : diffuse.path().c_str(), diffuse.width(),
-                                diffuse.height());
+                                diffuse.height(), hasOverride ? " [override]" : "");
             ImGui::TextDisabled("Model asset: %s", modelComponent->path.c_str());
 
-            ImGui::BeginDisabled();
-            ImGui::Button("Browse...");
-            ImGui::EndDisabled();
+            if (ImGui::Button("Browse...")) {
+                ImGui::OpenPopup("Choose Diffuse Texture");
+            }
+            renderTextureBrowsePopup(assetTree, textureAssignRequested);
 
-            // See material.hpp's own Phase 14e comment for the full
-            // reasoning: this Model (and therefore this Material) is cached
+            if (hasOverride) {
+                ImGui::SameLine();
+                // Reverts this one entity back to the shared Model's own
+                // material -- removeComponent<MaterialOverride>(), not a
+                // null-out-in-place, so resolveDiffuseTextureOverride()'s own
+                // getComponent() lookup simply finds nothing here again,
+                // exactly like an entity that never had an override at all
+                // (and, per scene_serialization.hpp's own Phase 15f comment,
+                // so the NEXT Save Scene correctly omits this entity's
+                // "materialOverride" block instead of writing a stale one).
+                if (ImGui::Button("Clear Override")) {
+                    registry.removeComponent<MaterialOverride>(id);
+                }
+            }
+
+            // See material.hpp's own Phase 14e comment (updated for Phase
+            // 15f) for the full reasoning on why tint/shininess stay
+            // read-only: this Model (and therefore this Material) is cached
             // and shared across every entity that loaded the same asset
-            // path, so editing it here would silently repaint every other
-            // entity using the same model -- a real footgun, not a
-            // hypothetical one, given "parented_demo_cube" and
-            // "falling_cube" already share assets/models/falling_cube.obj in
-            // this project's own default scene.
+            // path, so editing THOSE two fields here would still silently
+            // repaint every other entity using the same model -- a real
+            // footgun, not a hypothetical one, given "parented_demo_cube"
+            // and "falling_cube" already share assets/models/
+            // falling_cube.obj in this project's own default scene. The
+            // diffuse texture above no longer has that problem -- it goes
+            // through the per-entity MaterialOverride above instead.
             ImGui::TextWrapped(
-                "Read-only: this material is shared by every entity using the same model asset (see "
-                "material.hpp).");
+                "Tint/Shininess are read-only: shared by every entity using the same model asset (see "
+                "material.hpp). Diffuse texture above is a per-entity override -- safe to change.");
         } else {
             ImGui::TextDisabled("No model on this entity.");
         }
@@ -811,7 +943,15 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  std::optional<EntityId>& selectedEntity,
                                                  const SelectionOutline* outline,
                                                  std::optional<EntityId> activeDirectionalLight,
-                                                 bool& saveSceneRequested) {
+                                                 bool& saveSceneRequested,
+                                                 std::optional<std::string>& textureAssignRequested) {
+    // Phase 15f: unconditionally reset at the top of every call, same
+    // "false/empty every frame except the one where the real thing actually
+    // happened" discipline saveSceneRequested (just above, Phase 15e) and
+    // createRequest (below) both already follow -- a click on a popup
+    // Selectable() sets this to a real path; every other frame, including
+    // every frame the popup isn't even open, it stays empty.
+    textureAssignRequested.reset();
     // Phase 15e: this engine's first menu bar -- see this class's own Phase
     // 15e header comment for what/why. ImGui::BeginMainMenuBar() (a real
     // top-level menu bar spanning the whole viewport width, internally
@@ -1038,7 +1178,7 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     ImGui::End();
 
     ImGui::Begin("Inspector");
-    renderInspectorPanel(registry, selectedEntity, activeDirectionalLight);
+    renderInspectorPanel(registry, selectedEntity, activeDirectionalLight, assetTree_, textureAssignRequested);
     ImGui::End();
 
     return createRequest;

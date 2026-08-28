@@ -25,6 +25,7 @@
 #include "engine/ecs.hpp"
 #include "engine/light.hpp"
 #include "engine/log.hpp"
+#include "engine/material_override.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
 #include "engine/physics.hpp"
@@ -118,6 +119,33 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
         if (record.hasCameraComponent) {
             registry.addComponent<CameraComponent>(
                 id, CameraComponent{record.cameraFovYDeg, record.cameraNearPlane, record.cameraFarPlane});
+        }
+
+        // Phase 15f: MaterialOverride round-trips the same independent,
+        // opt-in-per-entity way as RigidBody/Collider/PointLight/
+        // DirectionalLight/CameraComponent above -- see
+        // scene_serialization.hpp's own Phase 15f comment for why this one,
+        // unlike PointLight/DirectionalLight/CameraComponent when THEY were
+        // introduced, round-trips from the very phase it's added rather than
+        // being deferred. Resolved/loaded exactly like modelPath just below
+        // (resolveAssetPath() against the executable's own directory, then
+        // through resources.getTexture() so it shares this engine's one
+        // Texture cache like every other texture load), with the same
+        // "surface which entity's asset reference was bad" re-throw
+        // treatment the modelPath try/catch below already establishes.
+        if (record.hasMaterialOverride) {
+            const std::string resolvedTexturePath = resolveAssetPath(record.materialOverrideDiffuseTexturePath);
+            try {
+                MaterialOverride& materialOverride = registry.addComponent<MaterialOverride>(id, MaterialOverride{});
+                materialOverride.diffuseTexture = resources.getTexture(resolvedTexturePath);
+                materialOverride.diffuseTexturePath = record.materialOverrideDiffuseTexturePath;
+            } catch (const std::exception& e) {
+                LOG_ERROR("loadScene: entity \"" + record.name + "\" failed to load materialOverride texture \"" +
+                           record.materialOverrideDiffuseTexturePath + "\": " + e.what());
+                throw std::runtime_error("loadScene: entity \"" + record.name +
+                                          "\" failed to load materialOverride texture \"" +
+                                          record.materialOverrideDiffuseTexturePath + "\": " + e.what());
+            }
         }
 
         if (record.modelPath.empty()) {
@@ -251,6 +279,20 @@ void saveScene(EntityRegistry& registry, const std::string& path, EntityId activ
             record.cameraFovYDeg = cameraComponent->fovYDeg;
             record.cameraNearPlane = cameraComponent->nearPlane;
             record.cameraFarPlane = cameraComponent->farPlane;
+        }
+
+        // Phase 15f: MaterialOverride round-trips the same way -- only when
+        // diffuseTexture is actually non-null, matching
+        // resolveDiffuseTextureOverride()'s own "null means no override"
+        // contract (material_override.hpp) exactly, so a MaterialOverride
+        // component some future caller added but left empty doesn't
+        // round-trip as a schema-invalid "materialOverride": {} block (see
+        // scene_serialization.hpp's own "Schema" comment on why
+        // "diffuseTexture" is a required field of a present block).
+        const MaterialOverride* materialOverride = registry.getComponent<MaterialOverride>(id);
+        if (materialOverride != nullptr && materialOverride->diffuseTexture != nullptr) {
+            record.hasMaterialOverride = true;
+            record.materialOverrideDiffuseTexturePath = materialOverride->diffuseTexturePath;
         }
 
         // Phase 14b: "parent" round-trips as the OTHER entity's own name

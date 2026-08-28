@@ -286,13 +286,13 @@ Model::Model(const std::string& path, Shader& shader, ResourceManager& resourceM
               std::to_string(materials_.size()) + " material(s))");
 }
 
-void Model::draw(Shader& shader, const glm::mat4& rootTransform, const Frustum* frustum,
-                  CullStats* cullStats) const {
-    drawNode(shader, root_, rootTransform, frustum, cullStats);
+void Model::draw(Shader& shader, const glm::mat4& rootTransform, const Frustum* frustum, CullStats* cullStats,
+                  const Texture* diffuseTextureOverride) const {
+    drawNode(shader, root_, rootTransform, frustum, cullStats, diffuseTextureOverride);
 }
 
 void Model::drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform,
-                      const Frustum* frustum, CullStats* cullStats) const {
+                      const Frustum* frustum, CullStats* cullStats, const Texture* diffuseTextureOverride) const {
     const glm::mat4 worldTransform = parentTransform * node.localTransform;
 
     if (!node.meshIndices.empty()) {
@@ -339,14 +339,39 @@ void Model::drawNode(Shader& shader, const ModelNode& node, const glm::mat4& par
             // uploading those two above is safe -- both live as ordinary
             // uniform state on the shared program object and aren't reset
             // by re-binding the same program.
-            material.bind();
+            //
+            // Phase 15f, scoped by a post-15f bug-review fix:
+            // `diffuseTextureOverride` (nullptr for every entity except the
+            // one, if any, whose MaterialOverride resolved a real texture --
+            // see this method's own model.hpp comment) is passed to
+            // Material::bind() ONLY when `meshIndex` is the exact mesh
+            // primaryMaterial() (model.hpp) itself reads from
+            // (kPrimaryMeshIndex) -- every OTHER mesh in this same node/
+            // subtree draws with `nullptr`, i.e. its own original,
+            // untouched Material, regardless of what
+            // `diffuseTextureOverride` is. The first-pass version of this
+            // forwarded the override unconditionally to every mesh in the
+            // whole node subtree, which is wrong for any multi-mesh Model:
+            // this project's own assets/models/scene.obj (the default
+            // scene's "scene" entity) has 3 meshes/4 materials (Box,
+            // Pyramid, Table), and the Inspector's Material section only
+            // ever shows the user ONE representative sample
+            // (primaryMaterial()) -- assigning a texture there must not
+            // silently retexture the other two meshes the user was never
+            // even shown. kPrimaryMeshIndex is the single shared constant
+            // both this check and primaryMaterial() read, specifically so
+            // "the mesh the override applies to" and "the mesh the
+            // Inspector displays" can never independently drift apart.
+            const Texture* diffuseOverrideForThisMesh =
+                (meshIndex == kPrimaryMeshIndex) ? diffuseTextureOverride : nullptr;
+            material.bind(0, diffuseOverrideForThisMesh);
             meshes_[meshIndex].bind();
             meshes_[meshIndex].draw();
         }
     }
 
     for (const ModelNode& child : node.children) {
-        drawNode(shader, child, worldTransform, frustum, cullStats);
+        drawNode(shader, child, worldTransform, frustum, cullStats, diffuseTextureOverride);
     }
 }
 

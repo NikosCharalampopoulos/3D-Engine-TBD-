@@ -39,6 +39,20 @@
 // fields already made for physics.hpp's RigidBody) -- only scene_loader.cpp
 // turns them into/out of real components.
 //
+// Phase 15f adds one more independently-opt-in block, "materialOverride"
+// (see material_override.hpp for the MaterialOverride component itself),
+// following the exact same pattern once more -- but for a DIFFERENT reason
+// than pointLight/directionalLight/camera were added: those three were
+// deferred from serialization for a phase or two after each component
+// existed, because nothing yet WROTE one through the editor at the time
+// (see light.hpp's own "no scene serialization for a component nothing
+// writes yet" Phase 15a/15b precedent). MaterialOverride is created
+// directly by a live Inspector action (the Material section's "Browse..."
+// button) the SAME phase it's introduced, so leaving it out of this schema
+// would make Save Scene silently discard a user's own just-made edit -- a
+// real, immediately-user-visible regression, not a "nothing exercises this
+// yet" gap. So it round-trips from the start, no deferral.
+//
 // --- Format: why JSON via a vendored single-header library -------------
 // This project has no existing serialization format to reuse, so Phase 8b
 // picks one. CMakeLists.txt already FetchContent's three real dependencies
@@ -124,6 +138,24 @@
 //                                                   // defaulting to
 //                                                   // CameraComponent's own
 //                                                   // struct defaults.
+//       "materialOverride": {                       // optional block (Phase
+//         "diffuseTexture":                          // 15f) -- presence adds
+//           "assets/textures/foo.png"                 // a MaterialOverride
+//       },                                          // component
+//                                                   // (material_override.
+//                                                   // hpp). Unlike every
+//                                                   // other block above,
+//                                                   // "diffuseTexture" is
+//                                                   // REQUIRED, not
+//                                                   // optional, when this
+//                                                   // block is present --
+//                                                   // there is no
+//                                                   // meaningful "empty
+//                                                   // override" default the
+//                                                   // way "rigidBody": {} or
+//                                                   // "pointLight": {} have
+//                                                   // (see "Schema" note
+//                                                   // below).
 //       "parent": "some_other_entity_name"          // optional (Phase 14b)
 //                                                   // -- presence adds a
 //                                                   // Parent component
@@ -142,18 +174,36 @@
 // new named block + a new parse/serialize branch here, not a schema
 // rewrite (Phase 8e's own "rigidBody"/"collider" blocks are exactly that:
 // see physics.hpp for RigidBody/Collider; Phase 15e's own "pointLight"/
-// "directionalLight"/"camera" blocks below are the identical pattern applied
+// "directionalLight"/"camera" blocks below, and Phase 15f's own
+// "materialOverride" block further below, are the identical pattern applied
 // again). "model"/"rigidBody"/"collider"/"pointLight"/"directionalLight"/
-// "camera" are all independently optional blocks (an entity can have any
-// subset of Transform/Model/RigidBody/Collider/PointLight/DirectionalLight/
-// CameraComponent, matching ecs.hpp's "components are opt-in per entity"
-// design) for the same reason -- a RigidBody with no Collider simply never
-// collides with the ground (see physics.hpp's stepPhysics()), a Collider
-// with no RigidBody never moves at all (nothing but stepPhysics() ever reads
-// Collider, and it only visits entities with a RigidBody), and there is no
-// rule at all stopping an entity from combining, say, a Model AND a
+// "camera"/"materialOverride" are all independently optional blocks (an
+// entity can have any subset of Transform/Model/RigidBody/Collider/
+// PointLight/DirectionalLight/CameraComponent/MaterialOverride, matching
+// ecs.hpp's "components are opt-in per entity" design) for the same reason
+// -- a RigidBody with no Collider simply never collides with the ground
+// (see physics.hpp's stepPhysics()), a Collider with no RigidBody never
+// moves at all (nothing but stepPhysics() ever reads Collider, and it only
+// visits entities with a RigidBody), a MaterialOverride with no Model is
+// simply never read by anything (Application::render()'s own ModelComponent
+// draw loop is the only consumer -- see material_override.hpp), and there
+// is no rule at all stopping an entity from combining, say, a Model AND a
 // PointLight (a glowing lamp mesh) even though nothing in this engine's
 // Create menu happens to build one that way today.
+//
+// "materialOverride"'s own "diffuseTexture" field is the one exception to
+// every OTHER block's "every field inside is itself optional, defaulting to
+// the component's own struct default" rule (see e.g. "rigidBody": {} being
+// a valid, at-rest body above): MaterialOverride has no meaningful
+// "default, unset" texture the way PointLight has a meaningful default
+// color/attenuation -- a materialOverride block that named no texture at
+// all would just be a no-op component nothing could usefully resolve (see
+// material_override.hpp's own MaterialOverride comment on why
+// diffuseTexture being null already means "no override"), so
+// parseSceneRecords() requires "diffuseTexture" to be present and a string
+// whenever "materialOverride" itself is present -- an absent block still
+// means "no override at all," but a present, empty block is a schema error
+// here, unlike every has*-gated block above it.
 //
 // Rotation is stored as a quaternion, [w, x, y, z] -- the same order
 // glm::quat's own constructor and Transform::rotation() use (see
@@ -362,6 +412,23 @@ struct SceneEntityRecord {
     float cameraNearPlane = 0.1f;
     float cameraFarPlane = 100.0f;
 
+    // Phase 15f: mirrors the optional "materialOverride" block above --
+    // hasMaterialOverride is false when the entity's JSON had no such block
+    // at all, same has*-flag convention as hasRigidBody/hasPointLight/etc.
+    // Unlike those, there is no matching "default value" for
+    // materialOverrideDiffuseTexturePath to fall back to when the block IS
+    // present -- see this header's own "Schema" comment for why
+    // "diffuseTexture" is a REQUIRED field of a present "materialOverride"
+    // block, not an optional one defaulting to some baseline texture.
+    // Stores the same relative, reloadable string form ModelComponent::path/
+    // MaterialOverride::diffuseTexturePath already use (e.g.
+    // "assets/textures/foo.png"), matching modelPath's own convention just
+    // above -- resolving it to an absolute path and an actual GPU-resident
+    // Texture is scene_loader.cpp's job (ResourceManager-facing), same split
+    // as modelPath itself.
+    bool hasMaterialOverride = false;
+    std::string materialOverrideDiffuseTexturePath;
+
     // Phase 14b: mirrors the optional "parent" field above -- empty when
     // the entity's JSON had no "parent" field at all (matching modelPath's
     // own empty-string "no such block" convention), otherwise the OTHER
@@ -438,6 +505,17 @@ void writeSceneRecords(const std::vector<SceneEntityRecord>& records, const std:
 // CameraComponent (only when hasCameraComponent is true, with fov/near/far
 // from the matching camera* fields) -- all three independently, same
 // opt-in-per-entity treatment RigidBody/Collider already get.
+//
+// Phase 15f: also adds a MaterialOverride component (only when
+// hasMaterialOverride is true) whose diffuseTexture is loaded via
+// resources.getTexture() from materialOverrideDiffuseTexturePath, resolved
+// against the executable's own directory first -- the identical
+// resolveAssetPath()-then-load treatment modelPath itself already gets just
+// below, for the identical "stay portable across machines/checkouts"
+// reason. A texture path that fails to resolve/load is surfaced the same
+// way a bad modelPath is: re-thrown with the offending entity's name/path
+// attached, since a multi-entity scene file needs to say *which* entity's
+// asset reference was bad.
 // `activeDirectionalLightOut`, when non-null, is unconditionally reset to a
 // default-constructed (invalid) EntityId at the top of this call, then set
 // to the freshly-created EntityId of whichever record had
@@ -485,6 +563,19 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
 // parameter here (saveScene() already visits every entity directly, so
 // there's no name-lookup pass needed the way loadScene()'s Parent-component
 // pass has) rather than, say, a second EntityId-to-name lookup step.
+//
+// Phase 15f: also writes a "materialOverride" block for any entity with a
+// MaterialOverride component whose diffuseTexture is non-null (matching
+// resolveDiffuseTextureOverride()'s own material_override.hpp "null means
+// no override" contract -- an entity that once had an override cleared, if
+// a future phase adds a way to do that by nulling the field rather than
+// removeComponent<MaterialOverride>()'ing it outright, is correctly NOT
+// written here either), same opt-in-per-entity treatment as every other
+// block. The block's own "diffuseTexture" field is
+// MaterialOverride::diffuseTexturePath verbatim -- already the portable,
+// relative form this schema needs (see MaterialOverride's own
+// material_override.hpp comment for why that string, not Texture::path(),
+// is what's kept for exactly this purpose).
 //
 // Takes `registry` by non-const reference, not const&, even though this
 // function only reads it: EntityRegistry::each<T>()/pool<T>() (see

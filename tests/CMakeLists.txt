@@ -165,3 +165,23 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME asset_browser_test COMMAND asset_browser_test)
+
+# Phase 15f adds material_override_test, testing
+# engine::resolveDiffuseTextureOverride() (src/material_override.cpp) in
+# isolation -- same "plain executable, links only the pure logic file it's
+# testing" shape as light_test/physics_test above. material_override.cpp
+# depends only on ecs.hpp (header-only, GL-free -- see that header's own
+# comment), so this needs no live GL context/GPU, no Dear ImGui frame, and --
+# per the test's own comment -- no real, GPU-resident Texture either, so this
+# links no GLM/GLFW/GL target at all, the same minimal-dependency shape
+# ecs_test above already has.
+add_executable(material_override_test
+    material_override_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/material_override.cpp
+)
+target_include_directories(material_override_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(material_override_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME material_override_test COMMAND material_override_test)

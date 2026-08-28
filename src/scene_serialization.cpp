@@ -270,6 +270,23 @@ std::vector<SceneEntityRecord> parseSceneRecords(const std::string& path) {
             record.cameraFarPlane = readFloat(cameraJson, "farPlane", record.cameraFarPlane, cameraContext);
         }
 
+        // Phase 15f: "materialOverride" is optional, but -- unlike every
+        // block above it -- its own "diffuseTexture" field is REQUIRED once
+        // the block itself is present, not defaulting to some baseline
+        // texture the way e.g. "pointLight"'s fields default to PointLight's
+        // own struct defaults -- see this file's header's own "Schema"
+        // comment for why there is no meaningful "empty override".
+        if (entityJson.contains("materialOverride")) {
+            const json& materialOverrideJson = entityJson.at("materialOverride");
+            if (!materialOverrideJson.is_object() || !materialOverrideJson.contains("diffuseTexture") ||
+                !materialOverrideJson.at("diffuseTexture").is_string()) {
+                throw std::runtime_error(
+                    context + ": \"materialOverride\" must be an object with a string \"diffuseTexture\" field");
+            }
+            record.hasMaterialOverride = true;
+            record.materialOverrideDiffuseTexturePath = materialOverrideJson.at("diffuseTexture").get<std::string>();
+        }
+
         // Phase 14b: "parent" is a plain string naming another entity in
         // this same file -- see this file's header's own "Parent
         // references" comment for why a name, not a raw EntityId. Whether
@@ -371,6 +388,11 @@ void writeSceneRecords(const std::vector<SceneEntityRecord>& records, const std:
                 {"nearPlane", record.cameraNearPlane},
                 {"farPlane", record.cameraFarPlane},
             };
+        }
+        // Phase 15f: "materialOverride" is written independently of every
+        // other block above, same opt-in-per-entity treatment.
+        if (record.hasMaterialOverride) {
+            entityJson["materialOverride"] = {{"diffuseTexture", record.materialOverrideDiffuseTexturePath}};
         }
         // Phase 14b: "parent" is written independently of every other
         // block, same opt-in-per-entity treatment -- see this file's

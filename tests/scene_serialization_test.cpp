@@ -72,7 +72,9 @@ void expectQuatNear(const glm::quat& actual, const glm::quat& expected, const st
 // entity's "active" marker is deliberately set true here, and a SECOND
 // directionalLight entity (ninth) is added with "active" left false, so the
 // round-trip below can confirm the marker is preserved per-entity, not just
-// "some boolean survived somewhere."
+// "some boolean survived somewhere." A tenth entity (Phase 15f) exercises
+// "materialOverride" together with a "model" block on the same entity -- the
+// real shape a Material-Inspector-assigned override actually appears in.
 std::vector<engine::SceneEntityRecord> makeTestRecords() {
     std::vector<engine::SceneEntityRecord> records;
 
@@ -166,6 +168,20 @@ std::vector<engine::SceneEntityRecord> makeTestRecords() {
     camera.cameraFarPlane = 500.0f;
     records.push_back(camera);
 
+    // Phase 15f: an entity with a "materialOverride" block -- also has a
+    // "model" block (matching the real shape a Material-Inspector-assigned
+    // override actually appears in: an entity always has a ModelComponent
+    // before it can have a texture override at all, see
+    // material_override.hpp's own header comment), so this also exercises
+    // "model" and "materialOverride" round-tripping TOGETHER on one entity,
+    // not just materialOverride in isolation.
+    engine::SceneEntityRecord overriddenCube;
+    overriddenCube.name = "retextured_cube";
+    overriddenCube.modelPath = "assets/models/falling_cube.obj";
+    overriddenCube.hasMaterialOverride = true;
+    overriddenCube.materialOverrideDiffuseTexturePath = "assets/textures/rusted_metal_albedo.png";
+    records.push_back(overriddenCube);
+
     return records;
 }
 
@@ -220,6 +236,13 @@ int main() {
             expectTrue(reloaded[i].cameraFovYDeg == original[i].cameraFovYDeg, tag + ".cameraFovYDeg");
             expectTrue(reloaded[i].cameraNearPlane == original[i].cameraNearPlane, tag + ".cameraNearPlane");
             expectTrue(reloaded[i].cameraFarPlane == original[i].cameraFarPlane, tag + ".cameraFarPlane");
+
+            // Phase 15f: MaterialOverride fields -- same "has* plus every
+            // value" coverage every block above already gets.
+            expectTrue(reloaded[i].hasMaterialOverride == original[i].hasMaterialOverride,
+                       tag + ".hasMaterialOverride");
+            expectTrue(reloaded[i].materialOverrideDiffuseTexturePath == original[i].materialOverrideDiffuseTexturePath,
+                       tag + ".materialOverrideDiffuseTexturePath");
         }
     }
 
@@ -320,6 +343,48 @@ int main() {
     }
     expectTrue(threwForBadCamera, "parseSceneRecords throws when \"camera\" isn't an object");
     std::filesystem::remove(badCameraPath);
+
+    // --- Malformed input: "materialOverride" present but not an object
+    // (Phase 15f) -- same "presence alone sets has*, but the block itself
+    // must actually be an object" contract every block above already
+    // enforces.
+    const std::filesystem::path badMaterialOverrideObjectPath =
+        std::filesystem::temp_directory_path() / "engine_scene_test_bad_material_override_object.json";
+    {
+        std::ofstream badMaterialOverrideObjectFile(badMaterialOverrideObjectPath);
+        // "materialOverride" as a plain number instead of an object.
+        badMaterialOverrideObjectFile << R"({"entities": [{"name": "retextured_cube", "materialOverride": 5}]})";
+    }
+    bool threwForBadMaterialOverrideObject = false;
+    try {
+        engine::parseSceneRecords(badMaterialOverrideObjectPath.string());
+    } catch (const std::exception&) {
+        threwForBadMaterialOverrideObject = true;
+    }
+    expectTrue(threwForBadMaterialOverrideObject, "parseSceneRecords throws when \"materialOverride\" isn't an object");
+    std::filesystem::remove(badMaterialOverrideObjectPath);
+
+    // --- Malformed input: "materialOverride" present but missing its
+    // REQUIRED "diffuseTexture" field (Phase 15f) -- unlike every other
+    // optional block (e.g. "rigidBody": {} is a valid, at-rest body), an
+    // empty "materialOverride": {} is a schema error -- see
+    // scene_serialization.hpp's own "Schema" comment for why there is no
+    // meaningful default to fall back to here.
+    const std::filesystem::path missingDiffuseTexturePath =
+        std::filesystem::temp_directory_path() / "engine_scene_test_missing_diffuse_texture.json";
+    {
+        std::ofstream missingDiffuseTextureFile(missingDiffuseTexturePath);
+        missingDiffuseTextureFile << R"({"entities": [{"name": "retextured_cube", "materialOverride": {}}]})";
+    }
+    bool threwForMissingDiffuseTexture = false;
+    try {
+        engine::parseSceneRecords(missingDiffuseTexturePath.string());
+    } catch (const std::exception&) {
+        threwForMissingDiffuseTexture = true;
+    }
+    expectTrue(threwForMissingDiffuseTexture,
+               "parseSceneRecords throws when \"materialOverride\" is present but missing \"diffuseTexture\"");
+    std::filesystem::remove(missingDiffuseTexturePath);
 
     // --- Malformed input: "parent" names an entity that doesn't exist ----
     // Phase 14b: this is exactly the "validate at this boundary, specific
