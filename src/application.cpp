@@ -23,6 +23,7 @@
 #include <tuple>
 #include <utility>
 
+#include "engine/asset_drop.hpp"
 #include "engine/camera_component.hpp"
 #include "engine/frustum.hpp"
 #include "engine/gl_debug.hpp"
@@ -1174,6 +1175,59 @@ std::pair<std::string, std::string> debugAssignTextureFromEnv() {
     return {raw.substr(0, colon), raw.substr(colon + 1)};
 }
 
+// Phase 15g: ENGINE_DEBUG_DROP_MODEL=<assets/-relative model path>, unset by
+// default -- headless mice don't exist, and Xvfb has no real cursor to drag
+// one with, so this is the debug-env-var counterpart to the Viewport panel's
+// own real "drop a model asset from the Assets panel" drop target
+// (editor_ui.cpp's renderDockspaceShell(), Application::
+// handleViewportAssetDrop() below). Calls the exact same
+// spawnEntityFromDroppedModel() a real drop's own
+// AssetDropCategory::kModel branch calls (application.hpp's own comment on
+// that method has the full design) -- this is the real production entity-
+// creation code path, not a parallel hand-rolled one, the identical
+// precedent ENGINE_DEBUG_CREATE already set for spawnEntityFromCreateMenu().
+// No validation of the path's own shape here (unlike
+// debugAssignTextureFromEnv()'s ':'-split above) -- a single bare path
+// string has nothing to validate the shape OF; whether it actually resolves
+// to a loadable model is spawnEntityFromDroppedModel()'s own try/catch's job,
+// exercised identically whether this env var or a real drop supplied the
+// path.
+std::string debugDropModelFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_DROP_MODEL");
+    if (value == nullptr || *value == '\0') {
+        return {};
+    }
+    return std::string(value);
+}
+
+// Phase 15g: ENGINE_DEBUG_DROP_TEXTURE=<entity name>:<texture path>, unset by
+// default -- the debug-env-var counterpart to the Viewport panel's own real
+// "drop a texture asset onto the currently selected entity" drop target.
+// Same "<name>:<path>", first-':'-splits shape as debugAssignTextureFromEnv()
+// immediately above -- deliberately its own separate env var rather than
+// reusing that one: this exercises a genuinely different trigger path (the
+// Viewport's new BeginDragDropTarget() handling reached through
+// Application::handleViewportAssetDrop()/assignDroppedTextureOverride()
+// below, not the Inspector's "Browse..." popup), even though both
+// ultimately install the identical MaterialOverride component -- the same
+// "two independent triggers, one shared underlying mechanism" relationship
+// ENGINE_DEBUG_CREATE and the real Scene panel's own Create menu already
+// have for spawnEntityFromCreateMenu().
+std::pair<std::string, std::string> debugDropTextureFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_DROP_TEXTURE");
+    if (value == nullptr || *value == '\0') {
+        return {};
+    }
+    const std::string raw(value);
+    const std::size_t colon = raw.find(':');
+    if (colon == std::string::npos) {
+        LOG_WARN("ENGINE_DEBUG_DROP_TEXTURE=\"" + raw +
+                  "\" is missing its ':' separator (expected \"<entity name>:<texture path>\"); ignored");
+        return {};
+    }
+    return {raw.substr(0, colon), raw.substr(colon + 1)};
+}
+
 // Phase 14d: linear search over the NameComponent pool for ENGINE_DEBUG_SELECT's
 // own lookup, above -- this engine's whole scene is a handful of entities
 // (three, see assets/scenes/default.json), so there's no reason for anything
@@ -1732,6 +1786,18 @@ Application::Application(int width, int height, const std::string& title, std::u
         }
     }
 
+    // Phase 15g: ENGINE_DEBUG_DROP_MODEL -- see debugDropModelFromEnv()'s own
+    // comment above for why this exists. Applied right alongside
+    // ENGINE_DEBUG_CREATE immediately above, for the identical reason: before
+    // ENGINE_DEBUG_SELECT below, so one verification run can drop a model AND
+    // see it pre-selected/inspected in the very same screenshot.
+    {
+        const std::string dropModelPath = debugDropModelFromEnv();
+        if (!dropModelPath.empty()) {
+            spawnEntityFromDroppedModel(dropModelPath);
+        }
+    }
+
     // Phase 14d: ENGINE_DEBUG_SELECT -- see that env var's own comment above
     // for why this exists. Resolved once, here, after the scene above has
     // finished populating registry_ (so every entity's NameComponent -- and
@@ -1880,6 +1946,28 @@ Application::Application(int width, int height, const std::string& title, std::u
                 }
             } else {
                 LOG_WARN("ENGINE_DEBUG_ASSIGN_TEXTURE=\"" + assignName + ":" + assignTexturePath +
+                          "\" does not match any entity's name");
+            }
+        }
+    }
+
+    // Phase 15g: ENGINE_DEBUG_DROP_TEXTURE -- see debugDropTextureFromEnv()'s
+    // own comment above for why this exists. Applied right alongside
+    // ENGINE_DEBUG_ASSIGN_TEXTURE immediately above (after DELETE, before
+    // SAVE_SCENE), for the identical reasoning that block's own comment
+    // already gives. Calls the exact same assignDroppedTextureOverride() a
+    // real Viewport texture drop's own AssetDropCategory::kTexture branch
+    // calls (application.hpp's own comment on that method has the full
+    // design) -- this is the real production code path this phase's own
+    // drag-and-drop target uses, not a parallel hand-rolled one.
+    {
+        const auto [dropTexEntityName, dropTexturePath] = debugDropTextureFromEnv();
+        if (!dropTexEntityName.empty()) {
+            const EntityId found = findEntityByName(registry_, dropTexEntityName);
+            if (found.valid()) {
+                assignDroppedTextureOverride(found, dropTexEntityName, dropTexturePath);
+            } else {
+                LOG_WARN("ENGINE_DEBUG_DROP_TEXTURE=\"" + dropTexEntityName + ":" + dropTexturePath +
                           "\" does not match any entity's name");
             }
         }
@@ -3146,9 +3234,14 @@ void Application::render() {
     editorUI_.newFrame();
     bool saveSceneRequested = false;
     std::optional<std::string> textureAssignRequested;
+    // Phase 15g: EditorUI's own new out-parameter -- non-nullopt exactly the
+    // frame a drag from the Assets panel is released over the Viewport's own
+    // ImGui::Image() (see editor_ui.hpp's own Phase 15g comment and this
+    // method's own handling further below).
+    std::optional<std::string> assetDropRequested;
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr,
-        activeDirectionalLight_, saveSceneRequested, textureAssignRequested);
+        activeDirectionalLight_, saveSceneRequested, textureAssignRequested, assetDropRequested);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
     }
@@ -3186,6 +3279,14 @@ void Application::render() {
             LOG_WARN("Inspector: failed to load texture \"" + *textureAssignRequested +
                       "\" for entity " + std::to_string(selectedEntity_->index()) + ": " + std::string(e.what()));
         }
+    }
+    // Phase 15g: the Viewport's own new drop target's real trigger path --
+    // see editor_ui.hpp's own Phase 15g comment for why EditorUI only ever
+    // reports which path was dropped rather than classifying or acting on it
+    // itself, and handleViewportAssetDrop()'s own application.hpp comment for
+    // the full model-vs-texture-vs-unrecognized dispatch this delegates to.
+    if (assetDropRequested.has_value()) {
+        handleViewportAssetDrop(*assetDropRequested);
     }
     renderDebugUI();
     editorUI_.render();
@@ -3272,27 +3373,13 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
             return;
     }
 
-    // Phase 14f: see kCreateEntityDistanceFromCamera/kCreateEntityMinHeight's
-    // own comment above for the exact placement heuristic (in front of the
-    // camera's current facing direction, floored above the ground plane).
-    glm::vec3 spawnPosition = camera_.position() + (camera_.front() * kCreateEntityDistanceFromCamera);
-    spawnPosition.y = std::max(spawnPosition.y, kCreateEntityMinHeight);
+    // Phase 15g: the actual placement/Transform/NameComponent/ModelComponent
+    // construction now lives in spawnPositionedEntity() (application.hpp's
+    // own comment on it has the full "why factored out" reasoning) -- this
+    // call is behavior-identical to what used to be inlined directly here.
+    const EntityId entity =
+        spawnPositionedEntity(baseName, loadPath, storedPath, "via the Scene panel's Create menu");
 
-    const EntityId entity = registry_.create();
-    registry_.addComponent<Transform>(entity).setPosition(spawnPosition);
-    // uniqueEntityName() (this file's own Phase 14f comment) -- "Cube", then
-    // "Cube (1)", "Cube (2)", ... the first time "Cube" is already taken,
-    // exactly the phase brief's own chosen "simple append a counter" scheme
-    // -- not bulletproof-unique, matching this project's own established
-    // Phase 8b tolerance for duplicate NameComponent strings elsewhere, just
-    // good enough that a freshly created entity doesn't read as a confusing
-    // exact-duplicate row in the Scene Hierarchy tree by default.
-    const std::string uniqueName = uniqueEntityName(registry_, baseName);
-    registry_.addComponent<NameComponent>(entity, NameComponent{uniqueName});
-    if (loadPath != nullptr) {
-        registry_.addComponent<ModelComponent>(
-            entity, ModelComponent{resources_.getModel(*loadPath, *shader_), storedPath});
-    }
     // Phase 15a: a freshly Create'd Point Light starts at PointLight{}'s own
     // struct defaults (plain white, the same (1.0, 0.7, 1.8) attenuation
     // profile kPointLights already uses -- see light.hpp's own comment) --
@@ -3329,9 +3416,138 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
     if (kind == CreateEntityKind::kCamera) {
         registry_.addComponent<CameraComponent>(entity, CameraComponent{});
     }
+}
 
-    LOG_INFO("Created entity \"" + uniqueName + "\" (index " + std::to_string(entity.index()) + ") via the Scene "
-              "panel's Create menu");
+// Phase 15g: see this method's own application.hpp comment for the full
+// design (why this was factored out of spawnEntityFromCreateMenu(), and why
+// it deliberately does NOT guard resources_.getModel() with a try/catch --
+// that's each CALLER's own choice, made below and in
+// spawnEntityFromDroppedModel()).
+EntityId Application::spawnPositionedEntity(const std::string& baseName, const std::string* loadPath,
+                                             const std::string& storedPath, const std::string& originDescription) {
+    // Post-15g bug-review fix: resources_.getModel() -- when it's going to
+    // run at all (loadPath != nullptr) -- now runs FIRST, before any
+    // registry_ mutation whatsoever. It used to run last, after
+    // registry_.create()/addComponent<Transform>()/addComponent<NameComponent>()
+    // below, which was fine for spawnEntityFromCreateMenu()'s own three
+    // model-backed kinds (Cube/Sphere/Plane only ever load checked-in,
+    // known-good constants that never actually throw here in practice), but
+    // spawnEntityFromDroppedModel()'s own call site CAN throw (an arbitrary
+    // dropped path can name a real-but-unloadable file, e.g. a model's own
+    // sibling .mtl -- see that method's own comment) -- and its try/catch
+    // wraps this whole function call, with no EntityId back from a still-
+    // in-flight call to clean up after a throw. The result, reproduced
+    // directly by this bug's own review: a failed load left a permanent,
+    // half-built "ghost" entity (a real Transform + NameComponent, no
+    // ModelComponent) stranded in registry_ forever -- selectable, listed as
+    // ordinary Scene Hierarchy clutter, and silently written straight into
+    // the scene file by a later Save Scene, surviving even a reload. Loading
+    // the model first means a throw here happens before registry_.create()
+    // is ever called, so a failed load now leaves registry_ in EXACTLY the
+    // state it was in before this function was entered -- no partial entity,
+    // nothing to clean up, no special-case rollback logic needed anywhere.
+    // Behavior for every existing (never-throwing) caller is unchanged:
+    // reordering when a call that always succeeds happens relative to other
+    // unconditional-success calls has no observable effect.
+    std::shared_ptr<Model> loadedModel;
+    if (loadPath != nullptr) {
+        loadedModel = resources_.getModel(*loadPath, *shader_);
+    }
+
+    // Phase 14f: see kCreateEntityDistanceFromCamera/kCreateEntityMinHeight's
+    // own comment above for the exact placement heuristic (in front of the
+    // camera's current facing direction, floored above the ground plane).
+    glm::vec3 spawnPosition = camera_.position() + (camera_.front() * kCreateEntityDistanceFromCamera);
+    spawnPosition.y = std::max(spawnPosition.y, kCreateEntityMinHeight);
+
+    const EntityId entity = registry_.create();
+    registry_.addComponent<Transform>(entity).setPosition(spawnPosition);
+    // uniqueEntityName() (this file's own Phase 14f comment) -- "Cube", then
+    // "Cube (1)", "Cube (2)", ... the first time "Cube" is already taken,
+    // exactly the phase brief's own chosen "simple append a counter" scheme
+    // -- not bulletproof-unique, matching this project's own established
+    // Phase 8b tolerance for duplicate NameComponent strings elsewhere, just
+    // good enough that a freshly created entity doesn't read as a confusing
+    // exact-duplicate row in the Scene Hierarchy tree by default.
+    const std::string uniqueName = uniqueEntityName(registry_, baseName);
+    registry_.addComponent<NameComponent>(entity, NameComponent{uniqueName});
+    if (loadedModel) {
+        registry_.addComponent<ModelComponent>(entity, ModelComponent{loadedModel, storedPath});
+    }
+
+    LOG_INFO("Created entity \"" + uniqueName + "\" (index " + std::to_string(entity.index()) + ") " +
+              originDescription);
+    return entity;
+}
+
+// Phase 15g: see this method's own application.hpp comment for the full
+// design (why this reuses spawnPositionedEntity() above instead of a second
+// copy of its Transform/NameComponent/ModelComponent-building logic, why
+// placement stays that SAME "in front of camera, floored above ground"
+// heuristic rather than a raycast into the dropped screen position, and why
+// THIS call site -- unlike spawnPositionedEntity()'s own callers in
+// spawnEntityFromCreateMenu() above -- does catch resources_.getModel()'s
+// own exception).
+void Application::spawnEntityFromDroppedModel(const std::string& assetRelativePath) {
+    try {
+        const std::string loadPath = resolveAssetPath(assetRelativePath);
+        spawnPositionedEntity(modelBaseNameFromAssetPath(assetRelativePath), &loadPath, assetRelativePath,
+                               "via a Viewport drag-and-drop of \"" + assetRelativePath + "\"");
+    } catch (const std::exception& e) {
+        LOG_WARN("Viewport drag-and-drop: failed to load model \"" + assetRelativePath +
+                  "\" as an entity: " + std::string(e.what()));
+    }
+}
+
+// Phase 15g: see this method's own application.hpp comment for the full
+// design (why this is a THIRD independent trigger path for the identical
+// MaterialOverride mechanism Phase 15f's Inspector "Browse..." popup and
+// ENGINE_DEBUG_ASSIGN_TEXTURE already install, not a rewrite of either).
+// Mirrors those two sites' own try/catch shape exactly (render()'s
+// textureAssignRequested handling and debugAssignTextureFromEnv()'s own
+// constructor-time block, both above/below) -- resolveAssetPath() right
+// before the GL-touching resources_.getTexture() call, the ORIGINAL relative
+// path stored in diffuseTexturePath so it stays a reloadable reference (see
+// material_override.hpp's own MaterialOverride comment).
+void Application::assignDroppedTextureOverride(EntityId entity, const std::string& entityLabel,
+                                                const std::string& textureAssetPath) {
+    const std::string resolvedTexturePath = resolveAssetPath(textureAssetPath);
+    try {
+        MaterialOverride& materialOverride = registry_.addComponent<MaterialOverride>(entity, MaterialOverride{});
+        materialOverride.diffuseTexture = resources_.getTexture(resolvedTexturePath);
+        materialOverride.diffuseTexturePath = textureAssetPath;
+        LOG_INFO("Viewport drag-and-drop: entity " + entityLabel + " now overrides its diffuse texture with \"" +
+                  textureAssetPath + "\"");
+    } catch (const std::exception& e) {
+        LOG_WARN("Viewport drag-and-drop: failed to load texture \"" + textureAssetPath + "\" for entity " +
+                  entityLabel + ": " + std::string(e.what()));
+    }
+}
+
+// Phase 15g: see this method's own application.hpp comment for the full
+// dispatch contract (which AssetDropCategory does what, and why a texture
+// dropped with nothing selected is a deliberately inert LOG_WARN, never a
+// crash or an implicit guess at a target).
+void Application::handleViewportAssetDrop(const std::string& assetRelativePath) {
+    switch (classifyAssetDropPath(assetRelativePath)) {
+        case AssetDropCategory::kModel:
+            spawnEntityFromDroppedModel(assetRelativePath);
+            break;
+        case AssetDropCategory::kTexture:
+            if (selectedEntity_.has_value()) {
+                assignDroppedTextureOverride(*selectedEntity_, std::to_string(selectedEntity_->index()),
+                                              assetRelativePath);
+            } else {
+                LOG_WARN("Viewport drag-and-drop: a texture (\"" + assetRelativePath +
+                          "\") was dropped with no entity selected to assign it to; ignored");
+            }
+            break;
+        case AssetDropCategory::kUnrecognized:
+        default:
+            LOG_WARN("Viewport drag-and-drop: \"" + assetRelativePath +
+                      "\" is not a recognized model or texture asset path; ignored");
+            break;
+    }
 }
 
 // Phase 15e: Save Scene's real implementation -- see this method's own

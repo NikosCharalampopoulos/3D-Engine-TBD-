@@ -206,6 +206,33 @@
 // clone-on-edit" design this closes the shared-cache hazard with, and
 // editor_ui.cpp's own Phase 15f comment (at renderInspectorPanel()) for the
 // Material section's own updated layout.
+//
+// Phase 15g: the last item in the Phase 15 arc -- real drag-and-drop, the
+// interaction pattern this whole arc's roadmap named from the start
+// (Blender's own primary Asset Browser gesture) and every phase since 15d
+// deliberately deferred (asset_browser.hpp's and material_override.hpp's own
+// "Deliberately not done this phase" lists both name it explicitly). Two
+// changes, built entirely on top of 15d's and 15f's own existing mechanisms,
+// not a new one:
+//   - Every row renderAssetTreeNode() draws (Phase 15d, below) is now also a
+//     real Dear ImGui drag source (ImGui::BeginDragDropSource()/
+//     SetDragDropPayload()), carrying its own assets/-relative path (the
+//     SAME "assets/models/foo.obj"-shaped string ModelComponent::path/
+//     MaterialOverride::diffuseTexturePath already use) as a flat, one-type
+//     payload -- see editor_ui.cpp's own Phase 15g comment (at
+//     renderAssetTreeNode()) for the exact payload shape and why there's no
+//     separate "category" field alongside the path.
+//   - The Viewport panel's ImGui::Image() (Phase 14c) is now also a real
+//     drop target (ImGui::BeginDragDropTarget()/AcceptDragDropPayload()),
+//     reported back via this method's new `assetDropRequested` out-parameter
+//     below -- the identical "EditorUI reports intent, Application acts on
+//     it" shape textureAssignRequested/createRequest/saveSceneRequested
+//     already establish. EditorUI itself does no classification of what was
+//     dropped (model vs. texture vs. something unrecognized) -- that's
+//     engine::classifyAssetDropPath() (asset_drop.hpp), a pure function with
+//     no ImGui dependency at all, called from Application::
+//     handleViewportAssetDrop() (application.cpp) once this value comes back
+//     non-nullopt.
 
 #include <optional>
 #include <string>
@@ -408,10 +435,27 @@ public:
     // a non-nullopt result into a real resources_.getTexture() call and a
     // MaterialOverride component (material_override.hpp) on
     // `selectedEntity`, immediately after this call returns.
+    //
+    // Phase 15g: `assetDropRequested` -- the identical "unconditionally
+    // reset to std::nullopt at the top of every call, set only on the frame
+    // something real happened" shape `textureAssignRequested` immediately
+    // above already established, this time set on the frame a user actually
+    // releases a drag over the Viewport panel's own ImGui::Image() (see this
+    // class's own Phase 15g header comment and editor_ui.cpp's own
+    // renderDockspaceShell() Phase 15g comment for the exact
+    // BeginDragDropTarget()/AcceptDragDropPayload() mechanics). Carries the
+    // SAME assets/-relative path string the Assets panel's own drag source
+    // set as its payload -- EditorUI does not itself decide whether that
+    // path names a model or a texture (see this class's own Phase 15g header
+    // comment for why that decision is a separate, pure function, not
+    // something ImGui-facing code should own); Application::
+    // handleViewportAssetDrop() (application.cpp) is what classifies and
+    // acts on a non-nullopt result, immediately after this call returns.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
                                            std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
-                                           std::optional<std::string>& textureAssignRequested);
+                                           std::optional<std::string>& textureAssignRequested,
+                                           std::optional<std::string>& assetDropRequested);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()

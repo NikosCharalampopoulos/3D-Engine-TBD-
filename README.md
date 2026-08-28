@@ -301,7 +301,9 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        scene_hierarchy.cpp -- Phase 14d, asset_browser.cpp --
                        Phase 15d's buildAssetTree(),
                        material_override.cpp -- Phase 15f's new
-                       resolveDiffuseTextureOverride())
+                       resolveDiffuseTextureOverride(), asset_drop.cpp --
+                       Phase 15g's new classifyAssetDropPath()/
+                       modelBaseNameFromAssetPath())
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -321,7 +323,10 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        material_override -- Phase 15f's new MaterialOverride
                        component/resolveDiffuseTextureOverride(), same
                        "own header, genuinely different kind of thing"
-                       precedent once more)
+                       precedent once more, asset_drop -- Phase 15g's new
+                       AssetDropCategory/classifyAssetDropPath()/
+                       modelBaseNameFromAssetPath(), the pure GL/ImGui-free
+                       half of drag-and-drop)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -354,7 +359,8 @@ tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
                        resolveActiveDirectionalLight() coverage),
                        camera_component_test.cpp (Phase 15c),
                        asset_browser_test.cpp (Phase 15d),
-                       material_override_test.cpp (Phase 15f) + its own
+                       material_override_test.cpp (Phase 15f),
+                       asset_drop_test.cpp (Phase 15g) + its own
                        CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
@@ -5676,6 +5682,425 @@ closes the gap.
      than one mesh) and the fix touches only `drawNode()`'s own per-mesh
      override-forwarding, nothing about `resolveDiffuseTextureOverride()` or
      the ECS/serialization layers the sibling proof exercises.
+
+### Phase 15g: Drag-and-drop
+
+The last item in the Phase 15 arc, and a gap this arc has been explicitly
+naming since Phase 15d first built the Assets panel: no drag-and-drop exists
+anywhere in this engine's UI. Phase 15d's own "Deliberately not done this
+phase" list called it out by name ("Drag-and-drop into the Scene/Viewport...
+no drag-and-drop exists anywhere in this engine's UI today, and building the
+first one as a side effect of an Asset Browser phase would bury a
+substantial new capability inside what should be a read-only browsing
+phase"), and Phase 15f's own list repeated the same forward pointer
+("drag-and-drop (a real, separate, much bigger feature -- Phase 15g, per
+Phase 15d's own already-recorded plan)"). This is that phase: dragging an
+asset from the real, read-only file tree Phase 15d built (`asset_browser.hpp`)
+into the Viewport, the interaction pattern this whole arc's roadmap named
+from the start as Blender's own primary Asset Browser gesture. Built entirely
+on top of two mechanisms that already exist and are left otherwise untouched
+-- Phase 14f's `spawnEntityFromCreateMenu()` for entity creation, and Phase
+15f's `MaterialOverride` component for texture assignment -- not a third,
+parallel way of doing either.
+
+- **Two changes, one shared payload convention.** Every row
+  `renderAssetTreeNode()` draws (`editor_ui.cpp`, Phase 15d) is now also a
+  real Dear ImGui drag source (`ImGui::BeginDragDropSource()`/
+  `SetDragDropPayload()`/`EndDragDropSource()` -- confirmed against the
+  actual vendored `build/_deps/imgui-src/imgui.h`, `v1.92.9b-docking` per
+  `CMakeLists.txt`'s own `GIT_TAG`, rather than assumed from general ImGui
+  knowledge, per this phase's own brief), carrying its own assets/-relative
+  path (`"assets/" + node.relativePath`, the identical
+  `ModelComponent::path`/`MaterialOverride::diffuseTexturePath` string form
+  `renderTextureBrowsePopup()`'s own Phase 15f convention already
+  established) as one flat, null-terminated payload string under a single
+  type tag, `"ASSET_PATH"`. Deliberately uniform across files AND folders --
+  every row, not just leaf files, is a drag source, matching this phase's own
+  brief verbatim -- rather than special-cased per `node.isDirectory`: this
+  function's job is drawing one row, not deciding what a drop of it means
+  downstream. The Viewport panel's `ImGui::Image()` (Phase 14c) is now a
+  matching drop target (`BeginDragDropTarget()`/`AcceptDragDropPayload()`/
+  `EndDragDropTarget()`), reported back through
+  `renderDockspaceShell()`'s new `assetDropRequested` out-parameter -- the
+  identical "EditorUI reports intent, Application acts on it" shape
+  `createRequest`/`textureAssignRequested`/`saveSceneRequested` already
+  establish. EditorUI itself does no classification of what was dropped; see
+  below for why that's a deliberately separate, pure function instead.
+- **Classification is its own small, GL-free pure function, not inline string
+  matching in `editor_ui.cpp` or `application.cpp`.** `asset_drop.hpp`/
+  `asset_drop.cpp` (new) add `classifyAssetDropPath()` (which of
+  `AssetDropCategory::kModel`/`kTexture`/`kUnrecognized` a dropped
+  assets/-relative path names, by top-level folder -- the identical
+  "browsable category = which of assets/models/ or assets/textures/" concept
+  `asset_browser.hpp`'s own allowlist already established, NOT a
+  per-extension check) and `modelBaseNameFromAssetPath()` (the short display
+  name a freshly dropped model's own entity gets, e.g.
+  `"falling_cube.obj"` -> `"falling_cube"`). Both depend on nothing beyond
+  `<string>` -- the same "small, pure, standalone decision" shape
+  `light.hpp`'s `resolveActiveDirectionalLight()`/`collectPointLights()` and
+  `material_override.hpp`'s `resolveDiffuseTextureOverride()` already
+  establish, applied here because Dear ImGui's own payload mechanism carries
+  one flat path string and nothing else -- a real drag has no out-of-band
+  "which action" channel the way each separately-named `ENGINE_DEBUG_*` var
+  below does, so something has to look at the path itself and decide.
+  Classification is by FOLDER, not extension: a model's own sibling `.mtl`
+  file (present in this project's own `assets/models/`, alongside its `.obj`)
+  still classifies as `kModel` -- whether it's actually loadable is a
+  separate, later concern (see the try/catch discussion below), confirmed
+  directly, not just designed for (see Verify).
+- **`Application::spawnPositionedEntity()` -- the Cube/Sphere/Plane
+  placement/Transform/NameComponent/ModelComponent logic, factored out of
+  `spawnEntityFromCreateMenu()`, not duplicated.** This phase's own brief
+  asked for exactly this: reuse `spawnEntityFromCreateMenu()`'s existing
+  model-loading path for an arbitrary dropped path "if you can adapt it...
+  without duplicating its... logic wholesale." `CreateEntityKind` stays a
+  closed enum for the Scene panel's own fixed menu items -- it has no natural
+  slot for an arbitrary path payload -- so the shared logic was pulled into
+  one new private helper, `spawnPositionedEntity(baseName, loadPath,
+  storedPath, originDescription)`, instead: the exact "in front of the
+  camera, floored above the ground" placement heuristic
+  (`kCreateEntityDistanceFromCamera`/`kCreateEntityMinHeight`), the same
+  `uniqueEntityName()`-de-duplicated `NameComponent`, the same optional
+  `ModelComponent` load. `spawnEntityFromCreateMenu()`'s own switch now just
+  picks a `baseName`/`loadPath`/`storedPath` per kind and calls this helper
+  once, then adds whichever kind-specific extra component
+  (`PointLight`/`DirectionalLight`/`CameraComponent`) that kind still needs --
+  behavior for every existing kind is unchanged; only where the logic lives
+  moved. `Application::spawnEntityFromDroppedModel(assetRelativePath)` (new)
+  calls the identical helper for an arbitrary `assets/models/` path.
+- **Placement stays the SAME heuristic, deliberately not a raycast --
+  considered and rejected, not overlooked.** A dropped model is placed the
+  exact same "camera-relative, floored above ground" way Cube/Sphere/Plane
+  already are, not at the actual mouse-cursor position projected into the 3D
+  scene. A real "drop exactly where the mouse points" feature needs genuine
+  ray/scene intersection against the render-to-texture'd Viewport content --
+  this engine has no such machinery at all today (`frustum.hpp`'s
+  `BoundingSphere` culling is a coarse visibility test, not a ray-hit query;
+  building one would mean unprojecting the drop's screen-space position
+  through the camera's inverse view-projection matrix and testing it against
+  every entity's own geometry, a real, separate feature this phase's own
+  "wire up drag-and-drop to what already exists" scope doesn't ask for). The
+  Viewport panel's own one-frame render-to-texture lag (Phase 14c -- this
+  frame's image is sized to the panel's PREVIOUS frame's dimensions) turned
+  out to have no bearing on this decision either way, confirmed by actually
+  reading `renderDockspaceShell()`'s own Viewport body rather than assuming:
+  there is no pixel-position reasoning anywhere in this feature, only "was
+  anything dropped on this panel's `ImGui::Image()` this frame" -- so the lag
+  is simply irrelevant here, not a complication this phase had to work
+  around.
+- **Model drops get their own try/catch; Create-menu kinds still don't --
+  and this asymmetry is load-bearing, not incidental.**
+  `spawnEntityFromCreateMenu()`'s own three model-backed kinds only ever load
+  one of four checked-in, known-good constants
+  (`kCreateCubeModelPath`/etc.), so `spawnPositionedEntity()` itself still
+  does not guard `resources_.getModel()` -- unchanged from before this
+  phase. But a dropped path names an ARBITRARY real file the Asset Browser
+  happened to show, which can include something Assimp cannot import as a
+  scene root at all -- e.g. a model's own sibling `.mtl` file, sitting in the
+  identical `assets/models/` tree as its `.obj`. Reproduced directly, not
+  just anticipated: dropping `assets/models/falling_cube.mtl` without this
+  guard would propagate `Model`'s own `std::runtime_error` all the way out of
+  `render()` uncaught -- the same whole-engine-crash severity Phase 15d's own
+  post-review bug-fix found for an unreadable Asset Browser entry. Fixed by
+  wrapping `spawnEntityFromDroppedModel()`'s own call in a try/catch, LOG_WARN
+  on failure, matching the identical defensive style
+  `ENGINE_DEBUG_ASSIGN_TEXTURE`/the Inspector's own texture "Browse..." pick
+  already use for the equivalent "the asset came from outside this file's own
+  fixed constant list" situation (Phase 15f). See Verify below for the actual
+  repro and confirmation the fix holds.
+- **Texture drops reuse `MaterialOverride` through a THIRD trigger path, not
+  a rewrite of the first two.** `Application::assignDroppedTextureOverride()`
+  (new) does exactly what Phase 15f's Inspector "Browse..." popup handling
+  and `ENGINE_DEBUG_ASSIGN_TEXTURE` already do --
+  `registry_.addComponent<MaterialOverride>()` + `resources_.getTexture()`,
+  wrapped in the identical try/catch/LOG shape -- but is its own function,
+  called by this phase's two new trigger paths (a real Viewport texture drop
+  and its own `ENGINE_DEBUG_DROP_TEXTURE` counterpart) rather than reaching
+  into either of Phase 15f's own two existing call sites. Those stay
+  completely untouched: this is a third, independent trigger for the same
+  underlying mechanism, the identical relationship `ENGINE_DEBUG_CREATE`
+  already has with the real Scene panel's own Create menu for
+  `spawnEntityFromCreateMenu()`. `Model::kPrimaryMeshIndex`'s own scoping fix
+  (Phase 15f's post-review bug fix, `model.cpp`'s `drawNode()`) is untouched
+  by this phase for the same reason it can't be broken by it: this phase
+  never touches `model.cpp`/`drawNode()`/mesh-scoping code at all, only ever
+  adds the same `MaterialOverride` component Phase 15f's own mechanism
+  already resolves correctly per-mesh -- confirmed directly against the
+  multi-mesh `"scene"` entity (Table/Box/Pyramid), not just assumed (see
+  Verify).
+- **`Application::handleViewportAssetDrop()` (new) -- the real dispatcher a
+  drop actually reaches.** Classifies via `classifyAssetDropPath()` and:
+  - `kModel`: always calls `spawnEntityFromDroppedModel()`, regardless of
+    whether an entity happens to already be selected. A model drop ALWAYS
+    creates a new entity, never mutates an existing one -- confirmed directly
+    (see Verify): dropping a model with `falling_cube` selected creates a new
+    entity and leaves `falling_cube`'s own selection/Inspector state
+    completely unaffected.
+  - `kTexture`: calls `assignDroppedTextureOverride()` against
+    `selectedEntity_`, but only if something is actually selected. **The
+    "texture dropped with nothing selected" edge case**: there is nothing to
+    assign it to, so this is a deliberately inert `LOG_WARN` naming the
+    dropped path, not a crash, and not some implicit "guess the nearest
+    entity" behavior this engine has no ray-picking machinery to attempt
+    anyway. The exact branch itself (`handleViewportAssetDrop()`'s own
+    `kTexture`-with-no-selection arm) can only be reached by a genuine mouse
+    drag over the Viewport with nothing selected -- `ENGINE_DEBUG_DROP_TEXTURE`
+    always names an explicit target entity by design (mirroring
+    `ENGINE_DEBUG_ASSIGN_TEXTURE`'s own shape), so it never routes through
+    `selectedEntity_` at all and can't exercise this specific arm headlessly.
+    Verified two ways instead, honestly scoped to what this environment can
+    actually establish (the same "don't assert a result you can't establish"
+    discipline Phase 15d's own root-vs-non-root permission test already
+    modeled): by direct code inspection (the branch is a single `LOG_WARN`
+    call with no GL/registry-mutating statement anywhere near it, so no crash
+    is possible), and by exercising the closest headlessly-reachable
+    equivalent -- `ENGINE_DEBUG_DROP_TEXTURE` naming an entity that does not
+    exist, which takes the identical "no valid assignment target, log and
+    continue" shape and is confirmed clean (see Verify).
+  - `kUnrecognized`: `LOG_WARN`s and does nothing -- reachable in practice
+    only by dragging a bare category folder itself (e.g. `"models"`, or one
+    of `assets/textures/`'s own `skybox`/`hdri` subfolders) rather than a
+    file beneath it, since every row's own payload only ever carries a real
+    path under `assets/models/` or `assets/textures/`.
+- **`ENGINE_DEBUG_DROP_MODEL=<assets/-relative model path>` and
+  `ENGINE_DEBUG_DROP_TEXTURE=<entity name>:<texture path>`
+  (`application.cpp`)**, both unset by default -- this project's own
+  established "a debug env var calls the exact same function the real UI
+  action calls" precedent, applied here because a real mouse drag can't be
+  exercised under Xvfb the way a keyboard-driven env var can.
+  `ENGINE_DEBUG_DROP_MODEL` calls the exact same
+  `spawnEntityFromDroppedModel()` a real model drop's own dispatch branch
+  calls; `ENGINE_DEBUG_DROP_TEXTURE` calls the exact same
+  `assignDroppedTextureOverride()` a real texture drop's own dispatch branch
+  calls. Deliberately their own separate env vars, not reused/overloaded onto
+  `ENGINE_DEBUG_CREATE`/`ENGINE_DEBUG_ASSIGN_TEXTURE` -- each exercises a
+  genuinely different trigger path (this phase's own new Viewport drop
+  target) even though the underlying mechanism each ultimately reaches
+  (`spawnPositionedEntity()`/`MaterialOverride`) is identical to what those
+  older vars already exercise. `ENGINE_DEBUG_DROP_MODEL` is placed
+  immediately alongside `ENGINE_DEBUG_CREATE` (before `ENGINE_DEBUG_SELECT`,
+  so a single run can drop-then-select-and-inspect the new entity);
+  `ENGINE_DEBUG_DROP_TEXTURE` is placed immediately alongside
+  `ENGINE_DEBUG_ASSIGN_TEXTURE` (after `ENGINE_DEBUG_DELETE`, before
+  `ENGINE_DEBUG_SAVE_SCENE`), the identical ordering reasoning each
+  neighboring var's own comment already gives.
+- **Test coverage, matching this project's established "pure logic function,
+  unit-tested in isolation" pattern.** `tests/asset_drop_test.cpp` (new)
+  exercises `classifyAssetDropPath()` (the ordinary model/texture cases;
+  nested subfolders classifying by top-level folder, not depth; a model's
+  own `.mtl` sibling still classifying as `kModel`, folder- not
+  extension-based; a bare category folder with no trailing file correctly
+  falling to `kUnrecognized`; the deliberately-never-browsable
+  `assets/scenes/`/`assets/shaders/` categories; empty/malformed/
+  non-`"assets/"`-rooted input) and `modelBaseNameFromAssetPath()` (ordinary
+  extraction; nested paths; no-extension input; the pathological
+  empty-stem-falls-back-to-`"Model"` case) without a live GL context, a real
+  `ResourceManager`, or a Dear ImGui frame -- `asset_drop.cpp` depends on
+  nothing beyond `<string>`, the identical minimal-dependency shape
+  `asset_browser.cpp` already has for the same reason.
+- **Post-15g bug-review fix: a failed model load from a drop left a
+  permanent "ghost" entity stranded in the registry.** The first-pass
+  `spawnPositionedEntity()` called `resources_.getModel()` LAST -- after
+  `registry_.create()` and both `addComponent<Transform>()`/
+  `addComponent<NameComponent>()` had already run -- exactly mirroring the
+  order the pre-existing Cube/Sphere/Plane code it was factored out of always
+  used. That ordering was harmless for those three callers (they only ever
+  load checked-in, known-good constants that never actually throw), but
+  `spawnEntityFromDroppedModel()`'s own try/catch wraps the WHOLE
+  `spawnPositionedEntity()` call and never gets an `EntityId` back to clean
+  up after a throw partway through it. Reviewer reproduced it directly:
+  `ENGINE_DEBUG_DROP_MODEL="assets/models/falling_cube.mtl"` (a real file the
+  Asset Browser genuinely shows, but not something Assimp can import as a
+  scene root) created a permanent, half-built entity -- a real Transform +
+  NameComponent, no `ModelComponent` -- selectable via `ENGINE_DEBUG_SELECT`,
+  showing up as ordinary Scene Hierarchy clutter, and silently written
+  straight into the scene file by a later Save Scene, surviving even a
+  reload -- silent, permanent data corruption with no error surfaced beyond
+  the original `LOG_WARN`. Fixed by reordering `spawnPositionedEntity()`
+  itself: the (optional) `resources_.getModel()` call now runs FIRST, before
+  `registry_.create()` is ever called, so a throw happens before any registry
+  state exists to leak -- a failed load now leaves `registry_` in EXACTLY the
+  state it was in before the call, no rollback/cleanup logic needed anywhere.
+  Every existing (always-succeeding) caller is behaviorally unaffected, since
+  reordering two calls that can never fail relative to each other has no
+  observable effect -- confirmed directly (see Verify), not just argued for.
+  Not GL-free unit-testable (this is specifically about a real
+  `resources_.getModel()` failure, which needs a live GL context to even
+  construct/fail a `Model`, the same reason Phase 15f's own
+  `kPrimaryMeshIndex` scoping fix used a headless proof instead of a `ctest`
+  case) -- verified via the reviewer's own exact repro instead, both as a
+  log-based proof (no `Created entity` line at all, where one used to appear)
+  and a screenshot of the Scene Entities list (unchanged from the pre-drop
+  baseline) -- see Verify below for both.
+- **Deliberately NOT done this phase**, the same conservative default this
+  whole project's "smallest correct increment" discipline expects every
+  time: **dragging FROM the Scene panel** (reordering/reparenting via drag --
+  a real, separate feature of its own; `renderSceneTreeNode()` gains no new
+  drag source this phase, only `renderAssetTreeNode()` does, and the two
+  panels' tree-rendering functions diverging further this way is exactly the
+  reason `editor_ui.cpp`'s own Phase 15d comment already gave for keeping
+  them two genuinely separate functions rather than one templated helper);
+  **raycast-based "drop exactly where the mouse points in 3D space"
+  placement** (see above -- considered and rejected as real, separate scope,
+  not an oversight); **dragging a model onto an EXISTING entity to
+  merge/replace it** (a model drop always creates a new entity, confirmed
+  directly, never mutates one that's already selected -- see Verify); **any
+  drag source other than the Assets panel's tree rows** (no Scene-panel
+  drag, no OS-level file-manager-to-Viewport drag, neither asked for by this
+  phase's own brief).
+- **Verify**: `cmake --build build -j"$(nproc)"` (clean `rm -rf build &&
+  cmake -B build -S .` rebuild) compiles with **zero warnings** under
+  `-Wall -Wextra` (`asset_drop.cpp`/`asset_drop_test.cpp` included). `ctest`
+  reports **11/11** (`asset_drop_test` new). `tools/run_headless.sh` proof:
+  1. A plain baseline (`ENGINE_MAX_FRAMES=60`, no debug vars), run twice
+     independently, logs the byte-identical clustered-lighting occupancy
+     every Phase 15a-15f baseline already recorded (`2136 -> 2153/2304`
+     clusters occupied, avg `3.565543 -> 3.580121` lights/occupied cluster)
+     and **zero** `[ERROR]` lines across both runs -- direct confirmation
+     this phase's changes are a complete no-op for the normal, no-interaction
+     case, the expected result since neither `classifyAssetDropPath()` nor
+     any of this phase's new `Application::` methods run anywhere near
+     `render()`'s own rendering/lighting pipeline unless a drop/debug var
+     actually fires.
+  2. **The model-drop proof.** `ENGINE_MAX_FRAMES=30 ENGINE_SHOW_DEBUG_UI=1
+     ENGINE_DEBUG_DROP_MODEL="assets/models/sphere.obj"
+     ENGINE_DEBUG_SELECT="sphere"` logs `Created entity "sphere" (index 3)
+     via a Viewport drag-and-drop of "assets/models/sphere.obj"` followed by
+     `ENGINE_DEBUG_SELECT="sphere": pre-selecting entity 3`, zero `[ERROR]`
+     lines. The screenshot's Scene Entities list shows the new `sphere` row
+     alongside `parented_demo_cube`/`scene`/`falling_cube`; the Inspector
+     shows it selected with a real, camera-relative Transform, a `Material`
+     section reading the model's own baked-in `checker.png` texture (no
+     `[override]` -- this is `sphere.obj`'s own material, untouched), and the
+     Viewport shows the new sphere rendered in front of the camera with the
+     dashed selection outline drawn around it -- direct, visual confirmation
+     a dropped model becomes a real, correctly-placed, fully-functional
+     entity, not just a registry-only side effect.
+  3. **The texture-drop proof, reusing Phase 15f's own verification
+     pattern.** `ENGINE_MAX_FRAMES=10 ENGINE_SHOW_DEBUG_UI=1
+     ENGINE_DEBUG_DROP_TEXTURE="falling_cube:assets/textures/
+     rusted_metal_albedo.png" ENGINE_DEBUG_SELECT="falling_cube"` logs
+     `Viewport drag-and-drop: entity falling_cube now overrides its diffuse
+     texture with "assets/textures/rusted_metal_albedo.png"`, zero `[ERROR]`
+     lines. The screenshot's Inspector Material section for `falling_cube`
+     reads `Texture: .../rusted_metal_albedo.png (256x256) [override]`, with
+     a real, enabled "Clear Override" button.
+  4. **The sibling-non-corruption proof, re-run against this new code path
+     specifically** (the exact scenario this phase's own brief called out:
+     "confirm this reaches the same MaterialOverride mechanism without
+     corrupting a sibling"). A SECOND, independent run against the identical
+     `ENGINE_DEBUG_DROP_TEXTURE` but `ENGINE_DEBUG_SELECT="parented_demo_cube"`
+     instead -- the sibling entity loading the IDENTICAL
+     `assets/models/falling_cube.obj` and therefore sharing the exact same
+     cached `Model`/`Material` -- shows that entity's own Material section
+     reading the plain `checker.png (256x256)`, no `[override]` tag, no
+     "Clear Override" button: completely unaffected by the override this
+     run's own `ENGINE_DEBUG_DROP_TEXTURE` assigned to its sibling. Zero
+     `[ERROR]` lines. Confirms Phase 15f's own hazard-closing design holds
+     for this THIRD trigger path exactly as it already did for the first two.
+  5. **The multi-mesh entity sanity check** (`Model::kPrimaryMeshIndex`'s own
+     scoping fix, Phase 15f post-review): `ENGINE_DEBUG_DROP_TEXTURE=
+     "scene:assets/textures/scuffed_plastic_albedo.png"
+     ENGINE_DEBUG_SELECT="scene"` (the 3-mesh/4-material `"scene"` entity)
+     logs the identical `Viewport drag-and-drop: entity scene now overrides
+     its diffuse texture...` line, zero `[ERROR]` lines, and the Inspector
+     reads `scuffed_plastic_albedo.png (256x256) [override]` -- a clean,
+     working assignment via this phase's own new path, exactly as expected
+     given this phase touches nothing in `model.cpp`/`drawNode()`'s own
+     per-mesh scoping at all (only ever adds the same `MaterialOverride`
+     component Phase 15f's own fix already handles correctly). Not a
+     re-run of Phase 15f's own full pixel-diff crop comparison (that proof
+     is about `drawNode()`'s own per-mesh forwarding logic, which this phase
+     never touches, so it cannot regress it) -- this is this phase's own
+     equivalent confirmation that its NEW trigger path reaches the identical,
+     already-fixed mechanism cleanly.
+  6. **The model-drop-with-a-selection proof** (never mutate an existing
+     entity). `ENGINE_MAX_FRAMES=15 ENGINE_SHOW_DEBUG_UI=1
+     ENGINE_DEBUG_SELECT="falling_cube" ENGINE_DEBUG_DROP_MODEL=
+     "assets/models/plane.obj"` logs `Created entity "plane" (index 3) via a
+     Viewport drag-and-drop of "assets/models/plane.obj"` followed by
+     `ENGINE_DEBUG_SELECT="falling_cube": pre-selecting entity 2`, zero
+     `[ERROR]` lines. The screenshot's Scene Entities list shows the new
+     `plane` row added, while the Inspector still shows `falling_cube`
+     selected with its own unaffected Transform/Material (plain
+     `checker.png`, no `[override]`) -- direct confirmation a model drop
+     creates a new entity and leaves whatever was already selected
+     completely untouched, exactly as this phase's own scope requires.
+  7. **Robustness, run and confirmed rather than assumed.**
+     `ENGINE_DEBUG_DROP_TEXTURE="nonexistent_entity:assets/textures/
+     checker.png"` logs a `LOG_WARN` ("does not match any entity's name")
+     and the run completes normally with zero `[ERROR]` lines -- the closest
+     headlessly-reachable equivalent to the "texture dropped with nothing
+     valid to target" edge case discussed above.
+     `ENGINE_DEBUG_DROP_MODEL="assets/models/falling_cube.mtl"` (a real file
+     the Asset Browser genuinely shows, but not something Assimp can import
+     as a scene root) logs `Model`'s own `[ERROR]` ("No suitable reader
+     found for the file format...") followed by this phase's own `LOG_WARN`
+     ("failed to load model... as an entity"), and the run completes
+     normally -- direct, reproduced confirmation of exactly the hazard this
+     phase's own try/catch guard exists to close (see above): without that
+     guard, this exact input crashes the whole engine.
+     `ENGINE_DEBUG_DROP_MODEL="assets/models/does_not_exist.obj"` (a path
+     that doesn't resolve to a real file at all) logs the identical
+     `Model`/this-phase `[ERROR]`/`[WARN]` pair and also completes normally.
+     None of the three crashes or hangs.
+  8. **The post-review ghost-entity fix, verified against the reviewer's own
+     exact repro (`ctest` count unchanged at 11/11 -- this bug and its fix are
+     both about a live `resources_.getModel()` failure, which needs a real GL
+     context, so this is a headless screenshot/log proof, not a new
+     GL-free unit test -- see this phase's own "Post-15g bug-review fix"
+     section above for why).** First, the ORIGINAL pre-fix ordering was
+     temporarily restored and re-run to directly confirm the bug rather than
+     just reason about it: the identical
+     `ENGINE_DEBUG_DROP_MODEL="assets/models/falling_cube.mtl"` command used
+     in item 7 above logged `Model`'s own `[ERROR]` and this phase's own
+     `[WARN]`, exactly as item 7 describes -- but **no `Created entity` line
+     ever appeared, before OR after the fix**, since that `LOG_INFO()` call
+     sits AFTER the (in the pre-fix ordering, throwing)
+     `addComponent<ModelComponent>()` line -- the bug was completely silent
+     in the log, not just under-reported. Adding
+     `ENGINE_DEBUG_SELECT="falling_cube (1)"` to that same pre-fix run,
+     though, resolved successfully (`pre-selecting entity 3`), and the
+     screenshot shows exactly the ghost entity this bug report describes: a
+     real `"falling_cube (1)"` row in the Scene Entities list, selected in
+     the Inspector as `"Empty entity (no model)"` with a live Transform and
+     `"No model on this entity"` -- caught directly, not inferred. The
+     pre-fix ordering was then reverted (restoring the fix committed above)
+     and rebuilt (confirmed identical to the fixed source via `diff` against
+     a saved copy) before any further verification ran. Re-run post-fix: the
+     identical `ENGINE_DEBUG_DROP_MODEL` command still logs the same
+     `Model`/this-phase `[ERROR]`/`[WARN]` pair, and the screenshot's Scene
+     Entities list shows exactly the original three entities
+     (`parented_demo_cube`/`scene`/`falling_cube`) -- no `"falling_cube (1)"`
+     row, no stray fourth entity of any kind. A second, independent run adds
+     `ENGINE_DEBUG_SAVE_SCENE=1` to the same failing drop: `saveScene()`
+     still logs its ordinary `Saved scene to "..."` line, and inspecting the
+     written file directly (not just trusting the log line, the same
+     discipline Phase 15f's own save/reload proof already established) shows
+     exactly three entity records -- `parented_demo_cube`/`scene`/
+     `falling_cube` -- with no fourth, ghost-derived record anywhere in it;
+     the repo's own checked-in `assets/scenes/default.json` is untouched
+     throughout (`git diff -- assets/scenes/default.json` shows nothing),
+     confirmed directly. `ctest` re-run clean (11/11) and a full clean
+     rebuild re-confirmed zero warnings after restoring the fix, so none of
+     this repro-then-revert process left the working tree in a different
+     state than the fix alone would have.
+
+With Phase 15g, the full Phase 15 arc (15a-15g) is now complete: every
+`BeginDisabled()`'d gap Phase 14f's own Create menu and Phase 14e's own
+Material section left behind -- Point Light, Directional Light, Camera, a
+real Asset Browser, Save Scene, material texture assignment, and now
+drag-and-drop -- is real and working. As with the Phase 14 arc before it,
+what differs, deliberately, is how far each sub-phase actually reached:
+15a/15b plugged straight into existing lighting uniforms, 15c added a real
+but inert ECS component nothing downstream reads yet, 15d/15e/15f each
+closed a genuinely new kind of gap (browsing, persistence, per-entity
+material state), and this phase closes the arc by wiring 15d's and 15f's own
+mechanisms together through the one interaction pattern -- drag-and-drop --
+every phase since 15d had already named and deliberately deferred. Each
+phase closed exactly the gap in front of it and named the next one
+explicitly, rather than guessing ahead at scope the engine wasn't ready to
+use.
 
 ## Libraries used and why
 

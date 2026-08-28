@@ -248,6 +248,7 @@ add_executable(engine_app
     src/scene_hierarchy.cpp
     src/asset_browser.cpp
     src/material_override.cpp
+    src/asset_drop.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

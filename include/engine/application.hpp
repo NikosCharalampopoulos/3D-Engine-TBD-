@@ -681,6 +681,16 @@ private:
     // CreateEntityKind::kNone (defensive only -- every real call site above
     // already filters that out before calling this).
     //
+    // Phase 15g note: this whole paragraph's own logic -- placement,
+    // Transform, NameComponent, the optional ModelComponent load -- now
+    // actually lives in one shared helper, spawnPositionedEntity() below,
+    // which this method calls once per switch case before adding whichever
+    // kind-specific extra component (PointLight/DirectionalLight/
+    // CameraComponent) that kind still needs; see that helper's own comment
+    // for why it was factored out (a Viewport model-asset drop needs the
+    // identical logic for an arbitrary path, not one of the four kinds
+    // above). Behavior for every kind here is unchanged by that refactor.
+    //
     // Phase 15a: CreateEntityKind::kPointLight follows the same Transform +
     // NameComponent shape as Empty (no ModelComponent -- this engine has no
     // light-gizmo mesh), plus a freshly addComponent<PointLight>()'d
@@ -717,6 +727,148 @@ private:
     // comes entirely from camera_ below, completely unaffected by creating
     // (or editing, or deleting) any number of Camera entities.
     void spawnEntityFromCreateMenu(CreateEntityKind kind);
+
+    // Phase 15g: factored out of spawnEntityFromCreateMenu() above -- the
+    // "place a new entity a fixed distance in front of camera_'s current
+    // facing direction, floored above the ground plane; give it a
+    // never-colliding NameComponent via uniqueEntityName(); optionally
+    // attach a ModelComponent loaded from a known asset path" logic every
+    // model-backed Create-menu kind (Cube/Sphere/Plane) already needed is
+    // this ONE shared function now, so a Viewport model-asset drop (this
+    // phase's own spawnEntityFromDroppedModel() below) can reuse the
+    // identical placement/Transform/NameComponent/ModelComponent-building
+    // logic for an ARBITRARY assets/models/ path instead of a second,
+    // easily-drifting copy of it -- matching this phase's own brief
+    // verbatim ("reuse spawnEntityFromCreateMenu()'s existing model-loading
+    // path... don't duplicate its Transform/NameComponent/ModelComponent-
+    // building logic wholesale").
+    //
+    // `loadPath` is nullptr for a model-less entity (Empty/Point Light/
+    // Directional Light/Camera -- every kind spawnEntityFromCreateMenu()
+    // itself still adds its own extra component to AFTER this call
+    // returns), else the already-resolveAssetPath()'d absolute path
+    // resources_.getModel() actually loads from; `storedPath` is always the
+    // reloadable assets/-relative form ModelComponent::path/scene
+    // serialization expect (ecs.hpp's own comment) and is ignored when
+    // loadPath is nullptr. `originDescription` is folded into the one
+    // LOG_INFO() line every caller otherwise had to build separately (e.g.
+    // "via the Scene panel's Create menu", "via a Viewport drag-and-drop of
+    // \"...\""), matching what spawnEntityFromCreateMenu()'s own single log
+    // call already said, unchanged, for every kind it builds.
+    //
+    // Deliberately does NOT wrap its own resources_.getModel() call in a
+    // try/catch -- see spawnEntityFromDroppedModel()'s own comment below for
+    // why that guard belongs at THAT call site instead, not here: this
+    // function is reused by both spawnEntityFromCreateMenu()'s own trusted,
+    // checked-in constants (which must keep propagating a load failure
+    // exactly as they always have) and the arbitrary-path drop case (which
+    // must not), so the choice of whether to guard the call has to live with
+    // each caller, not this shared helper.
+    //
+    // Post-15g bug-review fix: resources_.getModel() (when `loadPath` is
+    // non-null) now runs FIRST, before registry_.create() or any component
+    // is added -- NOT last, the way it read before this fix. A throwing
+    // getModel() call used to happen after this function had already built a
+    // real Transform + NameComponent for a brand-new entity, so
+    // spawnEntityFromDroppedModel()'s own try/catch (which wraps this whole
+    // call, and never gets an EntityId back to clean up) left that half-built
+    // entity permanently stranded in registry_ on a failed load -- reproduced
+    // directly: ENGINE_DEBUG_DROP_MODEL pointed at a real, unloadable file
+    // (a model's own sibling .mtl) created a stray, selectable, Save-Scene-
+    // persisted "ghost" entity with no ModelComponent. Loading first means a
+    // throw here happens before registry_ is touched at all, so a failed
+    // load now leaves registry_ in EXACTLY its pre-call state -- no rollback
+    // logic needed. Every existing (always-succeeding) caller is unaffected:
+    // reordering two calls that can never fail relative to each other has no
+    // observable effect.
+    EntityId spawnPositionedEntity(const std::string& baseName, const std::string* loadPath,
+                                    const std::string& storedPath, const std::string& originDescription);
+
+    // Phase 15g: the Viewport's own "drop a model asset" trigger -- called
+    // both from render()'s new asset-drop handling (once
+    // engine::classifyAssetDropPath(), asset_drop.hpp, says a dropped path is
+    // AssetDropCategory::kModel) and directly from the constructor for
+    // ENGINE_DEBUG_DROP_MODEL (application.cpp), the identical "debug env
+    // var calls the exact same production function a real UI/drop action
+    // calls" precedent spawnEntityFromCreateMenu()/ENGINE_DEBUG_CREATE
+    // already established.
+    //
+    // `assetRelativePath` is the SAME "assets/models/foo.obj"-shaped string
+    // AssetTreeNode::relativePath/ModelComponent::path already use. Reuses
+    // spawnPositionedEntity() above for the actual placement/Transform/
+    // NameComponent/ModelComponent construction -- the identical "in front
+    // of the camera, floored above the ground plane" heuristic every
+    // Create-menu model kind already uses, a deliberate simplification: a
+    // real raycast against the actual rendered scene at the mouse's exact
+    // drop position would need genuine ray/scene intersection this engine
+    // has no machinery for at all today (BoundingSphere-only culling,
+    // frustum.hpp, is a coarse visibility test, not a ray-hit query) -- a
+    // real, separate feature of its own, well beyond this phase's own
+    // "wire up drag-and-drop to what already exists" scope.
+    //
+    // Unlike spawnEntityFromCreateMenu()'s own three model-backed kinds
+    // (which only ever load one of four checked-in, known-good constants --
+    // see spawnPositionedEntity()'s own comment above for why THEY never
+    // guard resources_.getModel()), `assetRelativePath` here names an
+    // arbitrary real file the Asset Browser happened to show under
+    // assets/models/ -- which can include something Assimp cannot import as
+    // a scene root at all (this project's own assets/models/*.mtl files,
+    // listed in the identical tree as their own *.obj) -- so THIS function
+    // does catch resources_.getModel()'s own exception and LOG_WARN instead
+    // of letting it propagate, matching every other "the actual asset came
+    // from outside this file's own fixed constant list" call site's
+    // defensive style (the Inspector's own texture "Browse..." pick and
+    // ENGINE_DEBUG_ASSIGN_TEXTURE, both Phase 15f, application.cpp).
+    void spawnEntityFromDroppedModel(const std::string& assetRelativePath);
+
+    // Phase 15g: the Viewport's own "drop a texture asset onto the currently
+    // selected entity" trigger, and ENGINE_DEBUG_DROP_TEXTURE's identical
+    // production-function counterpart -- the same "one shared function, both
+    // a real UI/drop action and its own debug var call it" shape
+    // spawnEntityFromDroppedModel() above just established, applied to
+    // Phase 15f's own MaterialOverride mechanism instead of entity spawning.
+    // Deliberately NOT a call into the Inspector's own Phase 15f
+    // "Browse..." handling (render()'s textureAssignRequested block) or
+    // ENGINE_DEBUG_ASSIGN_TEXTURE's own constructor-time block -- those stay
+    // their own independent, untouched Phase 15f trigger paths for the
+    // identical MaterialOverride component (material_override.hpp); this
+    // phase's drag-and-drop is a THIRD trigger for it, not a rewrite of the
+    // first two, the same way ENGINE_DEBUG_CREATE is a second trigger for
+    // spawnEntityFromCreateMenu() alongside the real Create menu, not a
+    // replacement for it. `entityLabel` is whatever the caller wants logged
+    // to name the target entity (this entity's own index, for a real drop --
+    // render() has no NameComponent-guaranteed string handy at that call
+    // site -- or the debug var's own input name string).
+    void assignDroppedTextureOverride(EntityId entity, const std::string& entityLabel,
+                                       const std::string& textureAssetPath);
+
+    // Phase 15g: the Viewport's own asset-drop dispatcher -- called from
+    // render() whenever editorUI_.renderDockspaceShell()'s new
+    // `assetDropRequested` out-parameter comes back non-nullopt (a drag from
+    // the Assets panel was released over the Viewport's own ImGui::Image()
+    // this frame -- see editor_ui.hpp's own Phase 15g comment). Classifies
+    // `assetRelativePath` via engine::classifyAssetDropPath() (asset_drop.hpp,
+    // a pure function with no ImGui/registry dependency at all -- see that
+    // header's own comment for why classification lives there, not here or
+    // in editor_ui.cpp) and dispatches:
+    //   - AssetDropCategory::kModel: always calls spawnEntityFromDroppedModel()
+    //     above -- a model drop ALWAYS creates a new entity, regardless of
+    //     whether one happens to already be selected (this phase's own
+    //     brief is explicit: a model drop must never mutate an existing
+    //     entity, only ever create a new one).
+    //   - AssetDropCategory::kTexture: calls assignDroppedTextureOverride()
+    //     above against `selectedEntity_`, but ONLY if something is actually
+    //     selected -- a texture dropped with no selection has nothing to
+    //     assign it to, so this LOG_WARNs and does nothing further, the
+    //     documented, deliberately inert answer to that edge case (not a
+    //     crash, and not some implicit "select whatever's nearest" guess
+    //     this engine has no ray-picking machinery to even attempt).
+    //   - AssetDropCategory::kUnrecognized: LOG_WARNs and does nothing --
+    //     reachable in practice only by dragging a bare category folder
+    //     itself (e.g. "models") rather than a file beneath it, since every
+    //     row Assets panel drag source (renderAssetTreeNode(), editor_ui.cpp)
+    //     only ever carries a real assets/models/ or assets/textures/ path.
+    void handleViewportAssetDrop(const std::string& assetRelativePath);
 
     // Phase 15e: Save Scene's real implementation -- calls
     // scene_serialization.hpp's saveScene() against registry_/

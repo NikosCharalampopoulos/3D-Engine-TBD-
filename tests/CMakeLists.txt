@@ -185,3 +185,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME material_override_test COMMAND material_override_test)
+
+# Phase 15g adds asset_drop_test, testing engine::classifyAssetDropPath()/
+# modelBaseNameFromAssetPath() (src/asset_drop.cpp) in isolation -- same
+# "plain executable, links only the pure logic file it's testing" shape as
+# asset_browser_test above. asset_drop.cpp depends on nothing beyond
+# <string> (no ecs.hpp, no GLM, no GL/ImGui at all), so, like
+# asset_browser_test, this needs no engine library dependency beyond the
+# standard library itself.
+add_executable(asset_drop_test
+    asset_drop_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/asset_drop.cpp
+)
+target_include_directories(asset_drop_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(asset_drop_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME asset_drop_test COMMAND asset_drop_test)

@@ -51,6 +51,17 @@ const char* glslVersionString() {
 #endif
 }
 
+// Phase 15g: the Dear ImGui drag-and-drop "type" tag shared between the
+// Assets panel's own drag source (renderAssetTreeNode(), below) and the
+// Viewport panel's own drop target (renderDockspaceShell(), further down) --
+// SetDragDropPayload()/AcceptDragDropPayload()'s own contract (imgui.h) is
+// "must match exactly, at most 32 characters," so this one constant is what
+// keeps the two ends from ever silently drifting apart, the same reason this
+// file already shares fixed popup-id strings ("SceneCreateMenu", "Choose
+// Diffuse Texture") between whatever opens each popup and its own matching
+// Begin*() call.
+constexpr const char* kAssetDragDropPayloadType = "ASSET_PATH";
+
 // Phase 15f: recursively collects every non-directory AssetTreeNode
 // (asset_browser.hpp) reachable under `node` into `out`, in the same
 // directories-before-files/alphabetical order buildAssetTree() already
@@ -199,9 +210,12 @@ void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& sel
 // different types and different owners (Application's selectedEntity_ vs.
 // this class's own selectedAssetPath_ -- see this file's own header comment
 // on why), and the two panels are likely to diverge further once either
-// grows real functionality (e.g. a future drag-and-drop source only the
-// Assets tree would need) -- collapsing them into one generic helper now
-// would buy nothing today at the cost of a genuinely awkward abstraction.
+// grows real functionality -- Phase 15g's own drag-and-drop source below,
+// added only here, not to renderSceneTreeNode(), is exactly that
+// divergence actually happening (see this phase's own README section for
+// why the Scene panel does NOT gain a matching drag source this phase) --
+// collapsing them into one generic helper now would buy nothing today at
+// the cost of a genuinely awkward abstraction.
 void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& selectedAssetPath) {
     ImGui::PushID(node.relativePath.c_str());
 
@@ -233,6 +247,49 @@ void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& 
     if (ImGui::IsItemClicked()) {
         selectedAssetPath = node.relativePath;
     }
+
+    // Phase 15g: every row -- file or folder alike -- is a real Dear ImGui
+    // drag source now, not just files. Attached to the SAME item
+    // TreeNodeEx()/IsItemClicked() above just acted on (BeginDragDropSource()'s
+    // own contract -- imgui.h -- is "call right after submitting the item it
+    // applies to"), so this can't accidentally attach to some other row.
+    // Deliberately uniform across files AND folders rather than special-cased
+    // per node.isDirectory: this function's whole job is drawing one row, not
+    // deciding what a drop of it means downstream -- that classification
+    // (model vs. texture vs. "not a real draggable file at all," which is
+    // exactly what dragging a bare category folder like "models" itself, or
+    // one of assets/textures/'s own skybox/hdri subfolders, produces) is
+    // engine::classifyAssetDropPath() (asset_drop.hpp)'s job alone, run once
+    // a drop actually lands on the Viewport (see this file's own
+    // renderDockspaceShell() Phase 15g comment below) -- keeping that
+    // decision out of this row-drawing function is the same "EditorUI reports
+    // intent, Application decides what it means" split this class already
+    // follows for createRequest/textureAssignRequested.
+    //
+    // The payload itself is one flat, null-terminated path string --
+    // "assets/" + node.relativePath, matching AssetTreeNode::relativePath's
+    // OWN "relative to assets/ itself" convention prefixed the identical way
+    // renderTextureBrowsePopup()'s own "assets/" + file->relativePath already
+    // is (this file's own Phase 15f comment) -- not a small POD struct
+    // bundling path+category+isDirectory: SetDragDropPayload() copies its
+    // `data` argument by raw byte value (imgui.cpp), so anything containing a
+    // std::string/std::vector (owning heap memory) would be unsafe to hand it
+    // this way; a flat char buffer has no such hazard, and the one piece of
+    // information a drop target actually needs -- WHICH asset -- is fully
+    // captured by the path alone (category is re-derived from it, not
+    // shipped alongside it, so there's no second field that could ever drift
+    // out of sync with the path itself).
+    if (ImGui::BeginDragDropSource()) {
+        const std::string payloadPath = "assets/" + node.relativePath;
+        ImGui::SetDragDropPayload(kAssetDragDropPayloadType, payloadPath.c_str(), payloadPath.size() + 1);
+        // The default drag preview tooltip (Dear ImGui's own "..." fallback
+        // -- imgui.h's own BeginDragDropSource() comment) isn't very useful;
+        // this is the identical "just the row's own visible label" preview
+        // pattern imgui_demo.cpp's own drag-and-drop examples use.
+        ImGui::TextUnformatted(node.name.c_str());
+        ImGui::EndDragDropSource();
+    }
+
     if (opened && !node.children.empty()) {
         for (const AssetTreeNode& child : node.children) {
             renderAssetTreeNode(child, selectedAssetPath);
@@ -944,7 +1001,8 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  const SelectionOutline* outline,
                                                  std::optional<EntityId> activeDirectionalLight,
                                                  bool& saveSceneRequested,
-                                                 std::optional<std::string>& textureAssignRequested) {
+                                                 std::optional<std::string>& textureAssignRequested,
+                                                 std::optional<std::string>& assetDropRequested) {
     // Phase 15f: unconditionally reset at the top of every call, same
     // "false/empty every frame except the one where the real thing actually
     // happened" discipline saveSceneRequested (just above, Phase 15e) and
@@ -952,6 +1010,10 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     // Selectable() sets this to a real path; every other frame, including
     // every frame the popup isn't even open, it stays empty.
     textureAssignRequested.reset();
+    // Phase 15g: the identical reset, for the identical reason -- see this
+    // method's own Phase 15g comment further down (at the Viewport's new
+    // BeginDragDropTarget() block) for when this actually becomes non-empty.
+    assetDropRequested.reset();
     // Phase 15e: this engine's first menu bar -- see this class's own Phase
     // 15e header comment for what/why. ImGui::BeginMainMenuBar() (a real
     // top-level menu bar spanning the whole viewport width, internally
@@ -1119,6 +1181,48 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
             // see README.md's Phase 14c section.
             ImGui::Image(static_cast<ImTextureID>(viewportColorTexture), contentRegion, ImVec2(0.0f, 1.0f),
                          ImVec2(1.0f, 0.0f));
+
+            // Phase 15g: the Viewport's own drop target -- attached to the
+            // SAME ImGui::Image() item just submitted above
+            // (BeginDragDropTarget()'s own contract, imgui.h, is identical to
+            // BeginDragDropSource()'s: it targets whatever item was most
+            // recently submitted). Accepts exactly the "ASSET_PATH" payload
+            // renderAssetTreeNode() above now sets on every Assets-panel
+            // row's own drag source -- AcceptDragDropPayload()'s own `type`
+            // argument must match SetDragDropPayload()'s exactly, which is
+            // why both ends share the one kAssetDragDropPayloadType constant
+            // (this file's own top-of-file comment) rather than each hand-
+            // writing "ASSET_PATH" separately where a typo in either copy
+            // would silently mean drops here never fire at all.
+            //
+            // Deliberately just "any drop anywhere on this Image() widget,"
+            // not a raycast into the 3D scene at the actual drop pixel --
+            // this class draws no 3D content of its own to raycast against
+            // (viewportColorTexture is an opaque, already-rendered color
+            // texture by the time it reaches here, see this class's own
+            // Phase 14c comment), and the one-frame render-to-texture lag
+            // that same phase's own comment documents (this frame's image is
+            // sized to the panel's PREVIOUS frame's dimensions) has no
+            // bearing on this feature either way: there is no pixel-position
+            // reasoning happening here at all, only "was anything dropped on
+            // this panel this frame." See application.cpp's own
+            // spawnEntityFromDroppedModel() comment for why an actual
+            // raycast-based drop-exactly-here placement is a deliberately
+            // separate, out-of-scope feature, not an oversight.
+            //
+            // EditorUI does no classification or mutation of its own here --
+            // `payload->Data` is handed straight back out through
+            // `assetDropRequested` verbatim (still just the flat path
+            // string SetDragDropPayload() copied in, reinterpreted back to a
+            // const char*), the same "report intent, let Application decide
+            // and act" shape createRequest/textureAssignRequested already
+            // establish for this exact reason.
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragDropPayloadType)) {
+                    assetDropRequested = std::string(static_cast<const char*>(payload->Data));
+                }
+                ImGui::EndDragDropTarget();
+            }
         }
         // else: nothing rendered into viewportColorTexture yet, or the
         // panel's content region is currently degenerate (0 in some
