@@ -810,7 +810,48 @@ void EditorUI::buildInitialLayout(ImGuiID dockspaceId) {
 CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                                  std::optional<EntityId>& selectedEntity,
                                                  const SelectionOutline* outline,
-                                                 std::optional<EntityId> activeDirectionalLight) {
+                                                 std::optional<EntityId> activeDirectionalLight,
+                                                 bool& saveSceneRequested) {
+    // Phase 15e: this engine's first menu bar -- see this class's own Phase
+    // 15e header comment for what/why. ImGui::BeginMainMenuBar() (a real
+    // top-level menu bar spanning the whole viewport width, internally
+    // implemented via BeginViewportSideBar() -- NOT a menu bar on the
+    // dockspace host window DockSpaceOverViewport() builds just below, which
+    // takes no window_flags parameter to request one through at all) is
+    // called FIRST, before DockSpaceOverViewport(), so its own reservation
+    // of screen space (shrinking ImGui::GetMainViewport()->WorkPos/WorkSize
+    // by the menu bar's height) is already in effect by the time
+    // DockSpaceOverViewport() reads that same viewport's work rect to size
+    // its own host window -- confirmed visually, not just assumed (see this
+    // phase's own README section): the four docked panels start just below
+    // the menu bar rather than underneath/overlapping it. Deliberately
+    // outside the `if (!layoutBuilt_)` guard below -- unlike the dockspace's
+    // own one-time DockBuilder split, a menu bar is ordinary immediate-mode
+    // content that must be resubmitted every single frame like any other
+    // ImGui:: call, the same way every panel's own Begin()/End() pair below
+    // already is.
+    saveSceneRequested = false;
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            // The shortcut string ("Ctrl+S") is display-only -- ImGui
+            // MenuItem() shortcut text is never itself an input binding (see
+            // Dear ImGui's own documentation for MenuItem()); the actual
+            // keyboard shortcut is handled entirely outside this class, in
+            // application.cpp's own run() (see this class's own Phase 15e
+            // header comment for why: a Ctrl+S chord doesn't fit
+            // InputActionMap's existing "OR of alternate single keys"
+            // binding shape). Clicking this item and pressing the real
+            // Ctrl+S chord both end up calling the exact same
+            // Application::saveCurrentScene() either way -- this is just the
+            // second of its two real trigger paths, not a parallel one.
+            if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
+                saveSceneRequested = true;
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+
     // DockSpaceOverViewport() is the built-in "just cover the whole main
     // viewport" helper (creates its own invisible host window internally) --
     // simpler than manually building a host window + ImGui::DockSpace()

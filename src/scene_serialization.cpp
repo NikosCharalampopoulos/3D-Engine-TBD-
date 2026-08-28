@@ -219,6 +219,57 @@ std::vector<SceneEntityRecord> parseSceneRecords(const std::string& path) {
                 readFloat(colliderJson, "halfExtent", record.colliderHalfExtent, context + ".collider");
         }
 
+        // Phase 15e: "pointLight"/"directionalLight"/"camera" are all
+        // independent, optional blocks -- same "presence alone sets has*,
+        // each field inside is itself optional" shape "rigidBody"/"collider"
+        // above already establish (see this file's header's "Schema"
+        // comment).
+        if (entityJson.contains("pointLight")) {
+            const json& pointLightJson = entityJson.at("pointLight");
+            if (!pointLightJson.is_object()) {
+                throw std::runtime_error(context + ": \"pointLight\" must be an object");
+            }
+            record.hasPointLight = true;
+            const std::string pointLightContext = context + ".pointLight";
+            record.pointLightColor = readVec3(pointLightJson, "color", record.pointLightColor, pointLightContext);
+            record.pointLightConstant =
+                readFloat(pointLightJson, "constant", record.pointLightConstant, pointLightContext);
+            record.pointLightLinear = readFloat(pointLightJson, "linear", record.pointLightLinear, pointLightContext);
+            record.pointLightQuadratic =
+                readFloat(pointLightJson, "quadratic", record.pointLightQuadratic, pointLightContext);
+        }
+
+        if (entityJson.contains("directionalLight")) {
+            const json& directionalLightJson = entityJson.at("directionalLight");
+            if (!directionalLightJson.is_object()) {
+                throw std::runtime_error(context + ": \"directionalLight\" must be an object");
+            }
+            record.hasDirectionalLight = true;
+            const std::string directionalLightContext = context + ".directionalLight";
+            record.directionalLightDirection =
+                readVec3(directionalLightJson, "direction", record.directionalLightDirection, directionalLightContext);
+            record.directionalLightColor =
+                readVec3(directionalLightJson, "color", record.directionalLightColor, directionalLightContext);
+            // "active" -- see this file's header's own "Active directional
+            // light" comment. Absent means false (an ordinary, inactive
+            // light), the same "absent means the unremarkable default"
+            // convention every other optional field in this schema follows.
+            record.directionalLightActive =
+                readBool(directionalLightJson, "active", record.directionalLightActive, directionalLightContext);
+        }
+
+        if (entityJson.contains("camera")) {
+            const json& cameraJson = entityJson.at("camera");
+            if (!cameraJson.is_object()) {
+                throw std::runtime_error(context + ": \"camera\" must be an object");
+            }
+            record.hasCameraComponent = true;
+            const std::string cameraContext = context + ".camera";
+            record.cameraFovYDeg = readFloat(cameraJson, "fovYDeg", record.cameraFovYDeg, cameraContext);
+            record.cameraNearPlane = readFloat(cameraJson, "nearPlane", record.cameraNearPlane, cameraContext);
+            record.cameraFarPlane = readFloat(cameraJson, "farPlane", record.cameraFarPlane, cameraContext);
+        }
+
         // Phase 14b: "parent" is a plain string naming another entity in
         // this same file -- see this file's header's own "Parent
         // references" comment for why a name, not a raw EntityId. Whether
@@ -292,6 +343,34 @@ void writeSceneRecords(const std::vector<SceneEntityRecord>& records, const std:
         }
         if (record.hasCollider) {
             entityJson["collider"] = {{"halfExtent", record.colliderHalfExtent}};
+        }
+        // Phase 15e: "pointLight"/"directionalLight"/"camera" are written
+        // independently of each other and of every block above, same
+        // opt-in-per-entity treatment. Every field inside a present block is
+        // written unconditionally (true or false, non-default or not) --
+        // matching "rigidBody"'s own "gravity" field just above, not
+        // omitted-when-default the way the outer has*-gated block itself is.
+        if (record.hasPointLight) {
+            entityJson["pointLight"] = {
+                {"color", writeVec3(record.pointLightColor)},
+                {"constant", record.pointLightConstant},
+                {"linear", record.pointLightLinear},
+                {"quadratic", record.pointLightQuadratic},
+            };
+        }
+        if (record.hasDirectionalLight) {
+            entityJson["directionalLight"] = {
+                {"direction", writeVec3(record.directionalLightDirection)},
+                {"color", writeVec3(record.directionalLightColor)},
+                {"active", record.directionalLightActive},
+            };
+        }
+        if (record.hasCameraComponent) {
+            entityJson["camera"] = {
+                {"fovYDeg", record.cameraFovYDeg},
+                {"nearPlane", record.cameraNearPlane},
+                {"farPlane", record.cameraFarPlane},
+            };
         }
         // Phase 14b: "parent" is written independently of every other
         // block, same opt-in-per-entity treatment -- see this file's

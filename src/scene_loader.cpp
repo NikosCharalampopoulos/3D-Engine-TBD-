@@ -7,6 +7,13 @@
 // tests/scene_serialization_test.cpp can link against the pure half alone
 // -- see scene_serialization.hpp's own header comment for the full
 // rationale.
+//
+// Phase 15e: saveScene() finally gets a real caller (application.cpp's
+// saveCurrentScene(), wired to Ctrl+S / File > Save Scene /
+// ENGINE_DEBUG_SAVE_SCENE), and both functions here gain PointLight/
+// DirectionalLight/CameraComponent support -- see scene_serialization.hpp's
+// own Phase 15e comment for the schema/design, and this file's own new
+// blocks below for the mechanics.
 
 #include "engine/scene_serialization.hpp"
 
@@ -14,7 +21,9 @@
 #include <unordered_map>
 #include <utility>
 
+#include "engine/camera_component.hpp"
 #include "engine/ecs.hpp"
+#include "engine/light.hpp"
 #include "engine/log.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
@@ -25,7 +34,22 @@
 
 namespace engine {
 
-void loadScene(EntityRegistry& registry, const std::string& path, ResourceManager& resources, Shader& shader) {
+void loadScene(EntityRegistry& registry, const std::string& path, ResourceManager& resources, Shader& shader,
+                EntityId* activeDirectionalLightOut) {
+    // Phase 15e: reset up front, unconditionally, before parseSceneRecords()
+    // even runs -- see this function's own scene_serialization.hpp comment
+    // for the full contract. Doing this before the (possibly-throwing)
+    // parse below means a caller whose loadScene() call ends up throwing
+    // still observes a well-defined "no active light" value here rather
+    // than whatever this pointee happened to hold before the call, exactly
+    // the same "leave output state well-defined even on the failure path"
+    // discipline this codebase already applies elsewhere (e.g.
+    // ENGINE_DEBUG_SELECT's own "unmatched name leaves selectedEntity_
+    // unset" handling, application.cpp).
+    if (activeDirectionalLightOut != nullptr) {
+        *activeDirectionalLightOut = EntityId();
+    }
+
     // Propagates parseSceneRecords()'s own exceptions (missing file /
     // invalid JSON / bad schema, including an unresolvable "parent" name)
     // unchanged -- this function has nothing to add to those cases, they're
@@ -67,6 +91,33 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
         }
         if (record.hasCollider) {
             registry.addComponent<Collider>(id, Collider{record.colliderHalfExtent});
+        }
+
+        // Phase 15e: PointLight/DirectionalLight/CameraComponent are added
+        // independently of RigidBody/Collider/each other and of the
+        // modelPath check below -- same opt-in-per-entity treatment (see
+        // scene_serialization.hpp's own "Schema" comment).
+        if (record.hasPointLight) {
+            registry.addComponent<PointLight>(
+                id, PointLight{record.pointLightColor, record.pointLightConstant, record.pointLightLinear,
+                                record.pointLightQuadratic});
+        }
+        if (record.hasDirectionalLight) {
+            registry.addComponent<DirectionalLight>(
+                id, DirectionalLight{record.directionalLightDirection, record.directionalLightColor});
+            // Phase 15e: see scene_serialization.hpp's own "Active
+            // directional light" comment for why the LAST record (in file
+            // order) with directionalLightActive == true wins here, silently
+            // overwriting whatever this pointee held from an earlier record
+            // in this same loop -- the identical "last one wins" tolerance
+            // idByName just above already has for a duplicate "name".
+            if (record.directionalLightActive && activeDirectionalLightOut != nullptr) {
+                *activeDirectionalLightOut = id;
+            }
+        }
+        if (record.hasCameraComponent) {
+            registry.addComponent<CameraComponent>(
+                id, CameraComponent{record.cameraFovYDeg, record.cameraNearPlane, record.cameraFarPlane});
         }
 
         if (record.modelPath.empty()) {
@@ -132,7 +183,7 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
     }
 }
 
-void saveScene(EntityRegistry& registry, const std::string& path) {
+void saveScene(EntityRegistry& registry, const std::string& path, EntityId activeDirectionalLight) {
     std::vector<SceneEntityRecord> records;
 
     // Driven by Transform's pool, not ModelComponent's: every entity this
@@ -167,6 +218,39 @@ void saveScene(EntityRegistry& registry, const std::string& path) {
         if (collider != nullptr) {
             record.hasCollider = true;
             record.colliderHalfExtent = collider->halfExtent;
+        }
+
+        // Phase 15e: PointLight/DirectionalLight/CameraComponent round-trip
+        // the same way RigidBody/Collider do just above -- present only when
+        // the entity actually has that component. DirectionalLight's own
+        // "active" marker is set by comparing this entity's own id against
+        // `activeDirectionalLight` (the caller's current activeDirectionalLight_,
+        // see this function's own scene_serialization.hpp comment) -- an
+        // entity that isn't the active one (including every entity when
+        // `activeDirectionalLight` is the default-constructed invalid
+        // EntityId, i.e. "no active light at all") gets "active": false,
+        // same as DirectionalLight's own default.
+        const PointLight* pointLight = registry.getComponent<PointLight>(id);
+        if (pointLight != nullptr) {
+            record.hasPointLight = true;
+            record.pointLightColor = pointLight->color;
+            record.pointLightConstant = pointLight->constant;
+            record.pointLightLinear = pointLight->linear;
+            record.pointLightQuadratic = pointLight->quadratic;
+        }
+        const DirectionalLight* directionalLight = registry.getComponent<DirectionalLight>(id);
+        if (directionalLight != nullptr) {
+            record.hasDirectionalLight = true;
+            record.directionalLightDirection = directionalLight->direction;
+            record.directionalLightColor = directionalLight->color;
+            record.directionalLightActive = (id == activeDirectionalLight);
+        }
+        const CameraComponent* cameraComponent = registry.getComponent<CameraComponent>(id);
+        if (cameraComponent != nullptr) {
+            record.hasCameraComponent = true;
+            record.cameraFovYDeg = cameraComponent->fovYDeg;
+            record.cameraNearPlane = cameraComponent->nearPlane;
+            record.cameraFarPlane = cameraComponent->farPlane;
         }
 
         // Phase 14b: "parent" round-trips as the OTHER entity's own name

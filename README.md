@@ -288,7 +288,10 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        framebuffer.cpp, skybox.cpp, ibl_probe.cpp,
                        hdri_loader.cpp, compute_shader.cpp,
                        cluster_light_culler.cpp, ssao.cpp,
-                       scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp,
+                       scene_serialization.cpp, scene_loader.cpp -- both
+                       extended Phase 15e with PointLight/DirectionalLight/
+                       CameraComponent (de)serialization and saveScene()'s
+                       first real caller, debug_ui.cpp,
                        input_action_map.cpp, physics.cpp, editor_ui.cpp,
                        light.cpp -- Phase 15a, extended Phase 15b with
                        DirectionalLight/resolveActiveDirectionalLight(),
@@ -300,7 +303,8 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
-                       scene_serialization, debug_ui, input_action_map, physics,
+                       scene_serialization -- extended Phase 15e's schema (see
+                       src/ note above), debug_ui, input_action_map, physics,
                        editor_ui, light -- Phase 15a's new PointLight ECS
                        component, extended Phase 15b with DirectionalLight,
                        camera_component -- Phase 15c's new CameraComponent,
@@ -323,9 +327,13 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        PBR materials), models (scene.obj + scene.mtl,
                        falling_cube.obj + falling_cube.mtl -- Phase 8e's demo
                        object), scenes/default.json -- Phase 8b's serialized
-                       scene (Phase 8e adds its "falling_cube" entity)
+                       scene (Phase 8e adds its "falling_cube" entity; Phase
+                       15e finally gives it a real in-editor writer, though
+                       its own checked-in content is unchanged by this phase)
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
-tests/                 scene_serialization_test.cpp (Phase 8b),
+tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
+                       15e with PointLight/DirectionalLight/CameraComponent
+                       round-trip coverage),
                        input_action_map_test.cpp (Phase 8d),
                        physics_test.cpp (Phase 8e), ecs_test.cpp (Phase 14f),
                        transform_hierarchy_test.cpp (Phase 14b),
@@ -5124,6 +5132,208 @@ of ResourceManager's own three -- Shader excluded for the identical
   collapsed tree rows labeled `models` and `textures` (each with a real
   expand arrow) in place of the old placeholder sentence, docked in its
   original Phase 14a position beneath the Scene panel.
+
+### Phase 15e: Save Scene
+
+Every phase from 8b onward built real, live-editable ECS state -- Transform
+drags (14e), Create-menu entities (14f), Point/Directional Light and Camera
+components (15a-15c) -- and every one of them vanished the instant the
+process exited. `saveScene()` has existed since Phase 8b
+(`scene_serialization.hpp`/`scene_loader.cpp`), but nothing in this engine's
+UI had ever called it: `loadScene()` ran once, at startup, and that was the
+only place scene serialization was ever exercised. This phase closes that
+gap -- comparing this engine against what Blender/Unity treat as completely
+foundational, "save the file" is not an optional editor feature, it is the
+feature that makes every other editing feature in Phase 14/15 worth having
+at all.
+
+- **A real Save action, two trigger paths, one implementation.**
+  `Application::saveCurrentScene()` (`application.cpp`) is the single real
+  production function -- it calls `saveScene(registry_, kDefaultScenePath,
+  activeDirectionalLight_.value_or(EntityId()))` and `LOG_INFO`s the result.
+  Three call sites all reach it, the same "debug env var / UI action both
+  call the exact same function" precedent every `ENGINE_DEBUG_CREATE`/
+  `ENGINE_DEBUG_FORCE_STATIC`/etc. value already established:
+  - **Ctrl+S**, checked once per frame in `run()`. Deliberately NOT routed
+    through `inputActionMap_`/`InputState` the way every other action in
+    this class is (including Escape, which IS routed through
+    `InputActionMap::isDown(InputAction::Quit)` despite reading like a raw
+    key check at first glance) -- `input_action_map.hpp`'s own bindings are
+    an OR of alternate single keys for ONE action (e.g. `MoveUp`'s
+    Space-or-E), never an AND of simultaneous keys, and a chord is exactly
+    what Ctrl+S needs. Widening `InputActionMap` to support chords for this
+    one action would be speculative machinery this codebase's own "smallest
+    correct increment" discipline avoids (the identical instinct
+    `physics.hpp`'s own `RigidBody` mass-field comment applies elsewhere) --
+    there is no second chord anywhere else in this engine to design that
+    abstraction against yet. Save is also, semantically, an editor-chrome
+    action, not one of the six camera/window-lifecycle actions
+    `InputActionMap` actually exists to bind. So this is a small,
+    self-contained, edge-triggered (`ctrlSWasDown_`, `application.hpp`) two-
+    key read directly against `window_.isKeyPressed()` instead -- the exact
+    same public method `input_action_map.cpp`'s own `update()` already calls
+    internally, just invoked here directly rather than through that class.
+  - **File > Save Scene**, this engine's first-ever menu bar
+    (`editor_ui.cpp`'s `renderDockspaceShell()`, via `ImGui::
+    BeginMainMenuBar()`). A bare Ctrl+S with zero on-screen affordance would
+    be genuinely undiscoverable in an editor that had no menu bar of any
+    kind before this phase, so this adds the smallest visible surface that
+    fixes that -- one menu, one item -- not a speculative full
+    File/Edit/View/Window structure this engine has no other actions to
+    populate yet. `renderDockspaceShell()` gains one new `bool&
+    saveSceneRequested` out-parameter (unconditionally reset to `false`,
+    then set `true` only if the item was clicked this frame), mirroring
+    `CreateEntityKind`'s own "EditorUI reports intent, Application acts on
+    it" shape -- EditorUI still owns no `ResourceManager`/`registry_` to
+    save from itself. `ImGui::BeginMainMenuBar()` runs BEFORE
+    `DockSpaceOverViewport()` in the same frame so its own reservation of
+    the main viewport's work area (shrinking `WorkPos`/`WorkSize` by the
+    menu bar's height) is already in effect when `DockSpaceOverViewport()`
+    reads that same rect -- confirmed visually (see Verify below), not just
+    assumed.
+  - **`ENGINE_DEBUG_SAVE_SCENE=1`**, checked last of all the constructor's
+    `ENGINE_DEBUG_*` blocks (after CREATE/SELECT/FORCE_STATIC/
+    FORCE_DYNAMIC/DELETE), the same "reads as the last word" ordering
+    `ENGINE_DEBUG_DELETE`'s own comment already explains -- so one headless
+    run can create/select/force/delete entities and then prove Save Scene
+    persists whatever `registry_` ends up holding by the time the
+    constructor returns.
+- **Schema extension, following the exact existing `rigidBody`/`collider`
+  pattern.** `SceneEntityRecord` (`scene_serialization.hpp`) gains three new
+  independently opt-in blocks -- `pointLight`, `directionalLight`, `camera`
+  -- each with its own `has*` flag and per-field defaults duplicated
+  verbatim from `PointLight{}`/`DirectionalLight{}`/`CameraComponent{}`'s
+  own struct defaults (no `#include` of `light.hpp`/`camera_component.hpp`
+  in this pure-data header, the same "match the literal, don't add the
+  dependency" choice `hasRigidBody`'s fields already made for
+  `physics.hpp`). `parseSceneRecords()`/`writeSceneRecords()`
+  (`scene_serialization.cpp`) parse/write each block with the identical
+  present-means-opt-in, absent-field-means-component-default,
+  present-but-malformed-throws contract every existing block already has,
+  reusing `readVec3`/`readFloat`/`readBool` unchanged. `scene_loader.cpp`'s
+  `loadScene()`/`saveScene()` turn these into/out of real `PointLight`/
+  `DirectionalLight`/`CameraComponent` components, the same opt-in-per-entity
+  treatment `RigidBody`/`Collider` already get.
+- **The active directional light round-trips too, via an in-band marker, not
+  a new top-level field.** A saved-and-reloaded Directional Light entity
+  that was driving `uLightDirection`/`uLightColor` before saving needs to
+  become active again on load, or every save would silently revert the
+  scene to `kLightDirection`/`kLightColor`'s fixed fallback the next time it
+  loads -- exactly the regression this phase exists to prevent. Rather than
+  a new `"activeDirectionalLight": "some_name"` top-level field (which would
+  need its own second-pass name resolution exactly like `"parent"` does, for
+  a value that only ever makes sense attached to an entity that already has
+  a `directionalLight` block), the marker lives IN that block: `"active":
+  true`, defaulting to `false` when absent. `loadScene()` gains an optional
+  `EntityId* activeDirectionalLightOut` parameter -- reset to an invalid
+  `EntityId` up front, then set to whichever record's freshly-created entity
+  had `"active": true` (the LAST such record in file order wins if more than
+  one sets it, the identical "last one wins" tolerance `idByName`'s own
+  duplicate-name handling already has, not a schema error -- every
+  referenced concept unambiguously exists, it's just an authored file with
+  more than one candidate). `Application`'s constructor passes
+  `&loadedActiveDirectionalLight` and assigns `activeDirectionalLight_` from
+  it, so a reloaded active sun is active again with no special-casing
+  anywhere else in `render()`. `saveScene()` gains an `EntityId
+  activeDirectionalLight` parameter (the caller's current
+  `activeDirectionalLight_`, or a default-constructed invalid `EntityId`
+  when there is none) and marks exactly the matching entity's own record
+  `"active": true`, every other `DirectionalLight` entity `false`.
+- **`scene_serialization.hpp` forward-declares `EntityId`** (the same
+  pattern `light.hpp` already established for `resolveActiveDirectionalLight()`)
+  purely for these two new parameters' signatures -- the file still has zero
+  `ecs.hpp`/GL dependency, unchanged from every prior phase.
+- **Deliberately not done this phase** (the same "smallest correct
+  increment" discipline every phase in this arc has followed): **Save As** /
+  a new-file-path dialog -- this engine has no native file-dialog library
+  integrated at all, and picking/vendoring one is real, separate scope of
+  its own. **An "unsaved changes" indicator or prompt-before-quit** -- would
+  need dirty-tracking this engine has nowhere else (no undo/redo either, see
+  below), and ESC/window-close already exit unconditionally; adding a
+  confirmation dialog is a UI feature with its own design questions
+  (modal? which panel owns it?) this phase doesn't need to answer to close
+  its own actual gap. **Auto-save.** **Undo/redo.** **Multiple scene files /
+  a scene-switching UI** -- Save always targets the one file this process
+  loaded from (`kDefaultScenePath`, `assets/scenes/default.json` today,
+  matching `loadScene()`'s own hardcoded call site since Phase 8b); there is
+  still exactly one scene file this engine ever reads or writes.
+- **Verify**: a rebuild (`cmake --build build -j`) compiles with **zero new
+  warnings** under `-Wall -Wextra`. `ctest` reports **9/9**
+  (`scene_serialization_test` extended with a Point Light entity, an active
+  Directional Light entity, an inactive second Directional Light entity, and
+  a Camera entity, each with every field deliberately set to a non-default
+  value and round-tripped write-then-read exactly). The real, literal
+  save-then-reload proof (`tools/run_headless.sh`, restoring
+  `assets/scenes/default.json` to its original committed content between
+  every step so the repo's own checked-in baseline stays untouched):
+  1. `ENGINE_MAX_FRAMES=60 ENGINE_DEBUG_CREATE=pointlight
+     ENGINE_DEBUG_SELECT="Point Light" ENGINE_DEBUG_SAVE_SCENE=1` logs
+     `Created entity "Point Light" (index 3) via the Scene panel's Create
+     menu` followed by `Saved scene to
+     ".../build/assets/scenes/default.json"`, zero `[ERROR]` lines.
+     Inspecting the written file directly (`cat`, not just trusting the log
+     line) shows a fourth `entities[]` object, `"name": "Point Light"`, with
+     a real `"pointLight"` block (`"color": [1.0, 1.0, 1.0], "constant":
+     1.0, "linear": 0.699999988079071, "quadratic": 1.7999999523162842]` --
+     `PointLight{}`'s own defaults) and a `"transform"` block whose position
+     matches the Create-menu's own in-front-of-camera placement heuristic.
+  2. A SECOND, wholly independent run -- no `ENGINE_DEBUG_CREATE`/
+     `ENGINE_DEBUG_SAVE_SCENE` at all, just `ENGINE_MAX_FRAMES=60
+     ENGINE_SHOW_DEBUG_UI=1 ENGINE_DEBUG_SELECT="Point Light"` against the
+     now-modified file -- logs `ENGINE_DEBUG_SELECT="Point Light":
+     pre-selecting entity 3` (proof `findEntityByName()` found it, i.e. it
+     really was reconstructed from the file, not left over from the first
+     process) and clustered-lighting occupancy matching the first run's own
+     post-creation reading exactly (2153/2304 clusters occupied, avg
+     4.436600 lights/occupied cluster, vs. 2136/2304 before the light
+     existed) -- the identical "the new light is really reaching the
+     cluster culler" proof Phase 15a's own Verify section used, now
+     achieved from a save/reload round trip instead of same-process
+     creation. Zero `[ERROR]` lines. The screenshot shows the Scene Entities
+     list including `Point Light` alongside `parented_demo_cube`/`scene`/
+     `falling_cube`, the Inspector showing it selected with a live Transform
+     matching the saved position and a "Light" section, and the same bright
+     hotspot in the Viewport the original creation produced.
+  3. The same create-save-reload cycle repeated for `directionallight`
+     (`ENGINE_DEBUG_CREATE=directionallight ENGINE_DEBUG_SAVE_SCENE=1`) --
+     the saved file's `"directionalLight"` block reads `"active": true`
+     verbatim. The independent reload run's screenshot differs from the
+     plain baseline by 124,559 of 480,000 pixels (`compare -metric AE`) --
+     a real, large, unmistakable lighting change, not noise -- direct proof
+     `resolveActiveDirectionalLight()` picked the reloaded entity back up as
+     active rather than silently falling back to `kLightDirection`/
+     `kLightColor`. And for `camera` (`ENGINE_DEBUG_CREATE=camera
+     ENGINE_DEBUG_SAVE_SCENE=1`) -- the saved file's `"camera"` block reads
+     `{"farPlane": 100.0, "fovYDeg": 60.0, "nearPlane":
+     0.10000000149011612}`, `CameraComponent{}`'s own defaults verbatim.
+  4. After every inspection step above, `assets/scenes/default.json` was
+     restored to its original committed content (`git checkout --`) before
+     the next step ran; `git diff -- assets/scenes/default.json` shows
+     nothing at the end.
+  5. A plain baseline (`ENGINE_MAX_FRAMES=60`, no debug env vars) against
+     the restored `default.json` logs clustered-lighting occupancy 2136 ->
+     2153/2304 clusters occupied, avg 3.565543 -> 3.580121 lights/occupied
+     cluster, deterministic and reproducible across repeated runs (not
+     noise) -- close to, but not byte-identical with, Phase 15a-15d's own
+     recorded 2136 -> 2155/2304, avg ... -> 3.581903 baseline. Tracked down,
+     not shrugged off: this phase's own new menu bar reserves screen space
+     at the top of the main viewport (`ImGui::BeginMainMenuBar()`'s own
+     `WorkPos`/`WorkSize` adjustment, see above), so the Viewport panel's
+     reported content region shrinks from Phase 15d's own logged `431x565`
+     to this phase's `431x546` -- 19 fewer pixels tall, the menu bar's own
+     height. That one-frame-late aspect-ratio nudge (`viewportWidth_`/
+     `viewportHeight_`, see `editor_ui.hpp`'s own comment on why viewport
+     sizing is always one frame stale) is enough to shift a couple of
+     cluster boundaries in `ClusterLightCuller`'s per-frame AABB rebuild --
+     2 clusters out of 2304 (0.09%) and a correspondingly tiny shift in the
+     average. This is an expected, deliberate consequence of adding visible
+     UI chrome, not a regression in the lighting/physics/scene-loading code
+     this phase actually touches (which is otherwise a complete no-op for
+     `assets/scenes/default.json`'s own three pre-existing entities -- none
+     of them has a `pointLight`/`directionalLight`/`camera` block, so every
+     new `if (record.has...)` branch this phase added is simply never taken
+     for them). Frustum culling still reads `1/14 -> 0/14` drawables culled,
+     matching Phase 15c/15d's own recorded baseline exactly.
 
 ## Libraries used and why
 

@@ -175,6 +175,23 @@
 // highlighted" concern local to this one panel, with none of
 // selectedEntity's cross-panel/cross-frame reasons (application.hpp's own
 // Phase 14d comment) to live on Application instead.
+//
+// Phase 15e: this class submits this engine's first-ever menu bar (see
+// renderDockspaceShell()'s own .cpp comment for the mechanics) -- a single
+// "File" menu holding one item, "Save Scene" (shortcut hint "Ctrl+S", though
+// the actual keyboard shortcut itself is handled entirely outside this
+// class -- see application.cpp's own Phase 15e comment on run() for why).
+// Deliberately just this one item, not a speculative full File/Edit/View/
+// Window menu structure this project's own established "smallest correct
+// increment" discipline would flag as premature (see e.g. physics.hpp's own
+// RigidBody mass-field comment, or light.hpp's own "no scene serialization
+// for a component nothing writes yet" Phase 15a/15b precedent, for the
+// identical instinct applied elsewhere): a bare Ctrl+S with no on-screen
+// affordance at all would be genuinely undiscoverable in an editor with no
+// prior menu bar of any kind, so this phase adds the smallest visible
+// surface that fixes that -- one menu, one item -- rather than either
+// nothing (undiscoverable) or a full menu bar's worth of items this engine
+// has no other actions to put there yet.
 
 #include <optional>
 #include <string>
@@ -344,9 +361,30 @@ public:
     // reference parameter: EditorUI never assigns Application's
     // activeDirectionalLight_ itself, only displays it, so there is nothing
     // for a reference to let this function write back.
+    //
+    // Phase 15e: `saveSceneRequested` -- unconditionally set to false at the
+    // top of every call, then true only if this frame's new File > Save
+    // Scene menu item (see this class's own Phase 15e header comment) was
+    // clicked. A read/write reference, not folded into CreateEntityKind's
+    // own return value the way "what was just requested" might first
+    // suggest: CreateEntityKind is specifically "which kind of entity to
+    // create" (a closed, mutually-exclusive choice -- exactly one item in
+    // one popup menu can be clicked in a single frame), and Save Scene is a
+    // wholly separate action a user could in principle trigger the SAME
+    // frame as a Create click (unlikely with a mouse, but there's no reason
+    // to bake in an assumption that can't happen) -- so it gets its own
+    // independent out-parameter instead of an awkward "and also maybe
+    // kSaveScene" case bolted onto an enum whose name and existing five
+    // values are all specifically about entity creation. EditorUI still
+    // never performs the save itself here (no ResourceManager/registry_
+    // owned by this class to build one from, the same "just a Dear ImGui
+    // wrapper" reasoning `createRequest`'s own comment above already gives)
+    // -- Application::render() is what actually calls saveCurrentScene()
+    // when this comes back true, immediately after this call returns.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
-                                           std::optional<EntityId> activeDirectionalLight);
+                                           std::optional<EntityId> activeDirectionalLight,
+                                           bool& saveSceneRequested);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()

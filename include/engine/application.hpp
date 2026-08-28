@@ -718,6 +718,35 @@ private:
     // (or editing, or deleting) any number of Camera entities.
     void spawnEntityFromCreateMenu(CreateEntityKind kind);
 
+    // Phase 15e: Save Scene's real implementation -- calls
+    // scene_serialization.hpp's saveScene() against registry_/
+    // kDefaultScenePath/activeDirectionalLight_ and LOG_INFOs the result, so
+    // every real call site (Ctrl+S in run(), the File > Save Scene menu item
+    // in render(), and ENGINE_DEBUG_SAVE_SCENE in the constructor) shares one
+    // real production code path instead of three parallel hand-rolled ones
+    // -- the same "debug env var / UI action both call the exact same
+    // function" precedent spawnEntityFromCreateMenu() above already
+    // establishes for ENGINE_DEBUG_CREATE. Always saves to kDefaultScenePath
+    // -- the same file this process loaded from at startup (unless
+    // ENGINE_LEGACY_SCENE was set, in which case this still writes
+    // kDefaultScenePath, creating it fresh from whatever registry_ holds; see
+    // this method's own application.cpp definition for why that's fine, not
+    // a bug). A "Save As" to a different path is out of this phase's own
+    // scope (see README.md's Phase 15e section) -- this engine has no native
+    // file-dialog library integrated to build one with yet.
+    //
+    // Does NOT catch saveScene()'s own std::runtime_error on a write failure
+    // (e.g. a read-only filesystem) -- left to propagate exactly the way
+    // every other exception in this codebase does when nothing downstream
+    // is equipped to recover from it (this method's own call sites are no
+    // more able to meaningfully handle "the disk write failed" than
+    // spawnEntityFromCreateMenu()'s own unguarded resources_.getModel() call
+    // is able to handle "the model failed to load" -- see that method's own
+    // comment above): this run ends with a clear LOG_ERROR'd reason (from
+    // saveScene() itself) rather than silently reporting success it didn't
+    // actually achieve.
+    void saveCurrentScene();
+
     // Phase 9: one sphere in the PBR test-grid -- its own placement
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
     // differ per instance; the mesh geometry itself, sphereMesh_, is shared
@@ -1193,6 +1222,28 @@ private:
     // kLightDirection/kLightColor the very next frame, with no explicit
     // cleanup required.
     std::optional<EntityId> activeDirectionalLight_;
+
+    // Phase 15e: edge-triggered state for the Ctrl+S "Save Scene" keyboard
+    // shortcut -- true whenever run()'s own most recent poll found BOTH a
+    // Ctrl key and S held down together (and ImGui didn't want the
+    // keyboard that poll -- see run()'s own post-15e-review comment on why
+    // this shortcut is gated on !ImGui::GetIO().WantCaptureKeyboard, unlike
+    // escapePressed/InputState's own fields, a separate pre-existing gap
+    // this member's own gating doesn't attempt to close). See run()'s own
+    // definition for why this check is a small, self-contained direct
+    // window_.isKeyPressed() read rather than routed through
+    // inputActionMap_/InputState the way every other keybinding in this
+    // class is (input_action_map.hpp's own bindings are an OR of alternate
+    // single keys for ONE action, not an AND of simultaneous keys -- a
+    // chord needs the latter, a shape nothing else in this engine needs
+    // yet). Compared against each new poll's own result so
+    // saveCurrentScene() fires exactly once per physical Ctrl+S press, not
+    // every frame the chord happens to still be held -- the identical
+    // edge-triggering reason InputActionMap::justPressed()/
+    // toggleDebugUIPressed already need for InputAction::ToggleDebugUI (see
+    // input.hpp's own comment), just implemented directly here instead of
+    // through that class.
+    bool ctrlSWasDown_ = false;
 };
 
 }  // namespace engine

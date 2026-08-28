@@ -1112,6 +1112,24 @@ std::string debugDeleteEntityNameFromEnv() {
     return value != nullptr ? std::string(value) : std::string();
 }
 
+// Phase 15e: ENGINE_DEBUG_SAVE_SCENE=1, unset by default -- same plain
+// on/off getenv-gated-behavior shape as ENGINE_SHOW_DEBUG_UI/
+// ENGINE_LEGACY_SCENE above (not a value-carrying var like
+// ENGINE_DEBUG_SELECT/_CREATE/_DELETE, since there is nothing to name --
+// Save Scene always saves everything in registry_ to the one
+// kDefaultScenePath). Exists specifically so a headless run -- no real
+// Ctrl+S or File > Save Scene mouse click under Xvfb -- can prove a save
+// actually happened, by calling the exact same Application::
+// saveCurrentScene() a real keypress/menu click calls (the same "debug env
+// var calls the real function the UI calls" precedent every other
+// ENGINE_DEBUG_* var above already established). See README.md's own Phase
+// 15e Verify section for the full save-then-reload proof this makes
+// possible without a real keyboard.
+bool debugSaveSceneFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_SAVE_SCENE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 // Phase 14d: linear search over the NameComponent pool for ENGINE_DEBUG_SELECT's
 // own lookup, above -- this engine's whole scene is a handful of entities
 // (three, see assets/scenes/default.json), so there's no reason for anything
@@ -1634,7 +1652,21 @@ Application::Application(int width, int height, const std::string& title, std::u
         registry_.addComponent<ModelComponent>(
             sceneEntity, ModelComponent{resources_.getModel(kScenePath, *shader_), "assets/models/scene.obj"});
     } else {
-        loadScene(registry_, kDefaultScenePath, resources_, *shader_);
+        // Phase 15e: `loadedActiveDirectionalLight` is loadScene()'s own
+        // out-parameter (see scene_serialization.hpp's own "Active
+        // directional light" comment) -- an invalid EntityId means the file
+        // had no DirectionalLight record with "active": true (every scene
+        // before this phase, including the one shipped in
+        // assets/scenes/default.json today), which correctly leaves
+        // activeDirectionalLight_ at its own std::nullopt default below,
+        // exactly matching this phase's own "a scene with zero Directional
+        // Light entities renders exactly as it did before Phase 15b"
+        // baseline (see this class's own activeDirectionalLight_ comment).
+        EntityId loadedActiveDirectionalLight;
+        loadScene(registry_, kDefaultScenePath, resources_, *shader_, &loadedActiveDirectionalLight);
+        if (loadedActiveDirectionalLight.valid()) {
+            activeDirectionalLight_ = loadedActiveDirectionalLight;
+        }
     }
 
     // Phase 14f: ENGINE_DEBUG_CREATE -- see debugCreateEntityKindFromEnv()'s
@@ -1767,6 +1799,20 @@ Application::Application(int width, int height, const std::string& title, std::u
                 LOG_WARN("ENGINE_DEBUG_DELETE=\"" + debugDeleteName + "\" does not match any entity's name");
             }
         }
+    }
+
+    // Phase 15e: ENGINE_DEBUG_SAVE_SCENE -- see debugSaveSceneFromEnv()'s own
+    // comment above for why this exists. Applied last of all this
+    // constructor's ENGINE_DEBUG_* blocks (after CREATE/SELECT/
+    // FORCE_STATIC/FORCE_DYNAMIC/DELETE above), the same "reads as the last
+    // word" ordering ENGINE_DEBUG_DELETE's own comment already explains --
+    // so a single headless run can create/select/force/delete entities and
+    // then prove Save Scene actually persists whatever registry_ ends up
+    // holding by the time this constructor returns, all in one process.
+    // Calls the exact same saveCurrentScene() a real Ctrl+S press or File >
+    // Save Scene click calls.
+    if (debugSaveSceneFromEnv()) {
+        saveCurrentScene();
     }
 
     // Phase 9 bug-review composition fix: two single-axis rows instead of a
@@ -3003,11 +3049,19 @@ void Application::render() {
     // would also still make it into this frame's already-submitted Scene
     // tree/already-finished 3D pass.
     editorUI_.newFrame();
+    bool saveSceneRequested = false;
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr,
-        activeDirectionalLight_);
+        activeDirectionalLight_, saveSceneRequested);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
+    }
+    // Phase 15e: the File > Save Scene menu item's own second trigger path
+    // (alongside run()'s own Ctrl+S check) -- see editor_ui.hpp/.cpp's own
+    // Phase 15e comments for why EditorUI only ever reports this request
+    // rather than acting on it directly.
+    if (saveSceneRequested) {
+        saveCurrentScene();
     }
     renderDebugUI();
     editorUI_.render();
@@ -3154,6 +3208,22 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
 
     LOG_INFO("Created entity \"" + uniqueName + "\" (index " + std::to_string(entity.index()) + ") via the Scene "
               "panel's Create menu");
+}
+
+// Phase 15e: Save Scene's real implementation -- see this method's own
+// application.hpp comment for the full contract/design discussion. Writes
+// EVERY entity currently in registry_ (not just ones a user actually
+// touched this run) to kDefaultScenePath, exactly matching saveScene()'s
+// own "serializes every entity with at least a Transform" contract
+// (scene_serialization.hpp) -- there is no per-entity "dirty" tracking
+// anywhere in this engine (an "unsaved changes" indicator is explicitly out
+// of this phase's own scope, see README.md's Phase 15e section), so a save
+// is always a full, unconditional snapshot of the live scene, the same way
+// every prior phase's own saveScene() contract already promised even before
+// anything called it.
+void Application::saveCurrentScene() {
+    saveScene(registry_, kDefaultScenePath, activeDirectionalLight_.value_or(EntityId()));
+    LOG_INFO("Saved scene to \"" + kDefaultScenePath + "\"");
 }
 
 // Phase 8c: builds and draws the debug overlay -- see this class's own
@@ -3347,6 +3417,48 @@ void Application::run() {
             LOG_INFO("ESC pressed, exiting main loop");
             break;
         }
+
+        // Phase 15e: Ctrl+S -- Save Scene's keyboard shortcut, deliberately
+        // NOT routed through inputActionMap_/InputState the way every
+        // action above and below this block is -- see ctrlSWasDown_'s own
+        // application.hpp comment for the two reasons why (InputActionMap's
+        // bindings are an OR of alternate single keys per action, not an AND
+        // of simultaneous keys a chord needs; and Save is an editor-chrome
+        // action, not one of the camera/window-lifecycle actions
+        // InputActionMap actually exists to bind). A direct, edge-triggered
+        // two-key read against window_ instead -- window_.isKeyPressed() is
+        // the exact same public method input_action_map.cpp's own update()
+        // calls internally, just checked here directly rather than through
+        // that class. Both GLFW_KEY_LEFT_CONTROL and GLFW_KEY_RIGHT_CONTROL
+        // are checked (either counts) for the same "don't force one specific
+        // physical key when either conveys the same intent" reason
+        // MoveUp's own Space-or-E default binding does.
+        //
+        // Post-15e review fix: gated on !ImGui::GetIO().WantCaptureKeyboard,
+        // unlike escapePressed/InputState's own movement fields just above
+        // (a pre-existing, separately-tracked gap -- debug_ui.hpp's own
+        // Phase 8c comment already documents ImGui capture-flag gating as a
+        // real, known, deliberately-deferred integration step, not something
+        // this phase introduced or is responsible for closing everywhere).
+        // Save is new, deliberate behavior added THIS phase, not inherited
+        // legacy behavior, so it doesn't inherit that pass -- without this
+        // gate, Ctrl+S pressed while an Inspector text/drag field (e.g.
+        // Transform's Position DragFloat3) has keyboard focus would fire a
+        // save mid-edit of a field value ImGui hasn't even committed back to
+        // the underlying Transform/component yet, an editor foot-gun this
+        // phase can easily avoid rather than propagate into new code. Only
+        // gates the SHORTCUT, not the menu item (`saveSceneRequested` in
+        // render()) -- clicking "File > Save Scene" is itself unambiguous
+        // ImGui input, already only reachable when ImGui, not the 3D
+        // viewport, has the click.
+        const bool ctrlSDown = !ImGui::GetIO().WantCaptureKeyboard &&
+                                (window_.isKeyPressed(GLFW_KEY_LEFT_CONTROL) ||
+                                 window_.isKeyPressed(GLFW_KEY_RIGHT_CONTROL)) &&
+                                window_.isKeyPressed(GLFW_KEY_S);
+        if (ctrlSDown && !ctrlSWasDown_) {
+            saveCurrentScene();
+        }
+        ctrlSWasDown_ = ctrlSDown;
 
         update(deltaTime, input);
         render();
