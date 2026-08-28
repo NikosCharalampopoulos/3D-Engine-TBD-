@@ -2393,7 +2393,23 @@ void Application::render() {
     // recomputing it (or the cluster culler and the shader uploads
     // silently disagreeing about which lights exist this frame).
     std::vector<PointLightSample> pointLightSamples(kPointLights.begin(), kPointLights.end());
-    collectPointLights(registry_, kMaxPointLights, pointLightSamples);
+    // collectPointLights() itself is pure logic with no memory of prior
+    // calls (see light.cpp's own header comment) -- it only reports whether
+    // THIS call had to skip an entity for being over kMaxPointLights. The
+    // edge-detection (warn only the frame overflow is first entered, stay
+    // silent every subsequent frame it persists, warn again if it clears
+    // and later re-triggers) happens here instead, against
+    // pointLightOverflowActive_ (application.hpp) -- this Application's own
+    // registry_-scoped memory of the previous frame's result, replacing
+    // what used to be a collectPointLights()-local static that was wrongly
+    // shared across every registry any caller passed in, not just this
+    // one's.
+    const bool pointLightsOverflowedThisFrame = collectPointLights(registry_, kMaxPointLights, pointLightSamples);
+    if (pointLightsOverflowedThisFrame && !pointLightOverflowActive_) {
+        LOG_WARN("collectPointLights: more point lights exist than maxTotal (" + std::to_string(kMaxPointLights) +
+                  ") supports; extras are not rendered");
+    }
+    pointLightOverflowActive_ = pointLightsOverflowedThisFrame;
 
     // Phase 13d: re-cull every light against every cluster's (already-built,
     // see the constructor) AABB using this frame's own view matrix --

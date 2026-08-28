@@ -1090,6 +1090,25 @@ private:
     // SSR's own exact contribution -- same getenv-gated pattern as
     // ssaoDisabled_/ENGINE_SSAO_DISABLE. Default false (SSR on).
     bool ssrDisabled_ = false;
+
+    // Phase 15: this Application's own edge-tracking state for
+    // collectPointLights()'s (light.hpp) overflow warning -- true once
+    // render() has seen collectPointLights() report an overflow for
+    // registry_ and not yet seen it clear. collectPointLights() itself is
+    // deliberately pure (see light.cpp's own header comment) and returns
+    // only a per-call bool, no memory of prior calls; it used to keep that
+    // memory in a function-local static, but a static is shared across
+    // every registry any caller might ever pass in, not scoped to this one
+    // Application's own registry_, so it lives here instead -- one bool per
+    // Application instance, which is exactly the "one registry_ for this
+    // instance's whole lifetime" granularity the warning needs. render()
+    // compares each frame's collectPointLights() return against this flag
+    // to log on the false->true edge only (warn once entering overflow,
+    // silent while it persists, warn again if it clears and re-triggers --
+    // see render()'s own call site for the exact comparison), then updates
+    // it to that frame's result. Default false (not overflowing), matching
+    // every other bool member in this class defaulting to "off/normal."
+    bool pointLightOverflowActive_ = false;
 };
 
 }  // namespace engine

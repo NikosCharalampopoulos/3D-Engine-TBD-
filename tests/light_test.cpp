@@ -1,7 +1,7 @@
 // Phase 15's own test: exercises engine::collectPointLights() (src/light.cpp)
 // in isolation -- same "plain executable, links only the pure logic file
 // it's testing" shape as physics_test.cpp (see that file's own header
-// comment). light.cpp depends only on ecs.hpp/transform.hpp/log.hpp, none of
+// comment). light.cpp depends only on ecs.hpp/transform.hpp, neither of
 // which touch GL/Window at all, so this needs no live window/GL context/GPU
 // either.
 
@@ -47,8 +47,9 @@ int main() {
             id, engine::PointLight{glm::vec3(0.2f, 0.4f, 0.6f), 1.0f, 0.35f, 0.44f});
 
         std::vector<engine::PointLightSample> samples;
-        engine::collectPointLights(registry, /*maxTotal=*/8, samples);
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/8, samples);
 
+        expectTrue(!overflowed, "well under maxTotal: collectPointLights reports no overflow");
         expectTrue(samples.size() == 1, "one PointLight entity collects exactly one sample");
         if (samples.size() == 1) {
             expectNear(samples[0].position.x, 1.0f, "sample position.x matches the entity's Transform");
@@ -73,8 +74,9 @@ int main() {
 
         std::vector<engine::PointLightSample> samples;
         samples.push_back(engine::PointLightSample{glm::vec3(9.0f), glm::vec3(1.0f), 1.0f, 0.7f, 1.8f});
-        engine::collectPointLights(registry, /*maxTotal=*/8, samples);
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/8, samples);
 
+        expectTrue(!overflowed, "1 pre-seeded + 1 entity, well under maxTotal 8: no overflow reported");
         expectTrue(samples.size() == 2, "collectPointLights appends, leaving a pre-seeded entry in place");
         if (samples.size() == 2) {
             expectNear(samples[0].position.x, 9.0f, "the pre-seeded entry is untouched");
@@ -89,8 +91,9 @@ int main() {
         registry.addComponent<engine::PointLight>(id, engine::PointLight{});
 
         std::vector<engine::PointLightSample> samples;
-        engine::collectPointLights(registry, /*maxTotal=*/8, samples);
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/8, samples);
 
+        expectTrue(!overflowed, "skipped for lacking a Transform, not maxTotal: not reported as an overflow");
         expectTrue(samples.empty(), "a PointLight with no Transform is skipped, not a crash");
     }
 
@@ -101,8 +104,9 @@ int main() {
         registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(5.0f));
 
         std::vector<engine::PointLightSample> samples;
-        engine::collectPointLights(registry, /*maxTotal=*/8, samples);
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/8, samples);
 
+        expectTrue(!overflowed, "no PointLight component at all: not reported as an overflow");
         expectTrue(samples.empty(), "an entity with only a Transform contributes no PointLightSample");
     }
 
@@ -117,8 +121,9 @@ int main() {
         }
 
         std::vector<engine::PointLightSample> samples;
-        engine::collectPointLights(registry, /*maxTotal=*/3, samples);
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/3, samples);
 
+        expectTrue(overflowed, "5 entities against maxTotal 3: the 2 skipped ones are reported as an overflow");
         expectTrue(samples.size() == 3, "collectPointLights stops appending once maxTotal is reached");
     }
 
@@ -131,8 +136,9 @@ int main() {
         registry.addComponent<engine::PointLight>(id, engine::PointLight{});
 
         std::vector<engine::PointLightSample> samples(2, engine::PointLightSample{});
-        engine::collectPointLights(registry, /*maxTotal=*/2, samples);
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/2, samples);
 
+        expectTrue(overflowed, "maxTotal already met by pre-seeded entries: the entity is reported as an overflow");
         expectTrue(samples.size() == 2, "maxTotal already met by pre-seeded entries: nothing appended");
     }
 

@@ -80,11 +80,28 @@ struct PointLightSample {
 // basic.frag/pbr.frag's uPointLights is a fixed-size MAX_POINT_LIGHTS
 // uniform array (8, see application.cpp's own kMaxPointLights), so once
 // `out.size()` would reach `maxTotal`, further PointLight entities are
-// silently skipped (a warning logged once per call, not once per skipped
-// entity, so a user who creates many extra lights doesn't flood the log)
-// rather than overflowing that array -- growing MAX_POINT_LIGHTS itself is
-// a shader-side change outside this function's own scope.
-void collectPointLights(EntityRegistry& registry, std::size_t maxTotal, std::vector<PointLightSample>& out);
+// silently skipped rather than overflowing that array -- growing
+// MAX_POINT_LIGHTS itself is a shader-side change outside this function's
+// own scope.
+//
+// Returns true if at least one PointLight entity had to be skipped this
+// call because `out.size()` had already reached `maxTotal`, false
+// otherwise. This function does NOT log anything itself -- it stays pure
+// logic with no state that outlives one call (see light.cpp's own header
+// comment: no GL/Window dependency, exercised by tests/light_test.cpp
+// against a fresh EntityRegistry per test case, no log-output assertions).
+// Deciding whether an overflow is worth a LOG_WARN, and whether it's a
+// NEW overflow or a continuation of one already warned about, needs state
+// that persists across calls and is scoped to one particular scene/
+// registry -- that's the caller's job, not this function's: see
+// Application::render()'s own call site (application.cpp) and its
+// pointLightOverflowActive_ member (application.hpp), which does that
+// edge-detection (warn once when overflow is first entered, stay silent
+// while it persists, warn again if it clears and re-triggers) against this
+// return value, scoped correctly to Application's own single registry_,
+// instead of this function tracking it globally/statically the way an
+// earlier version of this fix did.
+bool collectPointLights(EntityRegistry& registry, std::size_t maxTotal, std::vector<PointLightSample>& out);
 
 }  // namespace engine
 

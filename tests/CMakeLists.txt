@@ -114,9 +114,10 @@ add_test(NAME ecs_test COMMAND ecs_test)
 # Phase 15 adds light_test, testing engine::collectPointLights()
 # (src/light.cpp) in isolation -- same "plain executable, links only the
 # pure logic file it's testing" shape as physics_test/transform_hierarchy_test
-# above. light.cpp depends only on ecs.hpp/transform.hpp/log.hpp (all
-# header-only or GL-free), so this needs no live GL context/GPU either --
-# just GLM for glm::vec3.
+# above. light.cpp depends only on ecs.hpp/transform.hpp (both header-only or
+# GL-free -- a later review pass moved collectPointLights()'s own logging
+# out to Application, so light.cpp no longer touches log.hpp either), so
+# this needs no live GL context/GPU -- just GLM for glm::vec3.
 add_executable(light_test
     light_test.cpp
     ${CMAKE_SOURCE_DIR}/src/light.cpp

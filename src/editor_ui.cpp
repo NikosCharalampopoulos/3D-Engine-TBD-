@@ -473,9 +473,42 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
             // three independent floats -- see that table's own comment for
             // what they mean. Range/step match the Inspector's existing
             // "Collider Half-Extent" DragFloat just above (Physics section).
-            ImGui::DragFloat("Constant", &light->constant, 0.01f, 0.0f, 10.0f);
-            ImGui::DragFloat("Linear", &light->linear, 0.01f, 0.0f, 10.0f);
-            ImGui::DragFloat("Quadratic", &light->quadratic, 0.01f, 0.0f, 10.0f);
+            //
+            // Constant's minimum is 0.01f, not 0.0f, for the same
+            // "avoid a degenerate zero value" reason Collider Half-Extent's
+            // own 0.01f floor exists just above: basic.frag/pbr.frag compute
+            // point-light attenuation as 1.0/(constant + linear*distance +
+            // quadratic*distance^2), and a fragment very close to the light
+            // (distance ~ 0) with constant == 0.0 would divide by
+            // (near-)zero, producing Inf/NaN that can corrupt the bloom
+            // pass around that light. No prior code path could ever reach
+            // constant == 0 before this live-editable field -- kPointLights'
+            // own hardcoded table always uses 1.0.
+            //
+            // Linear and Quadratic keep 0.0f as their own minimum -- unlike
+            // Constant, zero is a legitimate value for either of them alone
+            // (it just turns off that one term of the attenuation curve) --
+            // but a NEGATIVE linear or quadratic is just as hazardous as
+            // constant == 0.0: it can still drive that same denominator to
+            // exactly zero (or past it, flipping the light's contribution
+            // sign) at some nonzero distance, even with constant floored at
+            // 0.01 above. Typing is the only way in either case (a negative
+            // drag-speed step never crosses 0.0f from a non-negative start).
+            //
+            // ImGuiSliderFlags_AlwaysClamp is required on all three fields,
+            // not optional: the v_min/v_max pair alone only clamps
+            // mouse-drag movement -- ImGui does NOT clamp a value typed
+            // directly into the field (double-click or Ctrl+Click to type)
+            // unless this flag is set (imgui.h, ImGuiSliderFlags_AlwaysClamp
+            // = ClampOnInput | ClampZeroRange), so without it a user could
+            // still type a value past any of these floors -- 0 or negative
+            // for Constant, negative for Linear/Quadratic -- and hit the
+            // same div-by-near-zero/sign-flip hazard above.
+            ImGui::DragFloat("Constant", &light->constant, 0.01f, 0.01f, 10.0f, "%.3f",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Linear", &light->linear, 0.01f, 0.0f, 10.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Quadratic", &light->quadratic, 0.01f, 0.0f, 10.0f, "%.3f",
+                              ImGuiSliderFlags_AlwaysClamp);
             ImGui::TextDisabled("Position comes from this entity's own Transform above.");
         }
     }
