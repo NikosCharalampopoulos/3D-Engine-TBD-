@@ -22,6 +22,7 @@
 #include <cmath>
 #include <string>
 
+#include "engine/camera_component.hpp"
 #include "engine/light.hpp"
 #include "engine/log.hpp"
 #include "engine/material.hpp"
@@ -224,35 +225,26 @@ CreateEntityKind renderCreateEntityMenuItems() {
     // (application.hpp) now -- "the most recently Create'd Directional
     // Light entity" (set in spawnEntityFromCreateMenu(), application.cpp),
     // the simplest rule that fits an engine with no multi-select UI concept
-    // at all yet. Only Camera remains genuinely open below: it's a
-    // structurally similar "which entity is active" problem, but for this
-    // engine's actual rendered view (a free-fly Camera object, not an ECS
-    // entity) rather than one uniform pair -- different enough in kind, not
-    // just in scope, to stay deferred on its own.
+    // at all yet. Camera (below) turned out NOT to need an equivalent
+    // "active" concept at all, despite looking structurally similar at
+    // first glance -- see that item's own Phase 15c comment for why.
     if (ImGui::MenuItem("Directional Light")) {
         result = CreateEntityKind::kDirectionalLight;
     }
 
-    // Shown (matching the originally approved mockup) but disabled, not
-    // omitted -- see editor_ui.hpp's own CreateEntityKind comment for the
-    // full "why deferred" reasoning. Same BeginDisabled()-plus-explanatory-
-    // tooltip treatment this project's own Inspector already established
-    // for "Browse..." (Phase 14e, material.hpp) and, until Phase 14f,
-    // "Delete Object" itself -- ImGui::BeginDisabled() makes the item itself
-    // unclickable (no dangling half-wired handler to accidentally trigger),
-    // while ImGuiHoveredFlags_AllowWhenDisabled lets IsItemHovered() still
-    // report a hover on a disabled item so the tooltip below still shows.
-    const auto disabledCreateMenuItem = [](const char* label, const char* tooltip) {
-        ImGui::BeginDisabled();
-        ImGui::MenuItem(label);
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("%s", tooltip);
-        }
-    };
-    disabledCreateMenuItem("Camera",
-                            "Not implemented yet -- needs a Camera ECS component and an \"active camera\" "
-                            "concept this engine doesn't have yet.");
+    // Phase 15c: "Camera" is real now too -- the third and last of this
+    // Create menu's own Phase 14f-inherited BeginDisabled()'d gaps. Unlike
+    // the two lights above, a Camera entity doesn't compete for any shared
+    // rendering resource (nothing in this engine's rendering pipeline reads
+    // a CameraComponent at all yet), so there is no "active camera"
+    // resolution to build here the way Directional Light needed -- see
+    // camera_component.hpp's own header comment for the full reasoning, and
+    // application.hpp's Camera-related comments for what this deliberately
+    // does NOT wire up (this engine's actual rendered view stays entirely
+    // Application's own free-fly camera_ object, untouched by this phase).
+    if (ImGui::MenuItem("Camera")) {
+        result = CreateEntityKind::kCamera;
+    }
 
     return result;
 }
@@ -577,6 +569,47 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
                     "Inactive: only the most recently created Directional Light entity is active at a time; "
                     "this one exists but isn't currently affecting shading/shadows.");
             }
+        }
+    }
+
+    // --- Camera --------------------------------------------------------------
+    // Phase 15c: shown only for an entity with a CameraComponent -- the same
+    // "opt-in per component" shape as the two Light sections just above, and
+    // just as fully live (a genuinely per-entity ComponentPool<
+    // CameraComponent> entry, no Material-style shared-cache caveat).
+    //
+    // Unlike either Light section, there is no "is this the active one"
+    // line here -- see camera_component.hpp's own header comment and
+    // CreateEntityKind::kCamera's own editor_ui.hpp comment for why: nothing
+    // in this engine's rendering pipeline reads a CameraComponent at all
+    // yet, so there is no shared resource for one entity to be "active" for
+    // in the first place, unlike DirectionalLight's real competition over
+    // this engine's one uLightDirection/uLightColor pair. This caption spells
+    // that out explicitly rather than leaving it as a silent omission a user
+    // could easily read as a bug -- the same "documented gap, not a quiet
+    // one" treatment this whole phase's own scope decisions get (see
+    // README.md's own Phase 15c section).
+    if (CameraComponent* cameraComponent = registry.getComponent<CameraComponent>(id)) {
+        if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Range/step mirror engine::Camera's own setFov()/setClipPlanes()
+            // intent (camera.hpp) -- an ordinary vertical FOV in degrees, and
+            // a near plane that must stay strictly positive and (for the
+            // AlwaysClamp floor below) comfortably less than the far plane so
+            // glm::perspective() never receives a degenerate near>=far range.
+            // ImGuiSliderFlags_AlwaysClamp for the same reason PointLight's
+            // own Constant field needs it above: without it, typing a value
+            // (double-click / Ctrl+Click) bypasses the v_min/v_max pair
+            // entirely, which a plain mouse drag alone would respect.
+            ImGui::DragFloat("Field of View", &cameraComponent->fovYDeg, 0.25f, 1.0f, 179.0f, "%.1f deg",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Near Plane", &cameraComponent->nearPlane, 0.01f, 0.001f, 1000.0f, "%.3f",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Far Plane", &cameraComponent->farPlane, 1.0f, 0.001f, 100000.0f, "%.3f",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::TextDisabled("Position/orientation come from this entity's own Transform above.");
+            ImGui::TextDisabled(
+                "Not yet wired to this engine's actual rendered view -- that still comes entirely from "
+                "the engine's own free-fly camera, independent of this entity (see camera_component.hpp).");
         }
     }
 

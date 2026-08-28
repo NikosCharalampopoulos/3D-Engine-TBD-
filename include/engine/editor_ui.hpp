@@ -141,6 +141,19 @@
 // component -- see renderInspectorPanel()'s own Phase 15b comment for why
 // that distinction matters and is worth surfacing, not just the color/
 // direction fields themselves.
+//
+// Phase 15c: "Camera" is real too now, closing out this whole Phase 14f-
+// inherited "Light/Camera" Create-menu gap -- see camera_component.hpp for
+// the new CameraComponent this adds and Application::
+// spawnEntityFromCreateMenu()'s own Phase 15c comment for what it builds.
+// Unlike Directional Light, this gains NO new renderDockspaceShell()
+// parameter -- there is no "active camera" concept to thread through (see
+// camera_component.hpp's own header comment for exactly why not): a
+// CameraComponent entity is a real, selectable, inspectable object with a
+// live Inspector "Camera" section (fov/near/far, editor_ui.cpp's own Phase
+// 15c comment), but it does not drive this engine's actual rendered view
+// this phase, so there is nothing analogous to activeDirectionalLight for
+// this panel to display.
 
 #include <optional>
 
@@ -174,9 +187,6 @@ enum class CreateEntityKind {
     // Phase 15a: a real point light entity (Transform + NameComponent +
     // light.hpp's PointLight component, no ModelComponent -- see
     // Application::spawnEntityFromCreateMenu()'s own Phase 15a comment).
-    // Camera stays BeginDisabled()'d in the Create menu -- see editor_ui.cpp's
-    // own Phase 15b comment for why it's still its own separately-scoped
-    // follow-up.
     kPointLight,
     // Phase 15b: a real directional light entity (Transform + NameComponent +
     // light.hpp's DirectionalLight component, no ModelComponent -- same
@@ -189,6 +199,16 @@ enum class CreateEntityKind {
     // actually renders/casts shadows with looks like, not just "one more
     // entity added to a budget."
     kDirectionalLight,
+    // Phase 15c: a real camera entity (Transform + NameComponent +
+    // camera_component.hpp's CameraComponent, no ModelComponent -- see
+    // Application::spawnEntityFromCreateMenu()'s own Phase 15c comment).
+    // Deliberately has NO side effect analogous to kDirectionalLight's own
+    // activeDirectionalLight_ assignment above -- see camera_component.hpp's
+    // own header comment for exactly why this entity does not become, or
+    // need, an "active camera": this engine's actual rendered view still
+    // comes entirely from Application's own free-fly camera_ object, which
+    // this phase does not touch.
+    kCamera,
 };
 
 // Phase 14d: the currently-selected entity's on-screen bounding box, already

@@ -300,7 +300,10 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        cluster_light_culler, frustum, ssao,
                        scene_serialization, debug_ui, input_action_map, physics,
                        editor_ui, light -- Phase 15a's new PointLight ECS
-                       component, extended Phase 15b with DirectionalLight)
+                       component, extended Phase 15b with DirectionalLight,
+                       camera_component -- Phase 15c's new CameraComponent,
+                       deliberately its own header rather than folded into
+                       light.hpp)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -324,7 +327,8 @@ tests/                 scene_serialization_test.cpp (Phase 8b),
                        transform_hierarchy_test.cpp (Phase 14b),
                        scene_hierarchy_test.cpp (Phase 14d),
                        light_test.cpp (Phase 15a, extended Phase 15b with
-                       resolveActiveDirectionalLight() coverage) + its own
+                       resolveActiveDirectionalLight() coverage),
+                       camera_component_test.cpp (Phase 15c) + its own
                        CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
@@ -4688,6 +4692,143 @@ shadow frustum this frame, which this engine had no notion of before now.
   more overhead look), direct visual proof `resolveActiveDirectionalLight()`
   is actually feeding the shader/shadow pass, not just sitting inertly in
   the registry.
+
+### Phase 15c: real Camera entities
+
+The third and last of Phase 14f's own `BeginDisabled()`'d Create-menu gaps.
+Unlike either light, a Camera entity turns out not to need an "active"
+resolution mechanism at all: `basic.frag`/`pbr.frag` don't read a
+CameraComponent, and this engine's actual rendered view has come from
+`Application::camera_` -- a free-fly `engine::Camera` object (`camera.hpp`),
+completely independent of the ECS -- since Phase 3, unchanged by this phase.
+So closing this gap the same "smallest correct increment" way Phase 15a/15b
+did meant something narrower than either of them: a real, inspectable,
+creatable `CameraComponent` entity that exists in the scene and does
+nothing else yet. A full "possess this entity, free-fly control transfers
+to it" feature -- deciding what happens to keyboard/mouse input when a
+possessed camera exists, whether/how `camera_` itself gets redirected, and
+eventually a camera-switching keybind and/or multiple viewports -- is real,
+substantial, separate scope of its own, and nothing in this engine's UI can
+exercise any part of it yet (no camera-switching keybind, no multi-viewport,
+nothing that would ever read "which entity is the active camera" except a
+hypothetical future feature). Building any of that now would be exactly the
+kind of speculative, nothing-consumes-it complexity this codebase's own
+established style avoids (see `physics.hpp`'s own `RigidBody` mass-field
+comment, and Phase 15a/15b's own "no scene serialization for a component
+nothing writes yet" precedent above) -- so this phase deliberately does not
+build it, the same way Phase 15a/15b themselves deferred Camera in the first
+place.
+
+- **`camera_component.hpp`** (new, `include/engine/`): a `CameraComponent`
+  holding the three purely-optical properties `engine::Camera`'s own
+  `getProjectionMatrix()` actually depends on -- `fovYDeg`/`nearPlane`/
+  `farPlane`, defaulting to `Camera`'s own 60.0/0.1/100.0 values verbatim
+  (`camera.hpp`'s `fovYDeg_`/`nearPlane_`/`farPlane_`). Deliberately its own
+  header, not folded into `light.hpp` even though that file already narrates
+  this whole Point-Light-then-Directional-Light-then-Camera arc: a camera
+  isn't a light by any stretch (nothing about it feeds `basic.frag`/
+  `pbr.frag`'s lighting math), so growing `light.hpp` to also mean "and also
+  Camera" would leave that file's own name not matching its contents for no
+  real benefit -- the same "a genuinely different KIND of thing gets a new
+  header" precedent `light.hpp`'s own top comment already sets by having
+  split off from `physics.hpp`/`ecs.hpp` in the first place. Deliberately
+  does NOT mirror `Camera`'s `position_`/`yawDeg_`/`pitchDeg_` -- the same
+  "Transform already has it" precedent `PointLight`'s own "no position
+  field" comment establishes -- nor `movementSpeed_`/`mouseSensitivity_`,
+  which describe how free-fly *input* drives a camera, not what a camera
+  optically *is*, and this entity never receives input (see above). No
+  matching `camera_component.cpp` -- like `ecs.hpp`'s own `NameComponent`,
+  this is a plain data struct with no logic function of its own to give one
+  a body.
+- **`editor_ui.hpp`/`editor_ui.cpp`**: the Create menu's "Camera" item is
+  real now (returns `CreateEntityKind::kCamera`, no longer
+  `BeginDisabled()`'d) -- closing out all three of Phase 14f's own deferred
+  items. Unlike Phase 15b's `kDirectionalLight`, this gains **no** new
+  `renderDockspaceShell()` parameter: there is nothing analogous to
+  `activeDirectionalLight` to thread through, since nothing in this engine's
+  rendering pipeline reads a CameraComponent at all. The Inspector gains a
+  new "Camera" section (`DragFloat` for FOV/near/far, `ImGuiSliderFlags_
+  AlwaysClamp`-floored the same way `PointLight`'s own `Constant` field is,
+  so a near plane can never reach zero/negative and corrupt
+  `glm::perspective()`), fully live-editable like the two Light sections
+  before it, with an explicit caption stating it is **not** wired to this
+  engine's actual rendered view -- a documented gap, not a silent one, the
+  same treatment this whole phase's own scope decisions get.
+- **`application.hpp`/`application.cpp`**: `spawnEntityFromCreateMenu()`'s
+  new `kCamera` case follows the identical Transform + NameComponent (no
+  ModelComponent -- no camera-gizmo mesh either) shape `kPointLight`/
+  `kDirectionalLight` already established, plus a freshly
+  `addComponent<CameraComponent>()`'d component at its own struct defaults.
+  Unlike `kDirectionalLight`, that addComponent call is the *entire*
+  post-switch effect -- no second statement, no member assignment. There is
+  **no `activeCameraEntity_`-shaped member anywhere in this class**: `camera_`
+  (the real free-fly `Camera`) and its own `processMovement()`/
+  `processMouseInput()` calls in `update()` are completely untouched by this
+  phase. `ENGINE_DEBUG_CREATE` gains a `camera` value, calling this exact
+  same production function.
+- **Deliberately not done this phase**: everything the "actual design
+  problem" discussion above already names -- no possession/control-transfer
+  mechanism, no camera-switching keybind, no multi-viewport, no
+  `activeCameraEntity_` concept of any kind. Also no scene serialization for
+  `CameraComponent`, for the identical "nothing consumes it yet" reason
+  Phase 15a/15b gave for `PointLight`/`DirectionalLight`. A future phase
+  that actually wants ECS-driven view control should build it on top of
+  this phase's real (if inert) ECS foundation -- deciding then what happens
+  to input when a camera entity is "possessed" and how `camera_` itself gets
+  redirected -- not before.
+- **Verify**: a clean rebuild (`rm -rf build && cmake -B build -S . &&
+  cmake --build build -j`) compiles with **zero warnings** under `-Wall
+  -Wextra`. `ctest` reports **8/8** (`camera_component_test` new -- default-
+  value coverage proving `CameraComponent{}`'s fields genuinely match
+  `Camera`'s own defaults, plus `EntityRegistry` round-trip/independence
+  coverage, the same shape `ecs_test.cpp` already established for a
+  component with no logic function of its own to unit-test directly). A
+  baseline `tools/run_headless.sh` run (`ENGINE_MAX_FRAMES=60`, no debug env
+  vars) logs the byte-identical clustered-lighting occupancy Phase 15a/15b's
+  own baseline recorded (2136 -> 2155/2304 clusters occupied, avg 3.565543
+  -> 3.581903 lights/occupied cluster) and zero `[ERROR]` lines -- and, run
+  three times independently with no code involved in this phase touched at
+  all, produced screenshots differing from each other by only 5-25 pixels
+  out of 480,000 (`compare -metric AE`, none visually distinguishable) --
+  this engine's own inherent software-rasterizer (llvmpipe) run-to-run
+  least-significant-bit noise, present with or without this phase's changes,
+  and the yardstick the next paragraph's own comparison is measured against.
+  A second run with
+  `ENGINE_DEBUG_CREATE=camera` + `ENGINE_DEBUG_SELECT="Camera"` +
+  `ENGINE_SHOW_DEBUG_UI=1` logs `Created entity "Camera" (index 3) via the
+  Scene panel's Create menu`, zero `[ERROR]` lines, and the exact SAME
+  clustered-lighting stats as the baseline -- direct proof a Camera entity
+  contributes nothing to the lighting/rendering pipeline, the expected,
+  correct result for this phase, not a bug. Inspected as a screenshot: the
+  debug overlay's Scene Entities list shows `Camera` alongside
+  `scene`/`falling_cube`/`parented_demo_cube`; the Inspector shows it
+  selected, labeled "Empty entity (no model)", with a live Transform and a
+  new "Camera" section reading `60.0 deg` FOV (`CameraComponent{}`'s own
+  default); the Viewport's rendered content is unaffected by the Camera
+  entity specifically -- a pixel `compare` of the portion of the Viewport
+  panel NOT covered by the F1 debug overlay window does differ from the
+  plain baseline (990 pixels out of 78,000 in the region checked, a small
+  anti-aliasing jitter around sphere silhouettes, larger than the 5-25-pixel
+  run-to-run noise floor established above), but a THIRD run with
+  `ENGINE_SHOW_DEBUG_UI=1` alone -- no `ENGINE_DEBUG_CREATE`, no Camera
+  entity at all -- reproduces that identical jitter (0 differing pixels
+  against the Camera run's own screenshot, in that same region). So the
+  jitter traces entirely to enabling the debug overlay itself (extra ImGui
+  draw calls shifting per-frame timing enough to nudge software-rasterizer
+  antialiasing by roughly a pixel here and there) -- pre-existing engine
+  behavior wholly unrelated to Phase 15c's own changes, not something a
+  Camera entity's presence causes.
+
+With Phase 15c, the "Light/Camera" arc Phase 14f's own Create menu opened is
+now complete: all three originally-`BeginDisabled()`'d items (Point Light,
+Directional Light, Camera) are real, creatable, inspectable ECS entities.
+What differs, deliberately, is how far each one actually reaches into this
+engine's existing systems -- Point Light plugs straight into an existing
+array-shaped uniform, Directional Light needed a brand-new "which one is
+active" concept because it replaces a single fixed uniform pair, and Camera
+needed neither, because nothing downstream reads it yet. Each phase in this
+arc closed exactly the gap in front of it and named the next one explicitly,
+rather than guessing ahead at scope the engine wasn't ready to use.
 
 ## Libraries used and why
 

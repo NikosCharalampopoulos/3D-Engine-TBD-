@@ -23,6 +23,7 @@
 #include <tuple>
 #include <utility>
 
+#include "engine/camera_component.hpp"
 #include "engine/frustum.hpp"
 #include "engine/gl_debug.hpp"
 #include "engine/hdri_loader.hpp"
@@ -1048,8 +1049,9 @@ std::string debugForceDynamicEntityNameFromEnv() {
 }
 
 // Phase 14f: ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty|pointlight|
-// directionallight> (case-insensitive; "pointlight" added Phase 15a,
-// "directionallight" added Phase 15b), unset by default -- same
+// directionallight|camera> (case-insensitive; "pointlight" added Phase 15a,
+// "directionallight" added Phase 15b, "camera" added Phase 15c), unset by
+// default -- same
 // getenv-gated-value shape as ENGINE_DEBUG_SELECT/
 // ENGINE_DEBUG_FORCE_STATIC/_DYNAMIC above, but for
 // Application::spawnEntityFromCreateMenu() (the Scene panel's own Create
@@ -1088,9 +1090,12 @@ CreateEntityKind debugCreateEntityKindFromEnv() {
     if (lowered == "directionallight") {
         return CreateEntityKind::kDirectionalLight;
     }
+    if (lowered == "camera") {
+        return CreateEntityKind::kCamera;
+    }
     LOG_WARN("ENGINE_DEBUG_CREATE=\"" + std::string(value) +
-              "\" is not one of cube/sphere/plane/empty/pointlight/directionallight; ignoring it and creating "
-              "nothing");
+              "\" is not one of cube/sphere/plane/empty/pointlight/directionallight/camera; ignoring it and "
+              "creating nothing");
     return CreateEntityKind::kNone;
 }
 
@@ -3074,6 +3079,16 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
             // this new entity also becomes activeDirectionalLight_
             // (application.hpp).
             break;
+        case CreateEntityKind::kCamera:
+            baseName = "Camera";
+            // loadPath stays nullptr, same reason as kPointLight/
+            // kDirectionalLight above -- this engine has no camera-gizmo
+            // mesh either. See this function's own post-switch block below
+            // for where the CameraComponent itself gets added -- and,
+            // unlike kDirectionalLight, that is the ENTIRE post-switch
+            // effect: no Application member gets assigned afterward (see
+            // camera_'s own application.hpp comment for why not).
+            break;
         case CreateEntityKind::kNone:
         default:
             return;
@@ -3123,6 +3138,18 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
     if (kind == CreateEntityKind::kDirectionalLight) {
         registry_.addComponent<DirectionalLight>(entity, DirectionalLight{});
         activeDirectionalLight_ = entity;
+    }
+    // Phase 15c: a freshly Create'd Camera starts at CameraComponent{}'s own
+    // struct defaults (60-degree FOV, 0.1/100.0 near/far -- copied verbatim
+    // from engine::Camera's own defaults, camera.hpp -- see
+    // camera_component.hpp's own comment for why). Deliberately no second
+    // statement here the way kDirectionalLight has one above: this entity
+    // becomes nothing's "active" anything -- it just exists in registry_,
+    // selectable and inspectable, with nothing in render() ever reading it
+    // back out. That is this phase's entire scope, on purpose (see
+    // camera_component.hpp's own header comment).
+    if (kind == CreateEntityKind::kCamera) {
+        registry_.addComponent<CameraComponent>(entity, CameraComponent{});
     }
 
     LOG_INFO("Created entity \"" + uniqueName + "\" (index " + std::to_string(entity.index()) + ") via the Scene "

@@ -32,11 +32,18 @@
 // application.hpp's own activeDirectionalLight_ comment for the "most
 // recently created" rule this phase settles on, and
 // resolveActiveDirectionalLight() below for where that rule is applied.
-// Camera stays deferred (editor_ui.cpp's own Phase 15b comment) -- a
-// structurally similar "which entity is active" problem, but for this
-// engine's actual rendered view rather than one uniform pair, which is
-// enough of a different problem (see application.hpp's own Camera-related
-// comments) to stay its own separately-scoped follow-up.
+// Camera stays deferred as of this phase (editor_ui.cpp's own Phase 15b
+// comment) -- a structurally similar "which entity is active" problem, but
+// for this engine's actual rendered view rather than one uniform pair,
+// which is enough of a different problem (see application.hpp's own
+// Camera-related comments) to stay its own separately-scoped follow-up.
+//
+// Phase 15c closes that follow-up -- see camera_component.hpp, deliberately
+// its OWN header rather than a third component added here (see that file's
+// own header comment for why: a camera isn't a light, and unlike
+// DirectionalLight it turns out not to need an "active" resolution at all,
+// so there's no PointLight/DirectionalLight-shaped precedent here for it to
+// share).
 
 #include <cstddef>
 #include <vector>

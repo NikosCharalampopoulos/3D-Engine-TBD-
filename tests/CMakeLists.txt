@@ -129,3 +129,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME light_test COMMAND light_test)
+
+# Phase 15c adds camera_component_test, testing engine::CameraComponent
+# (include/engine/camera_component.hpp) in isolation. Unlike light_test
+# above, camera_component.hpp has no matching src/*.cpp at all -- it's a
+# plain data struct with no logic function of its own (see its own header
+# comment) -- so, like ecs_test above, this links no extra src/*.cpp file;
+# the header alone (plus ecs.hpp/transform.hpp, both header-only or GL-free)
+# is the whole implementation under test. No GL context/GPU needed either --
+# just GLM for glm::vec3/glm::quat (via Transform).
+add_executable(camera_component_test
+    camera_component_test.cpp
+)
+target_include_directories(camera_component_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(camera_component_test PRIVATE glm::glm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(camera_component_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME camera_component_test COMMAND camera_component_test)

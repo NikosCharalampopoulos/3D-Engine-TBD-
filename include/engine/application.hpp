@@ -702,6 +702,20 @@ private:
     // anywhere else in this engine, and light.hpp's own
     // resolveActiveDirectionalLight() for where render() reads this member
     // back out each frame.
+    //
+    // Phase 15c: CreateEntityKind::kCamera follows the identical Transform +
+    // NameComponent (no ModelComponent) shape once more, plus a freshly
+    // addComponent<CameraComponent>()'d camera_component.hpp component at its
+    // own struct defaults. Unlike kDirectionalLight just above, this case
+    // does NOT assign any Application member afterward -- there is
+    // deliberately no activeCameraEntity_-shaped member anywhere in this
+    // class (see camera_component.hpp's own header comment for the full
+    // reasoning): nothing in render() ever reads "which entity is the
+    // active camera" the way it reads activeDirectionalLight_, because
+    // nothing in this engine's rendering pipeline is driven by a
+    // CameraComponent at all yet. This engine's actual rendered view still
+    // comes entirely from camera_ below, completely unaffected by creating
+    // (or editing, or deleting) any number of Camera entities.
     void spawnEntityFromCreateMenu(CreateEntityKind kind);
 
     // Phase 9: one sphere in the PBR test-grid -- its own placement
@@ -1015,6 +1029,19 @@ private:
     // selecting that entity in the Inspector, though a verification run can
     // set ENGINE_DEBUG_SELECT to the same name to see both at once.
     std::optional<EntityId> physicsVerifyEntity_;
+    // This engine's one actual rendered view -- still exactly what it was
+    // from Phase 3 onward: a free-fly camera driven each frame by real
+    // WASD/mouse input (or the scripted ENGINE_CAMERA_DEMO path), entirely
+    // independent of registry_. Phase 15c adds a CameraComponent ECS
+    // component (camera_component.hpp) and lets a user Create camera
+    // entities from the Scene panel, but deliberately does NOT touch this
+    // member or its own update path (see camera_.processMovement()/
+    // processMouseInput() calls in update()) -- there is no
+    // "activeCameraEntity_" member anywhere in this class, unlike
+    // activeDirectionalLight_ below, because nothing reads one. See
+    // camera_component.hpp's own header comment for why redirecting this
+    // camera_'s own control to an ECS entity is real, separate, future
+    // scope, not folded into this phase.
     Camera camera_;
     // Phase 8d: the data-driven key-binding table pollInputState() now
     // consults each frame (see input.hpp/input_action_map.hpp) -- owned
