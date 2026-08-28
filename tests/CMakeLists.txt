@@ -203,3 +203,31 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME asset_drop_test COMMAND asset_drop_test)
+
+# Phase 16 adds camera_capture_test, testing engine::decideCameraCapture()
+# (src/camera_capture.cpp) in isolation -- same "plain executable, links only
+# the pure logic file it's testing" shape as asset_drop_test/
+# material_override_test above. camera_capture.cpp itself depends on nothing
+# beyond its own header (no ecs.hpp, no GLM, no GL/ImGui at all).
+#
+# Post-review addition: also links src/input_action_map.cpp and the `glfw`
+# target (for its GLFW_KEY_* constants/headers only, the identical
+# header-only use input_action_map_test's own CMake entry above already
+# makes -- no live GLFW/GL context needed) -- this test's own new "held key
+# across consecutive polls" regression block drives a REAL
+# engine::InputActionMap to reproduce the reported bug's exact integration
+# (a real held Escape press's edge-detection feeding decideCameraCapture()
+# across multiple frames), not just decideCameraCapture()'s own pure logic in
+# isolation.
+add_executable(camera_capture_test
+    camera_capture_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/camera_capture.cpp
+    ${CMAKE_SOURCE_DIR}/src/input_action_map.cpp
+)
+target_include_directories(camera_capture_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(camera_capture_test PRIVATE glfw)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(camera_capture_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME camera_capture_test COMMAND camera_capture_test)

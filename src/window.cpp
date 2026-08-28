@@ -244,4 +244,17 @@ std::pair<double, double> Window::getCursorPos() const {
     return {x, y};
 }
 
+void Window::setCursorCaptured(bool captured) {
+    // GLFW_CURSOR_DISABLED both hides the cursor and lets its own tracked
+    // position move unbounded (not clamped to the window edges) -- exactly
+    // what Camera::processMouseInput()'s xpos/ypos diffing wants while
+    // flying, and exactly why "disabled" (not just "hidden") is GLFW's own
+    // name for this mode. Safe to call under Xvfb (see this class's own
+    // constructor comment on this environment's headless target): confirmed
+    // directly, not just assumed -- see README.md's Phase 16 section for the
+    // ENGINE_DEBUG_FORCE_CAMERA_CAPTURE run that exercises this exact call
+    // path with no real pointer device attached at all.
+    glfwSetInputMode(window_, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+}
+
 }  // namespace engine

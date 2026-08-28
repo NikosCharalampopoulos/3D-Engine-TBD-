@@ -1002,7 +1002,12 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  std::optional<EntityId> activeDirectionalLight,
                                                  bool& saveSceneRequested,
                                                  std::optional<std::string>& textureAssignRequested,
-                                                 std::optional<std::string>& assetDropRequested) {
+                                                 std::optional<std::string>& assetDropRequested,
+                                                 bool cameraCaptured, bool& cameraCaptureRequested) {
+    // Phase 16: the identical "false every frame except the one where the
+    // real thing actually happened" reset saveSceneRequested/
+    // textureAssignRequested/assetDropRequested below already follow.
+    cameraCaptureRequested = false;
     // Phase 15f: unconditionally reset at the top of every call, same
     // "false/empty every frame except the one where the real thing actually
     // happened" discipline saveSceneRequested (just above, Phase 15e) and
@@ -1145,6 +1150,32 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
 
     ImGui::Begin("Viewport");
     {
+        // Phase 16: the camera-capture trigger -- a double-click anywhere in
+        // this panel's own content region, gated to only fire while NOT
+        // already captured (see this class's own renderDockspaceShell()
+        // header comment above on `cameraCaptured` for why this exact gate,
+        // and why it's one of three redundant layers against a re-trigger,
+        // not the only one). IsWindowHovered() with no flags -- called here,
+        // right after this panel's own Begin(), before ImGui::Image() below
+        // even submits its item -- reports whether the mouse is over THIS
+        // window's content region specifically (not blocked by a popup, not
+        // actually over a docked sibling panel that merely overlaps this
+        // one on screen), which is exactly the "scoped to this ONE panel"
+        // requirement this feature's own brief calls out: only Dear ImGui
+        // itself knows that, given the dockspace's current layout, which
+        // this project's own scripted DockBuilder split
+        // (buildInitialLayout(), above) can even change panel boundaries
+        // for at runtime via a user's own later drag-to-rearrange.
+        // Deliberately checked before ImGui::Image() is submitted, not
+        // after -- IsWindowHovered() answers "is the mouse over this
+        // WINDOW", not "over this one ITEM", so submission order relative
+        // to it doesn't matter for correctness, but checking it first here
+        // keeps this whole block read top-to-bottom as "first, did the user
+        // just ask to start flying; then, draw what they're flying over."
+        if (!cameraCaptured && ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            cameraCaptureRequested = true;
+        }
+
         // Phase 14c: the panel's own available content-region size -- both
         // what ImGui::Image() below is sized to fill and what
         // viewportWidth()/viewportHeight() report for Application to read

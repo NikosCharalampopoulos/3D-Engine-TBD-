@@ -249,6 +249,7 @@ add_executable(engine_app
     src/asset_browser.cpp
     src/material_override.cpp
     src/asset_drop.cpp
+    src/camera_capture.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

@@ -233,6 +233,28 @@
 //     no ImGui dependency at all, called from Application::
 //     handleViewportAssetDrop() (application.cpp) once this value comes back
 //     non-nullopt.
+//
+// Phase 16: the Viewport panel gains one more piece of interaction --
+// double-clicking anywhere inside it (not on a specific object: this engine
+// has no click-to-select-an-object-IN-THE-3D-VIEWPORT feature at all, today
+// or before this phase -- only the Scene Hierarchy tree's own click-to-select,
+// see scene_hierarchy.hpp -- so "empty space" is, in practice, simply
+// "anywhere inside the Viewport panel," since there is nothing else a click
+// there could possibly hit) requests that Application's free-fly camera_
+// start capturing keyboard/mouse input, fixing a real bug the project owner
+// hit on the actual Windows build: camera_ used to read WASD/mouse
+// unconditionally every frame, moving even when the user was clicking
+// elsewhere in the window or just passing the mouse over the app with no
+// intent to fly the camera at all. See camera_capture.hpp's own header
+// comment for the full design and application.cpp's own Phase 16 comments
+// (run()/render()/update()) for how the resulting request is consumed.
+// Detected via `ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(...)`
+// called INSIDE this "Viewport" panel's own Begin()/End() block (see this
+// class's own renderDockspaceShell() .cpp comment, at the Viewport panel) --
+// the only way to scope the check to specifically this ONE docked panel
+// rather than the whole window, given ImGui's own dockspace layout, is to
+// let ImGui itself answer "is the mouse over which panel," which only a
+// call made from inside that panel's own Begin/End block can do.
 
 #include <optional>
 #include <string>
@@ -451,11 +473,36 @@ public:
     // something ImGui-facing code should own); Application::
     // handleViewportAssetDrop() (application.cpp) is what classifies and
     // acts on a non-nullopt result, immediately after this call returns.
+    //
+    // Phase 16: two new parameters, closing out this method's own header
+    // comment above. `cameraCaptured`: Application's own cameraCaptured_,
+    // read-only BY VALUE (the identical shape `activeDirectionalLight`
+    // already has above, for the identical reason -- EditorUI never assigns
+    // it, only reads it) -- gates the Viewport's own double-click check so
+    // it can only ever fire while NOT already captured, avoiding a
+    // redundant/confusing re-trigger while the camera is already flying
+    // (belt-and-suspenders alongside ImGuiConfigFlags_NoMouse, which
+    // Application sets for exactly this state and which independently makes
+    // IsWindowHovered() unable to return true at all while captured -- see
+    // application.cpp's own Phase 16 render() comment; camera_capture.hpp's
+    // own decideCameraCapture() ALSO tolerates a stray request while already
+    // captured as a defensive no-op, so this is the third, not the only,
+    // layer against it). `cameraCaptureRequested`: unconditionally reset to
+    // false at the top of every call, the identical "false/empty every
+    // frame except the one where the real thing actually happened" shape
+    // saveSceneRequested/textureAssignRequested/assetDropRequested above all
+    // already establish -- set true only on the frame the gated double-click
+    // above actually fires. EditorUI performs no side effect of its own here
+    // (no cursor-mode call, no Camera reference to reset) -- Application is
+    // what owns window_/camera_, so, like every other out-parameter this
+    // method already has, this only ever reports the user's intent for
+    // Application to act on right after this call returns.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
                                            std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
                                            std::optional<std::string>& textureAssignRequested,
-                                           std::optional<std::string>& assetDropRequested);
+                                           std::optional<std::string>& assetDropRequested, bool cameraCaptured,
+                                           bool& cameraCaptureRequested);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()

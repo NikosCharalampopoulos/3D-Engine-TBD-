@@ -303,7 +303,8 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        material_override.cpp -- Phase 15f's new
                        resolveDiffuseTextureOverride(), asset_drop.cpp --
                        Phase 15g's new classifyAssetDropPath()/
-                       modelBaseNameFromAssetPath())
+                       modelBaseNameFromAssetPath(), camera_capture.cpp --
+                       Phase 16's new decideCameraCapture())
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -326,7 +327,9 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        precedent once more, asset_drop -- Phase 15g's new
                        AssetDropCategory/classifyAssetDropPath()/
                        modelBaseNameFromAssetPath(), the pure GL/ImGui-free
-                       half of drag-and-drop)
+                       half of drag-and-drop, camera_capture -- Phase 16's new
+                       CameraCaptureDecision/decideCameraCapture(), the pure
+                       GL/Window/ImGui-free half of camera input capture)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -360,7 +363,8 @@ tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
                        camera_component_test.cpp (Phase 15c),
                        asset_browser_test.cpp (Phase 15d),
                        material_override_test.cpp (Phase 15f),
-                       asset_drop_test.cpp (Phase 15g) + its own
+                       asset_drop_test.cpp (Phase 15g),
+                       camera_capture_test.cpp (Phase 16) + its own
                        CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
@@ -6101,6 +6105,387 @@ every phase since 15d had already named and deliberately deferred. Each
 phase closed exactly the gap in front of it and named the next one
 explicitly, rather than guessing ahead at scope the engine wasn't ready to
 use.
+
+### Phase 16: camera input capture
+
+A real bug, reported directly by the project owner from using the actual
+Windows build, not something surfaced by this project's own headless
+verification: the free-fly camera responded to keyboard/mouse input
+constantly, whether or not the user was actually trying to fly it.
+`camera_.processMovement()`/`processMouseInput()` had run unconditionally
+from `update()` every single frame since Phase 3 introduced them -- there was
+no concept of "the camera is currently captured" anywhere in this engine.
+Clicking anywhere else in the window, or just passing the mouse over the app
+with no intent to look around at all, moved the camera. This phase adds
+exactly that missing concept: camera input is now INACTIVE by default,
+double-clicking inside the Viewport panel "captures" it (hides the cursor,
+starts feeding WASD/mouse-look to `camera_`), and Escape releases it --
+without also quitting the app the way a bare Escape press already did before
+this phase, a real precedence change to existing behavior this phase's own
+brief called out explicitly, not an oversight.
+
+- **The state machine: one small, pure function, not scattered `if`s.**
+  `engine::decideCameraCapture()` (new `camera_capture.hpp`/`.cpp`) takes
+  exactly three inputs -- the capture state as of the start of a frame,
+  whether Escape was pressed, and whether a Viewport double-click requested
+  entering capture -- and returns the next state plus whether Escape should
+  actually quit the app this frame. This is the one piece of the whole
+  feature with NOTHING to do with a real mouse gesture -- unlike hiding the
+  OS cursor, ImGui's own hover suppression, or the double-click detection
+  itself, "what should happen next given these three facts" has exactly one
+  right answer for any combination of inputs, so it's pulled into its own
+  GL/Window/ImGui-free file, the identical "small, standalone decision,
+  unit-tested in isolation" shape `light.hpp`'s
+  `resolveActiveDirectionalLight()`, `material_override.hpp`'s
+  `resolveDiffuseTextureOverride()`, and `asset_drop.hpp`'s
+  `classifyAssetDropPath()` already establish. The precedence rule itself:
+  Escape pressed while captured EXITS capture and absorbs the press (never
+  also quits); Escape pressed while NOT captured quits, exactly matching
+  Escape's pre-Phase-16 behavior; a double-click request while not captured
+  enters capture; every other combination (including a stray
+  double-click-request while already captured, which the real trigger is
+  independently gated to never actually produce -- see below) is a
+  documented no-op. `tests/camera_capture_test.cpp` exercises all eight
+  `(currentlyCaptured, escapeJustPressed, enterCaptureRequested)`
+  combinations, plus (added post-review, see below) an integration
+  regression driving this function from a real `engine::InputActionMap`
+  across multiple polls of a held key.
+- **`Window::setCursorCaptured(bool)` (`window.hpp`/`.cpp`) -- a thin,
+  policy-free wrapper, matching this class's existing role.** One new method:
+  `glfwSetInputMode(window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED :
+  GLFW_CURSOR_NORMAL)`. `GLFW_CURSOR_DISABLED` both hides the OS cursor and
+  switches GLFW to reporting unbounded relative motion (not clamped to the
+  window) -- exactly what `Camera::processMouseInput()`'s xpos/ypos diffing
+  wants while flying, and why GLFW calls this mode "disabled" rather than
+  just "hidden." `Window` itself makes no decision about WHEN to call this --
+  `Application::setCameraCaptured()` (below) is what decides that, matching
+  every other `Window` method's existing "just GLFW, no policy" shape.
+- **The Viewport panel's own double-click detection, and why "empty space"
+  is currently just "anywhere in the Viewport" -- stated explicitly, not
+  silently assumed.** `editor_ui.cpp`'s `renderDockspaceShell()` checks
+  `ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_
+  Left)` right after this "Viewport" panel's own `ImGui::Begin()` -- called
+  from INSIDE that one panel's own `Begin()`/`End()` block, because only Dear
+  ImGui itself, given the dockspace's current layout (which a user's own
+  later drag-to-rearrange can change at runtime), knows which one panel the
+  mouse is actually over; there is no way to scope this check to "just the
+  Viewport" from outside that block. This engine has NO click-to-select-an-
+  object-in-the-3D-viewport feature at all, today or before this phase --
+  only the Scene Hierarchy tree's own click-to-select (`scene_hierarchy.hpp`)
+  -- so "double-click on empty space" reduces, in practice, to "double-click
+  anywhere inside the Viewport panel," since there is nothing else a click
+  there could possibly hit. A real "double-click ON an object to capture,
+  double-click past one to not" distinction would need the identical
+  ray/scene-intersection machinery Phase 15g's own drag-and-drop placement
+  comment already named as out of scope (`frustum.hpp`'s `BoundingSphere`
+  culling is a coarse visibility test, not a ray-hit query) -- a real,
+  separate feature, not something this phase's "fix the always-on camera
+  input bug" brief asks for. The check is gated to only fire while NOT
+  already captured (`cameraCaptured`, a new read-only-by-value parameter on
+  `renderDockspaceShell()`, the identical shape `activeDirectionalLight`
+  already has) -- belt-and-suspenders alongside `ImGuiConfigFlags_NoMouse`
+  (below), which independently makes `IsWindowHovered()` unable to return
+  true at all while captured, and `decideCameraCapture()`'s own tolerance of
+  a stray request while already captured as a defensive no-op. Reports the
+  result through a new `cameraCaptureRequested` out-parameter, the identical
+  "EditorUI reports intent, Application acts on it" shape
+  `createRequest`/`saveSceneRequested`/`textureAssignRequested`/
+  `assetDropRequested` already establish (Phase 14f/15e/15f/15g) -- followed
+  here rather than inventing a fourth mechanism, per this phase's own brief.
+- **The ImGui/GLFW cursor-mode subtlety -- researched against the actual
+  vendored ImGui, not general/possibly-stale knowledge.** Checked directly
+  against `build/_deps/imgui-src/backends/imgui_impl_glfw.cpp`/`.h` and
+  `imgui.h` (this project's actual vendored `v1.92.9b-docking`, per
+  `CMakeLists.txt`'s own `GIT_TAG`), exactly as this phase's own brief asked:
+  - `ImGui_ImplGlfw_CursorPosCallback()`/`MouseButtonCallback()` do **not**
+    special-case `GLFW_CURSOR_DISABLED` at all -- that file's own changelog
+    header shows a 2022-09-01 change that once ignored mouse data under
+    `GLFW_CURSOR_DISABLED` was explicitly reverted 2023-07-18 ("Revert
+    ignoring mouse data on `GLFW_CURSOR_DISABLED`... User may set
+    `ImGuiConfigFLags_NoMouse` if desired"). So every relative-motion delta
+    GLFW's own disabled cursor mode reports while captured would otherwise
+    still feed `io.MousePos` -- and since GLFW's own virtual cursor position
+    under `GLFW_CURSOR_DISABLED` is explicitly unbounded (not clamped to the
+    window), that fed position can end up anywhere, including back over the
+    Inspector/Scene/Assets panels, letting them receive spurious hover/click
+    input while the user is only trying to fly the camera, not click UI.
+    Fixed exactly the way that changelog entry names: `Application::render()`
+    now sets `io.ConfigFlags |= ImGuiConfigFlags_NoMouse` (imgui.h: "Instruct
+    dear imgui to disable mouse inputs and interactions") while
+    `cameraCaptured_` is true, and clears it otherwise -- toggled right
+    before `editorUI_.newFrame()` each frame (the point `ImGui::NewFrame()`
+    actually computes that frame's own hovered-window/clicked-item state), so
+    Dear ImGui computes zero hover/click for every panel while captured.
+  - `ImGui_ImplGlfw_UpdateMouseCursor()`, by contrast, already special-cases
+    `GLFW_CURSOR_DISABLED` on its own: `if ((io.ConfigFlags &
+    ImGuiConfigFlags_NoMouseCursorChange) || glfwGetInputMode(bd->Window,
+    GLFW_CURSOR) == GLFW_CURSOR_DISABLED) { ...; return; }` -- confirmed
+    directly, not assumed. Once `Window::setCursorCaptured(true)` has put
+    GLFW itself into `GLFW_CURSOR_DISABLED`, this backend already leaves it
+    alone rather than fighting to restore a visible cursor shape underneath
+    it, and that file's own 2026-03-25 changelog entry ("Mouse cursor is
+    properly restored if changed by user app/code while using
+    `glfwSetInputMode(..., GLFW_CURSOR_DISABLED)`... Amend change from
+    2025-12-10") confirms this specific, current vendored version already
+    gets the cursor-SHAPE half of this right on its own. So
+    `ImGuiConfigFlags_NoMouseCursorChange` -- the other flag this phase's own
+    brief flagged as a possible requirement -- turned out NOT to be needed on
+    top of `NoMouse`: only the hover/click-suppression half needed an
+    explicit fix, not the cursor-shape half, a real finding from reading the
+    actual vendored source rather than an assumption either way.
+  - No fighting on the transition either direction: `ImGuiConfigFlags_
+    NoMouse` is a plain bitflag `Application::render()` sets/clears every
+    frame from `cameraCaptured_` (an OR/AND-NOT against the existing
+    `ImGuiConfigFlags_DockingEnable` bit `editorUI_`'s own constructor already
+    set once -- never a blind overwrite), so toggling it never disturbs any
+    other config flag.
+- **No visible camera-snap on either transition: `Camera::
+  resetMouseTracking()`, already built (Phase 3), reused, not reinvented.**
+  `Application::setCameraCaptured()` (new, `application.cpp`/`.hpp`) is the
+  ONE place every real capture-state transition (a Viewport double-click, via
+  `render()`; Escape's own precedence check, via `run()`;
+  `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE`, via the constructor) actually applies
+  its side effects, so none can apply one but forget another: it flips
+  `cameraCaptured_`, calls `window_.setCursorCaptured()`, and calls
+  `camera_.resetMouseTracking()` -- Camera's own Phase-3-vintage "discard the
+  tracked last cursor position so the next `processMouseInput()` call primes
+  instead of jumping" method, whose own header comment already named exactly
+  this kind of transition ("switching into the scripted demo path and later
+  resuming") as its intended use. Without this, the first
+  `processMouseInput()` call after RE-entering capture would diff against
+  whatever position was tracked from BEFORE that capture session ended --
+  stale by however long the camera sat uncaptured, and the OS cursor's own
+  position is free to have moved arbitrarily in between (GLFW re-centers/
+  frees it on each `GLFW_CURSOR_DISABLED`/`GLFW_CURSOR_NORMAL` transition) --
+  producing exactly the "huge jump on first use" bug `processMouseInput()`'s
+  own priming behavior already exists to prevent for a brand-new `Camera`.
+  Reset on BOTH transitions (not just entry) for symmetry/defensiveness, this
+  project's own established style, even though nothing currently reads
+  Camera's tracked position while uncaptured -- `update()` simply stops
+  calling `processMouseInput()` at all in that state (see below).
+- **`update()`'s camera-input branch, now gated on `cameraCaptured_` -- the
+  exact unconditional call site this whole phase exists to fix.** The
+  `else` branch that used to run `camera_.processMovement()`/
+  `processMouseInput()` every frame, no matter what, is now `else if
+  (cameraCaptured_)`; an uncaptured, non-demo-mode frame now does nothing at
+  all for the camera, the documented "camera input inactive by default"
+  behavior this phase's brief asks for. `ENGINE_CAMERA_DEMO`'s and
+  `ENGINE_FRUSTUM_CULL_DEMO`'s own scripted paths are unaffected -- both stay
+  checked FIRST, exactly as before, completely independent of capture state.
+- **`InputState` needed no new mouse field -- but gained one new KEYBOARD
+  field, `escapeJustPressed` (see the post-review bug fix below for why).**
+  The brief flagged `input.hpp`'s current fields (WASD flags,
+  `escapePressed`, cursor position, no mouse-BUTTON state) as worth reading
+  first -- and indeed there is no mouse-click field there, and none was
+  added: the double-click that starts capture is detected entirely inside
+  Dear ImGui's own per-frame state (`IsMouseDoubleClicked()`, fed by the
+  GLFW mouse-button callback `imgui_impl_glfw` already installs), not by
+  `pollInputState()`/`Window::isKeyPressed()`-style polling the way
+  WASD/Escape are -- there is no Camera-facing "was the mouse double-clicked"
+  concept this engine needs outside of EditorUI's own Viewport check.
+  `escapeJustPressed` is a DIFFERENT addition, only discovered necessary
+  during review (see below): `InputActionMap::justPressed(InputAction::
+  Quit)`, the SAME `InputAction::Quit`/Escape binding `escapePressed` already
+  reads, just via the edge-triggered read `toggleDebugUIPressed` already
+  established the precedent for -- `escapePressed` itself stays exactly the
+  level-triggered field it always was, untouched.
+- **Escape's two meanings, threaded through `run()` in ONE place.** The old
+  `if (input.escapePressed) { quit; }` is now a single call:
+  `decideCameraCapture(cameraCaptured_, input.escapeJustPressed,
+  cameraCaptureRequestPending_)`, followed by `setCameraCaptured(decision.
+  captured)` and quitting only if `decision.quitRequested`. The other half of
+  this one call's job: consuming `cameraCaptureRequestPending_`, a new member
+  holding LAST frame's own Viewport double-click (detected inside
+  `render()`'s own ImGui pass, one whole `update()`+`render()` call after
+  Escape's check point in `run()`, which happens first) -- reset to false the
+  instant it's consumed. This costs exactly one frame of latency between a
+  double-click and the camera actually starting to respond, the same
+  "detected in `render()`, acted on starting next frame" latency this class
+  already documents for a freshly created entity and a freshly changed
+  `selectedEntity_`, not a new kind of lag this phase introduces. Escape's
+  own EXIT-capture path, by contrast, has NO added latency -- it's decided
+  and applied at the very top of `run()`, before that frame's `update()`/
+  `render()` even run, so the cursor reappears the same frame the key is
+  pressed.
+- **`ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1`** (`application.cpp`), unset by
+  default -- this project's established "debug env var calls the exact same
+  production function a real interaction would" precedent
+  (`ENGINE_DEBUG_CREATE`/`spawnEntityFromCreateMenu()`,
+  `ENGINE_DEBUG_SAVE_SCENE`/`saveCurrentScene()`, ...), applied to a feature
+  that is fundamentally a real-mouse-gesture and therefore genuinely cannot
+  be reproduced under Xvfb (no real pointer device exists there to
+  double-click with at all). Calls `setCameraCaptured(true)` once, in the
+  constructor, right after `window_` exists -- the exact same function a real
+  double-click calls, exercising the real `Window::setCursorCaptured()` GLFW
+  call and the real per-frame `processMovement()`/`processMouseInput()`
+  gating in `update()`, just without the gesture that would trigger it
+  in a real interactive run.
+- **`ENGINE_DEBUG_SIMULATE_ESCAPE=1`** (`application.cpp`), unset by
+  default -- added specifically because Xvfb has no real keyboard either, so
+  a real physical Escape press can never reach `window_.isKeyPressed()` under
+  headless verification, meaning Escape's own NEW two-meanings precedence
+  would otherwise be provable only by `tests/camera_capture_test.cpp`'s own
+  isolated unit tests, never by `run()`'s own real wiring actually executing
+  either branch. `run()` holds a synthetic Escape press down for
+  `kDebugSimulateEscapeHoldFrames` (5) CONSECUTIVE polls, starting at
+  `kDebugSimulateEscapeFrame` (frame 3) -- injected via `pollInputState()`'s
+  own `forceEscapeDown` parameter (see the post-review bug fix below for why
+  a multi-poll HOLD, not a single-frame injection, is what this needed) --
+  handled by the exact same `InputActionMap::justPressed()`/
+  `decideCameraCapture()`/`setCameraCaptured()` production call chain a real,
+  physically-held Escape press goes through, not a parallel hand-rolled path.
+  Combined with `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1` in the same run, this
+  proves the full "captured -> Escape held for several frames -> uncaptured
+  on the first held frame, does NOT quit on any of the remaining held
+  frames" sequence end-to-end in the real app; alone (not captured), it
+  proves Escape's
+  ORIGINAL "quit" meaning still fires exactly as it always did -- see Verify
+  below for both actual runs.
+- **Deliberately NOT done this phase**, this project's own established
+  "smallest correct increment" discipline applied here too:
+  **double-click-to-select-an-object-in-the-3D-viewport** (this engine has no
+  such feature at all, before or after this phase -- see above; "empty
+  space" is currently just "anywhere in the Viewport" as a direct, documented
+  consequence, not a gap this phase silently papered over); **any change to
+  mouse-look sensitivity, movement speed, or the WASD/Space/Shift binding
+  set** (`InputActionMap`'s own existing bindings, `input_action_map.hpp`,
+  are completely untouched -- this phase only gates WHETHER that existing
+  input reaches the camera, never WHAT it does once it's captured); **a
+  visible on-screen affordance/tooltip hinting "double-click to fly the
+  camera"** (a real, separate small UX addition this phase's own bug-fix
+  brief didn't ask for -- the Viewport panel gains no new visible chrome at
+  all this phase); **right-click-drag or middle-click-pan camera controls**
+  (out of scope -- this phase only fixes the existing WASD+mouse-look path's
+  always-on bug, it doesn't add new control schemes); **remembering capture
+  state across a Save Scene / reload** (capture is transient input-focus
+  state, not scene data -- `scene_serialization.hpp`'s schema gains nothing
+  this phase, matching how `selectedEntity_` itself was never serialized
+  either).
+- **Post-review bug fix: a normal Escape TAP quit the whole app immediately
+  after exiting capture.** `decideCameraCapture()`'s first-pass version took
+  a parameter literally named `escapePressed`, fed directly from
+  `InputState::escapePressed` -- level-triggered by design (see that field's
+  own comment: true for EVERY poll a physical key is held, which for a real
+  human key-press spans many more than one ~16ms-throttled frame, not just
+  one). Reviewer reproduced it directly, running the actual function across
+  simulated consecutive frames with `escapePressed` held true: frame N sees
+  `(captured=true, escapePressed=true)`, correctly exits capture; frame N+1,
+  with the SAME physical key still down, sees `(captured=false,
+  escapePressed=true)` -- indistinguishable from a brand-new press with
+  capture already off -- and quits. A user tapping Escape to get their
+  cursor back closed the whole application instead, making this feature
+  actively worse than the always-on-camera bug it exists to fix.
+  `ENGINE_DEBUG_SIMULATE_ESCAPE` never caught this because its first-pass
+  version injected a synthetic press for exactly ONE frame, which behaves
+  like an edge-triggered signal by construction and could never reproduce a
+  real held key. Fixed by adding a new, genuinely edge-triggered
+  `InputState::escapeJustPressed` field (`input.hpp`/`.cpp` --
+  `InputActionMap::justPressed(InputAction::Quit)`, the SAME binding
+  `escapePressed` already reads, just via the edge-triggered read
+  `toggleDebugUIPressed` already established the precedent for) and renaming
+  `decideCameraCapture()`'s own parameter to `escapeJustPressed` with an
+  explicit "must be edge-triggered" contract in its header comment --
+  `escapePressed` itself is left completely untouched (still level-triggered,
+  still idempotent for its own original "quit" use, still read nowhere else
+  in this codebase) rather than redefined, matching this project's own "add a
+  new field for a new distinct need" precedent. `decideCameraCapture()`'s own
+  branch logic needed NO changes -- every one of its 8 cases was already
+  correct in isolation; the bug was entirely in what got PASSED to it across
+  frames. `ENGINE_DEBUG_SIMULATE_ESCAPE` (`application.cpp`) now holds its
+  synthetic press down for `kDebugSimulateEscapeHoldFrames` (5) CONSECUTIVE
+  polls via `pollInputState()`'s new `forceEscapeDown` parameter -- injected
+  at the same physical-key-query layer a real GLFW event enters at, driving
+  the real `InputActionMap::update()`/`justPressed()` edge-detection across
+  multiple polls, not a hand-rolled stand-in for it. `tests/
+  camera_capture_test.cpp` gained a dedicated integration regression (see
+  below) reproducing the exact bug using a real `engine::InputActionMap`.
+- **Verify**: `cmake --build build -j"$(nproc)"` compiles with **zero
+  warnings** under `-Wall -Wextra` (`camera_capture.cpp`/
+  `camera_capture_test.cpp`/the `input.cpp`/`input.hpp` changes included).
+  `ctest` reports **12/12** (`camera_capture_test` extended, not just its
+  original 8 `(currentlyCaptured, escapeJustPressed, enterCaptureRequested)`
+  pure-logic cases -- a new integration block drives a real
+  `engine::InputActionMap` through a synthetic-but-genuine multi-poll "key
+  held, then released, then pressed again" sequence and asserts
+  `decideCameraCapture()` never quits on any of the still-held polls after
+  exiting capture, only exits capture once on the real edge, and still quits
+  correctly on a genuinely NEW press afterward). `tools/run_headless.sh`
+  proof:
+  1. A plain baseline (`ENGINE_MAX_FRAMES=30`, no debug vars), run three
+     independent times, logs the byte-identical clustered-lighting occupancy
+     every prior phase's own recorded baseline shows (`2136 -> 2153/2304`
+     clusters occupied, avg `3.565543 -> 3.580121` lights/occupied cluster),
+     **`1/14 -> 1/14` frustum culling every time (no drop to 0/14)** -- a
+     claim corrected from an earlier draft of this section that mis-stated
+     this as `1/14 -> 0/14`; reviewer reproduced the actual `1/14 -> 1/14`
+     result and this section now records what three independent runs
+     actually show, not what was assumed. This is a Viewport-panel-sizing
+     artifact this phase's own changes have no bearing on either way (the
+     one culled drawable both before and after the Viewport's layout settles
+     is the PBR sphere grid's own known frustum-edge case at this window
+     size, unrelated to camera capture) -- and **zero** `[ERROR]` lines,
+     direct confirmation this phase's changes are a complete no-op for the
+     ordinary, no-interaction case (camera input was already producing no
+     visible movement under Xvfb's own absent-mouse baseline before this
+     phase either, since every `InputState` flag was already false there --
+     what changed is WHY nothing moves: "inactive by default" now, not
+     "active but nothing to read," but the rendered output is identical
+     either way).
+  2. **`ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1` alone**: logs `Camera capture
+     entered: cursor hidden, WASD + mouse-look now drive the camera`
+     immediately followed by `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE set: starting
+     already captured`, then the ordinary per-frame clustered-lighting/
+     frustum-culling lines, byte-identical to the plain baseline above (a
+     texture-free state toggle touches nothing about lighting/culling, as
+     expected -- including the same `1/14 -> 1/14`, never `0/14`), **zero**
+     `[ERROR]` lines, and the run reaches `ENGINE_MAX_FRAMES` and exits
+     cleanly -- direct confirmation `Window::setCursorCaptured(true)`'s real
+     `glfwSetInputMode(..., GLFW_CURSOR_DISABLED)` call is tolerated fine
+     under Xvfb (no crash, no GLFW error logged), not merely assumed to be.
+  3. **`ENGINE_DEBUG_SIMULATE_ESCAPE=1` alone (not captured)**: logs
+     `ENGINE_DEBUG_SIMULATE_ESCAPE: simulating a HELD Escape press starting
+     frame 3, held for 5 consecutive frame(s)` immediately followed by `ESC
+     pressed, exiting main loop`, and the run exits after exactly 3 frames --
+     well short of `ENGINE_MAX_FRAMES=30` -- confirming Escape's ORIGINAL
+     "quit" meaning still fires exactly as it always did, on the very first
+     held poll, for a user who never captures the camera at all (the loop
+     breaks immediately, so the remaining 4 simulated held frames are never
+     reached in this scenario -- expected, not a gap: idempotency of the
+     ORIGINAL quit path was never in question, only the captured-state exit
+     path below was).
+  4. **`ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1 ENGINE_DEBUG_SIMULATE_ESCAPE=1`
+     together (captured) -- the direct, real-app reproduction of the
+     post-review bug fix above.** Logs capture entering as in (2), then on
+     frame 3 `ENGINE_DEBUG_SIMULATE_ESCAPE: simulating a HELD Escape press
+     starting frame 3, held for 5 consecutive frame(s)` immediately followed
+     by exactly ONE `Camera capture exited: cursor restored, WASD +
+     mouse-look no longer drive the camera` line -- critically, NOT `ESC
+     pressed, exiting main loop`, and no SECOND `Camera capture exited`/quit
+     line anywhere in the log, even though the simulated key stays "held"
+     for 4 more frames (4 through 7) after the one that actually exits
+     capture. The run continues all the way to `ENGINE_MAX_FRAMES=30` and
+     exits via `Reached max frame count`, not via the quit path. This is the
+     exact scenario the reported bug broke -- re-run after the fix, it now
+     survives past the frame where capture exits, all the way to
+     `ENGINE_MAX_FRAMES`, confirmed directly rather than assumed. Zero
+     `[ERROR]` lines across all four runs above.
+  5. **What headless verification could NOT cover, stated plainly rather
+     than silently assumed away**: the real double-click GESTURE itself
+     (Xvfb has no real pointer device to click with at all, so
+     `EditorUI::renderDockspaceShell()`'s own `IsWindowHovered()`/
+     `IsMouseDoubleClicked()` check was never exercised by any of the runs
+     above -- only code-read-confirmed against the actual vendored ImGui
+     source, not screenshot/log-verified the way every other line of this
+     phase was); real mouse-look actually rotating the view (no real cursor
+     motion exists under Xvfb either, matching every prior phase's own
+     documented camera-movement verification limit); and, correspondingly,
+     any visual confirmation of the OS cursor actually disappearing/
+     reappearing on a real display (this environment has no real, human-
+     observable cursor at all -- only GLFW's own internal input-mode state,
+     which the runs above DO confirm transitions correctly and crash-free).
+     A reviewer with access to a real Windows/Linux desktop build is the
+     only way to close this specific gap -- exactly the situation this whole
+     phase exists because of in the first place.
 
 ## Libraries used and why
 

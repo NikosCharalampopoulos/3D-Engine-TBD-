@@ -573,6 +573,47 @@ private:
     void update(double deltaTime, const InputState& input);
     void render();
 
+    // Phase 16: the one place cameraCaptured_ (below) is ever actually
+    // written -- called from run() (Escape's own precedence check, via
+    // decideCameraCapture(), camera_capture.hpp) and from render() (a
+    // Viewport double-click, reported through editorUI_.
+    // renderDockspaceShell()'s new `cameraCaptureRequested` out-parameter),
+    // and directly from the constructor for ENGINE_DEBUG_FORCE_CAMERA_CAPTURE
+    // (see that env var's own application.cpp comment) -- the same "one real
+    // function, every real trigger AND the debug var all call it" precedent
+    // spawnEntityFromCreateMenu()/ENGINE_DEBUG_CREATE and
+    // saveCurrentScene()/ENGINE_DEBUG_SAVE_SCENE already establish. A no-op
+    // (returns immediately) when `captured` already equals cameraCaptured_ --
+    // every call site above is free to call this unconditionally with
+    // whatever decideCameraCapture() (or the debug var) computed, rather
+    // than each needing its own "did this actually change" guard.
+    //
+    // Applies every real side effect of a capture-state transition in ONE
+    // place, so no call site can apply one but forget another:
+    //   - window_.setCursorCaptured(captured) -- hides/locks or restores the
+    //     OS cursor (window.hpp's own Phase 16 comment).
+    //   - camera_.resetMouseTracking() -- discards Camera's own tracked last
+    //     cursor position on EITHER transition, not just entry. Strictly
+    //     necessary on entry (see camera.hpp's own processMouseInput()
+    //     comment on "priming": without this, the first processMouseInput()
+    //     call after re-entering capture would diff against whatever
+    //     position was tracked from BEFORE this capture session ended --
+    //     stale by however long the camera sat uncaptured -- and could snap
+    //     the view). Harmless, and kept for symmetry/defensiveness (this
+    //     project's own established style -- e.g. resetMouseTracking()'s own
+    //     comment already calls out "switching into the scripted demo path
+    //     and later resuming" as exactly this kind of transition), on exit
+    //     too: nothing currently reads Camera's tracked position while
+    //     uncaptured (update() simply stops calling processMouseInput() at
+    //     all -- see this class's own Phase 16 update() comment), but a
+    //     future change that fed the camera ANY input while uncaptured would
+    //     otherwise inherit a stale tracked position with no reset in
+    //     between.
+    //   - A LOG_INFO line naming the transition, the same "state changes
+    //     that matter for headless verification get logged" precedent every
+    //     other ENGINE_DEBUG_*-reachable state change in this class follows.
+    void setCameraCaptured(bool captured);
+
     // Phase 14c: reads editorUI_'s own last-recorded Viewport panel content-
     // region size (see editor_ui.hpp's viewportWidth()/viewportHeight() and
     // this class's own Phase 14c header comment) into viewportWidth_/
@@ -1396,6 +1437,69 @@ private:
     // input.hpp's own comment), just implemented directly here instead of
     // through that class.
     bool ctrlSWasDown_ = false;
+
+    // Phase 16: true exactly while the free-fly camera is "captured" --
+    // the OS cursor hidden, WASD/mouse-look actually feeding camera_ (see
+    // update()'s own Phase 16 comment). False (the default) means camera
+    // input is INACTIVE, fixing the real bug this whole phase exists for --
+    // camera_.processMovement()/processMouseInput() used to run
+    // unconditionally every frame, moving the camera from a stray click or
+    // mouse pass-over the user never intended as camera input at all. Never
+    // written directly -- every real transition (a Viewport double-click,
+    // Escape's own precedence check, ENGINE_DEBUG_FORCE_CAMERA_CAPTURE) goes
+    // through setCameraCaptured() above, the one place that also applies
+    // window_.setCursorCaptured()/camera_.resetMouseTracking() so this flag
+    // can never drift out of sync with the OS cursor's own actual
+    // hidden/visible state.
+    bool cameraCaptured_ = false;
+
+    // Phase 16: this frame's Viewport double-click, if any, detected inside
+    // render() (editorUI_.renderDockspaceShell()'s own new
+    // `cameraCaptureRequested` out-parameter) but not consumed until the
+    // TOP of the NEXT frame's run() loop, alongside that frame's own fresh
+    // escapeJustPressed -- see run()'s own Phase 16 comment for exactly why
+    // both of this whole feature's two triggers (Escape and a double-click)
+    // are folded into ONE decideCameraCapture() call per frame rather than
+    // applied at the two separate points in the pipeline where each is
+    // actually detected: Escape is known at the very top of run(), before
+    // update()/render() run, but a Viewport double-click can only be
+    // detected from INSIDE render()'s own ImGui pass, one whole
+    // update()+render() call later than Escape's own check point. Reset to
+    // false the instant it's consumed (the top of the next run() loop
+    // iteration), the same "one-shot signal, cleared once acted on" shape
+    // saveSceneRequested/textureAssignRequested/assetDropRequested already
+    // establish, just carried across the run()/render() boundary via a
+    // member instead of a same-call out-parameter, since those two calls
+    // don't happen back-to-back the way EditorUI's own out-parameters and
+    // their Application-side handling do. This adds exactly one frame of
+    // latency between the double-click and the camera actually starting to
+    // respond -- the same one-frame "detected in render(), acted on
+    // starting next frame" latency this class already documents for a
+    // freshly created entity (spawnEntityFromCreateMenu()'s own comment) and
+    // a freshly changed selectedEntity_ (this header's own Phase 14d
+    // comment), not a new kind of lag this phase introduces.
+    bool cameraCaptureRequestPending_ = false;
+
+    // Phase 16: set from ENGINE_DEBUG_SIMULATE_ESCAPE -- see that env var's
+    // own application.cpp comment for why this exists (Xvfb has no real
+    // keyboard, so a real Escape press can never reach window_.isKeyPressed()
+    // under headless verification) and kDebugSimulateEscapeFrame/
+    // kDebugSimulateEscapeHoldFrames for exactly which frames it holds the
+    // synthetic press down for. Read-only after construction, consulted once
+    // per frame from run() (see that method's own Phase 16 comment) to
+    // compute `forceEscapeDown` -- fed into pollInputState() itself (see
+    // input.hpp), not applied as a post-hoc InputState override -- for
+    // several CONSECUTIVE frames, not just one.
+    //
+    // Post-review bug fix: originally consumed at a SINGLE frame number,
+    // which behaved like an edge-triggered press by construction and
+    // therefore could never catch a real held-key regression -- see
+    // kDebugSimulateEscapeHoldFrames' own application.cpp comment for the
+    // full incident writeup. Same getenv-gated-behavior pattern as every
+    // other bool flag in this class either way, just consumed across a small
+    // fixed frame RANGE now rather than either a single frame number or
+    // continuously the way cameraDemoMode_/frustumCullDemoMode_ are.
+    bool debugSimulateEscape_ = false;
 };
 
 }  // namespace engine

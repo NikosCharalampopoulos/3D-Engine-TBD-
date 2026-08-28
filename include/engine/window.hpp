@@ -156,6 +156,21 @@ public:
     // events.
     std::pair<double, double> getCursorPos() const;
 
+    // Phase 16: hides + locks the OS cursor (glfwSetInputMode(...,
+    // GLFW_CURSOR_DISABLED), GLFW's own "capture the mouse" mode -- it also
+    // switches GLFW to reporting unbounded relative motion rather than a
+    // position clamped to the window, which is exactly what free-fly
+    // mouse-look wants) when `captured` is true, or restores the ordinary
+    // visible, OS-positioned cursor (GLFW_CURSOR_NORMAL) when false. A thin,
+    // policy-free wrapper matching this class's existing "just GLFW, no
+    // decision-making" role (see this file's own class comment) --
+    // Application::setCameraCaptured() (application.cpp) is what decides
+    // WHEN to call this (a Viewport double-click, or Escape while captured)
+    // and pairs it with resetting Camera's own tracked mouse position (see
+    // camera.hpp's resetMouseTracking()) so the cursor's own position jump
+    // on either transition doesn't also snap the camera's view.
+    void setCursorCaptured(bool captured);
+
     GLFWwindow* handle() const { return window_; }
 
 private:

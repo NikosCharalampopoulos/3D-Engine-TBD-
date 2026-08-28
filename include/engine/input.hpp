@@ -47,6 +47,24 @@ struct InputState {
     // application.cpp's own Phase 8d comment for both actions' handling.
     bool toggleDebugUIPressed = false;
 
+    // Phase 16: edge-triggered (InputActionMap::justPressed(InputAction::
+    // Quit) -- the SAME InputAction/binding escapePressed above already
+    // reads, just via the edge-triggered read instead of the level-triggered
+    // one), added specifically for camera_capture.hpp's decideCameraCapture()
+    // -- see that header's own "Post-review bug fix" comment for exactly why
+    // a real held Escape press broke the original level-triggered
+    // escapePressed when fed into that function. escapePressed above is
+    // DELIBERATELY left level-triggered and untouched: its own original
+    // "quit" use case is idempotent under level-triggering (`if
+    // (escapePressed) quit;` behaves identically whichever way it's
+    // triggered, since the loop breaks on the very first true poll either
+    // way), so there was no reason to change its existing, documented
+    // contract for a second, unrelated consumer that specifically needs the
+    // OTHER triggering style -- the same "add a new field for a new distinct
+    // need, don't repurpose an existing one" precedent toggleDebugUIPressed
+    // itself already set for MoveForward/etc. above it.
+    bool escapeJustPressed = false;
+
     // Raw absolute cursor position, in the same screen coordinates
     // Window::getCursorPos() reports -- Camera::processMouseInput() diffs
     // successive values itself, exactly as it did when Application read
@@ -58,13 +76,31 @@ struct InputState {
 // Polls `window` through `actionMap`'s current bindings once and returns a
 // snapshot. `actionMap` must be the SAME object every frame (Application
 // owns one as a member) rather than a fresh temporary -- edge-triggered
-// fields (toggleDebugUIPressed) only work if InputActionMap::update() sees
-// each frame's real state compared against the previous frame's, which
-// requires persisting across calls. window.isKeyPressed()/getCursorPos()
-// report raw current state (not edge-triggered events), so this whole call
-// is still safe to make once per frame from Application's main loop, same
-// as before this phase.
-InputState pollInputState(const Window& window, InputActionMap& actionMap);
+// fields (toggleDebugUIPressed, and Phase 16's escapeJustPressed) only work
+// if InputActionMap::update() sees each frame's real state compared against
+// the previous frame's, which requires persisting across calls.
+// window.isKeyPressed()/getCursorPos() report raw current state (not
+// edge-triggered events), so this whole call is still safe to make once per
+// frame from Application's main loop, same as before this phase.
+//
+// Phase 16: `forceEscapeDown` (default false, so every pre-existing call
+// site/behavior is unaffected) -- ORed into the physical GLFW_KEY_ESCAPE
+// query this poll feeds `actionMap.update()`, purely so
+// ENGINE_DEBUG_SIMULATE_ESCAPE (application.cpp) can drive a SYNTHETIC but
+// otherwise completely REAL multi-poll "held key" through this engine's
+// actual InputActionMap::update()/justPressed() edge-detection machinery
+// under headless verification, where Xvfb has no real keyboard to hold a
+// key down with at all. Injected at the lowest layer a real GLFW key event
+// would enter at (the isKeyDown query itself), not by post-hoc overriding
+// the returned InputState's own fields -- see this header's own "Post-review
+// bug fix" discussion on camera_capture.hpp for exactly why exercising the
+// REAL edge-detection code path across consecutive polls, not a hand-rolled
+// stand-in for it, is what actually catches a held-key regression like this
+// phase's own reported bug. Passing true for several consecutive calls (then
+// false) reproduces a real press-and-hold-then-release sequence: escapeJustPressed
+// comes back true on exactly the first of those calls and false on every
+// later one still held, exactly like a real physical key.
+InputState pollInputState(const Window& window, InputActionMap& actionMap, bool forceEscapeDown = false);
 
 }  // namespace engine
 
