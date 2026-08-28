@@ -148,3 +148,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME camera_component_test COMMAND camera_component_test)
+
+# Phase 15d adds asset_browser_test, testing engine::buildAssetTree()
+# (src/asset_browser.cpp) in isolation -- same "plain executable, links only
+# the pure logic file it's testing" shape as scene_hierarchy_test above.
+# asset_browser.cpp depends only on <filesystem> (no ecs.hpp, no GLM, no GL/
+# ImGui at all), so unlike every test target above it needs no engine
+# library dependency beyond the standard library itself.
+add_executable(asset_browser_test
+    asset_browser_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/asset_browser.cpp
+)
+target_include_directories(asset_browser_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(asset_browser_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME asset_browser_test COMMAND asset_browser_test)

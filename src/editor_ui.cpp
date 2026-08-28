@@ -22,11 +22,13 @@
 #include <cmath>
 #include <string>
 
+#include "engine/asset_browser.hpp"
 #include "engine/camera_component.hpp"
 #include "engine/light.hpp"
 #include "engine/log.hpp"
 #include "engine/material.hpp"
 #include "engine/model.hpp"
+#include "engine/paths.hpp"
 #include "engine/physics.hpp"
 #include "engine/scene_hierarchy.hpp"
 #include "engine/texture.hpp"
@@ -99,6 +101,63 @@ void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& sel
     if (opened && !node.children.empty()) {
         for (const SceneTreeNode& child : node.children) {
             renderSceneTreeNode(child, selectedEntity);
+        }
+        ImGui::TreePop();
+    }
+
+    ImGui::PopID();
+}
+
+// Phase 15d: the Assets panel's own row-drawing helper -- deliberately mirrors
+// renderSceneTreeNode() above almost line for line (same TreeNodeEx() flag
+// set, same "click anywhere on the row selects it" IsItemClicked() check,
+// same no-icon-glyphs reasoning that helper's own comment already gives in
+// full), just walking asset_browser.hpp's AssetTreeNode forest instead of
+// scene_hierarchy.hpp's SceneTreeNode one, and keying selection by
+// `node.relativePath` (a stable string identity for a filesystem row)
+// instead of an EntityId. Kept as its own separate function rather than
+// templating renderSceneTreeNode() over "anything tree-shaped": the two
+// trees' node types share no base/interface, their selection state has
+// different types and different owners (Application's selectedEntity_ vs.
+// this class's own selectedAssetPath_ -- see this file's own header comment
+// on why), and the two panels are likely to diverge further once either
+// grows real functionality (e.g. a future drag-and-drop source only the
+// Assets tree would need) -- collapsing them into one generic helper now
+// would buy nothing today at the cost of a genuinely awkward abstraction.
+void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& selectedAssetPath) {
+    ImGui::PushID(node.relativePath.c_str());
+
+    const bool isSelected = selectedAssetPath.has_value() && *selectedAssetPath == node.relativePath;
+    // Deliberately NO ImGuiTreeNodeFlags_DefaultOpen here, unlike
+    // renderSceneTreeNode() above: this engine's own scene has a handful of
+    // entities total, so starting every group expanded costs nothing and
+    // shows everything at a glance, but assets/models/ and assets/textures/
+    // can plausibly grow into real per-category folder structure a level
+    // designer would want collapsed by default (this project's own
+    // assets/textures/skybox/ and assets/textures/hdri/ subfolders already
+    // show the shape of that) -- an all-expanded-by-default asset tree gets
+    // worse, not better, as a project's content grows, which an all-expanded
+    // scene tree does not.
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (node.children.empty()) {
+        // Same "no expand arrow / no matching TreePop() needed" shape
+        // renderSceneTreeNode() above uses for a childless entity -- here,
+        // a file (isDirectory == false always has empty children, but an
+        // empty directory does too, and both should render as a plain leaf
+        // row rather than a permanently-unopenable arrow).
+        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    }
+    if (isSelected) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+
+    const bool opened = ImGui::TreeNodeEx(node.name.c_str(), flags);
+    if (ImGui::IsItemClicked()) {
+        selectedAssetPath = node.relativePath;
+    }
+    if (opened && !node.children.empty()) {
+        for (const AssetTreeNode& child : node.children) {
+            renderAssetTreeNode(child, selectedAssetPath);
         }
         ImGui::TreePop();
     }
@@ -684,6 +743,21 @@ EditorUI::EditorUI(GLFWwindow* window) {
     ImGui_ImplGlfw_InitForOpenGL(window, /*install_callbacks=*/true);
     ImGui_ImplOpenGL3_Init(glslVersionString());
 
+    // Phase 15d: the Assets panel's file/folder tree, built exactly once here
+    // -- see this class's own header comment and asset_browser.hpp's own
+    // "Caching" comment for why a constructor-time build (not a rebuild every
+    // renderDockspaceShell() call) is the correct match for a filesystem
+    // tree that cannot change at runtime today. resolveAssetPath("assets")
+    // resolves relative to this executable's own directory, not the process
+    // cwd -- the same mechanism every other asset path in this engine
+    // already goes through (see paths.hpp), so this works correctly
+    // regardless of where engine_app was actually launched from. Needs no GL
+    // context (unlike the ImGui backend init just above) -- ordered after it
+    // here only because it belongs conceptually with "Phase 15d's own
+    // constructor-time setup," not because of any actual dependency between
+    // the two.
+    assetTree_ = buildAssetTree(resolveAssetPath("assets"));
+
     LOG_INFO("Editor UI initialized (always-on dockspace shell, Phase 14a)");
 }
 
@@ -808,7 +882,22 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     ImGui::End();
 
     ImGui::Begin("Assets");
-    ImGui::TextWrapped("Asset Browser -- coming in a later Phase 14 sub-phase.");
+    {
+        if (assetTree_.empty()) {
+            // Genuinely empty forest (see asset_browser.hpp's own "Which
+            // assets/ subdirectories are browsable" comment) -- neither
+            // assets/models/ nor assets/textures/ exists under this
+            // executable's own resolved assets/ directory. Not expected in
+            // this project's own tree (both exist -- see the actual
+            // directory listing this phase's own README section cites), but
+            // a defensive, explicit message here is better than a
+            // silently-blank panel if a future run is ever missing both.
+            ImGui::TextWrapped("No browsable assets found under assets/models/ or assets/textures/.");
+        }
+        for (const AssetTreeNode& root : assetTree_) {
+            renderAssetTreeNode(root, selectedAssetPath_);
+        }
+    }
     ImGui::End();
 
     ImGui::Begin("Viewport");

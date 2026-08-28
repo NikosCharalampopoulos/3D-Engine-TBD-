@@ -246,6 +246,7 @@ add_executable(engine_app
     src/light.cpp
     src/transform_hierarchy.cpp
     src/scene_hierarchy.cpp
+    src/asset_browser.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

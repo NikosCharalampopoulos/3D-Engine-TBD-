@@ -291,7 +291,9 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp,
                        input_action_map.cpp, physics.cpp, editor_ui.cpp,
                        light.cpp -- Phase 15a, extended Phase 15b with
-                       DirectionalLight/resolveActiveDirectionalLight())
+                       DirectionalLight/resolveActiveDirectionalLight(),
+                       scene_hierarchy.cpp -- Phase 14d, asset_browser.cpp --
+                       Phase 15d's buildAssetTree())
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -303,7 +305,9 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        component, extended Phase 15b with DirectionalLight,
                        camera_component -- Phase 15c's new CameraComponent,
                        deliberately its own header rather than folded into
-                       light.hpp)
+                       light.hpp, asset_browser -- Phase 15d's new
+                       AssetTreeNode/buildAssetTree(), same "own header,
+                       genuinely different kind of thing" precedent)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -328,7 +332,8 @@ tests/                 scene_serialization_test.cpp (Phase 8b),
                        scene_hierarchy_test.cpp (Phase 14d),
                        light_test.cpp (Phase 15a, extended Phase 15b with
                        resolveActiveDirectionalLight() coverage),
-                       camera_component_test.cpp (Phase 15c) + its own
+                       camera_component_test.cpp (Phase 15c),
+                       asset_browser_test.cpp (Phase 15d) + its own
                        CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
@@ -4471,6 +4476,70 @@ already existed.
     `ENGINE_DEBUG_FORCE_DYNAMIC=scene` both log and render exactly as Phase
     14e's own README section already describes -- confirming this phase's
     `ecs.hpp`/`editor_ui.cpp` changes didn't disturb either debug aid.
+- **Post-14f bug-review fix: a child whose world matrix failed to decompose
+  was silently left with a dangling `Parent`, reintroducing the exact
+  teleport bug this function exists to prevent**.
+  `destroyEntityOrphaningChildren()`'s own `registry.each<Parent>(...)` walk
+  (`transform_hierarchy.cpp`) resolved each direct child's world matrix and
+  ran it through `glm::decompose()`, but only pushed the child into its
+  `orphans` vector `if (glm::decompose(...))` succeeded -- and the loop right
+  after, the one that actually calls `removeComponent<Parent>()`, only ever
+  ran for entries that made it into `orphans`. `glm::decompose()` can fail
+  (return `false`) for a fully degenerate matrix -- confirmed, not assumed,
+  by running a handful of scales through it directly: a zero on any single
+  scale axis (e.g. `(0, 1, 1)`) reliably fails, while the Inspector's own
+  0.01 clamp floor does not, so this was never reachable through the
+  Inspector itself (Scale is clamped to `[0.01, 100]`, Phase 14e's own
+  comment) but *is* reachable through a hand-edited or malformed
+  `assets/scenes/*.json` (`scene_loader.cpp` applies no such clamp on load,
+  and `Transform::setScale()` itself is a plain unclamped setter) -- and
+  will become more relevant once real Save Scene functionality (Phase 15e)
+  makes hand-editing scene files less the only way to reach it. On that
+  decompose-fails path, the child's `Parent` component was left pointing at
+  the about-to-be-destroyed entity, which was then destroyed via
+  `registry.destroyEntity(id)` a few lines later -- leaving the child with a
+  dangling `Parent`. `resolveWorldMatrix()`'s own "dangling parent -> treat
+  as effective root" fallback (this file's header comment) then kicked in
+  next frame and reinterpreted the child's stale LOCAL transform as if it
+  were a WORLD transform: a visible teleport, on the one path
+  `destroyEntityOrphaningChildren()` exists specifically to prevent. Fixed by
+  unconditionally orphaning every direct child regardless of decompose
+  success, gating only the Transform-overwrite on a new
+  `hasNewWorldTransform` flag on the (renamed-in-spirit, same-named)
+  `Orphan` struct: every child is now pushed into `orphans` unconditionally,
+  so the post-loop `removeComponent<Parent>()` call -- itself now
+  unconditional rather than reachable only for decompose successes -- runs
+  for all of them; the position/rotation/scale overwrite loop only actually
+  calls `setPosition()`/`setRotation()`/`setScale()` when
+  `hasNewWorldTransform` is true, otherwise leaving the child's existing
+  Transform completely untouched (its current LOCAL values simply become
+  its new, if-slightly-wrong, effective ones -- the same "a visible jump in
+  this one unreachable-today edge case beats silently discarding data or
+  aborting the whole delete" tradeoff this function's own header comment
+  already accepted for the decompose-succeeds case; only the failure case's
+  *orphaning* was ever actually broken). `transform_hierarchy_test.cpp`
+  gained a new case building a parent with `setScale(glm::vec3(0.0f, 1.0f,
+  1.0f))` (confirmed via a standalone check to actually make
+  `glm::decompose()` return `false` on this codebase's own T*R*S matrix
+  layout) and a normal child under it, then asserts the child is still a
+  real root (no `Parent` component) and its Transform is untouched and fully
+  finite after `destroyEntityOrphaningChildren()` -- both per this project's
+  own established "prove the regression test actually catches the bug"
+  practice: reverting just this fix (via `git apply -R` on the isolated
+  `transform_hierarchy.cpp` diff, keeping the new test) reproduces the
+  failure exactly (`FAIL: the child of a degenerate-scale parent is still
+  orphaned to root even though its world matrix failed to decompose -- the
+  core Post-14f bug-review fix`, `transform_hierarchy_test: 1 check(s)
+  failed`), and re-applying the fix (`git apply` on the same diff) restores
+  a clean pass across all 9 `ctest` targets. The already-working
+  decompose-succeeds path (this phase's own two `destroyEntityOrphaningChildren()`
+  test cases above) still passes unchanged, confirming the refactor didn't
+  disturb it. `ENGINE_DEBUG_DELETE=falling_cube` (the normal,
+  non-degenerate case exercised by this section's own headless run above)
+  re-run against the fixed code logs the same `"destroyed entity ... "`
+  line and renders `parented_demo_cube` in the same on-screen position as
+  before, with zero `[ERROR]` lines -- confirming no regression on the path
+  that was already correct.
 
 ### Phase 15a: real Point Light entities
 
@@ -4829,6 +4898,232 @@ active" concept because it replaces a single fixed uniform pair, and Camera
 needed neither, because nothing downstream reads it yet. Each phase in this
 arc closed exactly the gap in front of it and named the next one explicitly,
 rather than guessing ahead at scope the engine wasn't ready to use.
+
+### Phase 15d: a real Asset Browser
+
+The Assets panel had been a single placeholder line since Phase 14a itself
+(`ImGui::TextWrapped("Asset Browser -- coming in a later Phase 14 sub-phase.")`)
+-- untouched through the entire Phase 14b-14f/15a-15c arc while every other
+editor panel (Scene, Viewport, Inspector) grew real content. With the
+Light/Camera arc closed, this was the next actual gap, so it becomes its own
+whole top-level phase (16), not another Phase 14 sub-phase or folded under
+15 -- the numbering convention this project's own "Development history"
+section has followed consistently: each closed arc's own last sub-phase
+letter is where the next genuinely new arc starts a fresh whole number, the
+same way Phase 8's a-e sub-phases gave way to Phase 9, and 15a-15c now give
+way to 16.
+
+Scope, decided by actually reading what's on disk (`ls -R assets/`) rather
+than assuming: `assets/` holds `models/` (4 `.obj`+`.mtl` pairs),
+`textures/` (flat PNGs plus `skybox/` and `hdri/` subfolders), `shaders/`
+(29 GLSL files), and `scenes/` (one file, `default.json`) -- no separate
+`materials/` directory exists at all (materials live inline in each
+model's own `.mtl` file, loaded as part of the model, not as a standalone
+asset type). Only `models/` and `textures/` are browsable this phase -- see
+`asset_browser.hpp`'s own header comment for the full reasoning, briefly:
+they're the only two asset kinds `ResourceManager` (`resource_manager.hpp`)
+actually loads/caches BY PATH for something a level designer places into a
+scene (`getModel()`/`getTexture()`). `shaders/` is renderer implementation
+detail -- every path under it is a `resolveAssetPath()`'d constant baked
+into `application.cpp`, never something picked per-entity through a
+browser. `scenes/` is the currently-loaded level's own save/load file
+(`scene_serialization.hpp`), not content placed *into* a level the way a
+model or texture is -- `ResourceManager` has no "Scene" cache entry at all,
+which is the real, checked boundary this allowlist mirrors (one entry short
+of ResourceManager's own three -- Shader excluded for the identical
+"engine machinery, not placeable content" reason as `shaders/` itself).
+
+- **`asset_browser.hpp`/`asset_browser.cpp`** (new, `include/engine/` +
+  `src/`): `AssetTreeNode` (name + assets/-relative path + isDirectory +
+  children) and `buildAssetTree(assetsRoot)`, a pure `std::filesystem` walk
+  with no GL/ImGui/ecs.hpp dependency at all -- same "pure data vs.
+  GL/ImGui-facing" split `scene_hierarchy.hpp` established for
+  `buildSceneTree()`, just walking real directories instead of the ECS.
+  `directory_iterator`'s enumeration order is unspecified by the standard,
+  so every directory's entries are sorted (subdirectories before files,
+  alphabetical within each group) before children are built, making the
+  output -- and the Assets panel's own on-screen order -- deterministic
+  regardless of filesystem/platform. A missing category directory
+  (`assets/models/` or `assets/textures/` not existing at all) is silently
+  skipped, not an error: neither is required to exist.
+- **`editor_ui.hpp`/`editor_ui.cpp`**: the Assets panel's placeholder line
+  is replaced by a real tree. `EditorUI` gains two private members:
+  `assetTree_` (the `std::vector<AssetTreeNode>` forest, built exactly
+  **once**, in the constructor, via `buildAssetTree(resolveAssetPath(
+  "assets"))` -- see below for why once, not every frame) and
+  `selectedAssetPath_` (a `std::optional<std::string>` keyed by
+  `AssetTreeNode::relativePath`, the row currently highlighted).
+  `renderAssetTreeNode()` mirrors `renderSceneTreeNode()`
+  (Phase 14d) almost line for line -- same `TreeNodeEx()` flag set, same
+  "click anywhere on the row selects it" `IsItemClicked()` check, same
+  no-icon-glyphs reasoning (this engine's Dear ImGui build carries no icon
+  font -- see `renderSceneTreeNode()`'s own comment) -- kept as a genuinely
+  separate function rather than templated over "anything tree-shaped"
+  because the two node types share no base, their selection state has
+  different types and different owners, and the two panels are likely to
+  diverge further once either grows real functionality. One deliberate
+  difference: asset-tree nodes do **not** get `ImGuiTreeNodeFlags_
+  DefaultOpen` the way scene-tree nodes do -- this engine's own scene has a
+  handful of entities (expand-by-default costs nothing there), but
+  `assets/textures/skybox/` and `assets/textures/hdri/` already show real
+  subfolder structure a level designer would want collapsed by default as a
+  project's content grows.
+- **Caching, not a per-frame rebuild**: unlike `buildSceneTree()` (rebuilt
+  fresh every `renderDockspaceShell()` call, because ECS entities can be
+  created/deleted any frame through the Scene panel's own Create menu),
+  `assetTree_` is built exactly once, in `EditorUI`'s constructor. Nothing
+  in this engine writes into `assets/` at runtime today -- no import
+  feature exists (see below) -- so the tree cannot change between one frame
+  and the next during a single run, and re-walking the filesystem 60+ times
+  a second against a tree already known to be unchanged would be pure waste
+  -- the same "match the cache lifetime to what actually varies" reasoning
+  `resource_manager.hpp`'s own header comment gives for its own
+  get-or-load cache, applied here as "build once" instead of "load once,
+  reuse forever."
+- **Selection is local, cosmetic state, not threaded through like
+  `selectedEntity`**: `selectedAssetPath_` lives on `EditorUI` itself, never
+  passed to or read by `Application`. Nothing outside the Assets panel
+  reads it this phase -- no Inspector wiring, no viewport hookup, no
+  drag-and-drop (see below) -- so there is none of `selectedEntity`'s own
+  cross-panel/cross-frame reason (`application.hpp`'s Phase 14d comment) to
+  make it live anywhere but here.
+- **Deliberately not done this phase** (the same conservative default this
+  whole project's "smallest correct increment" discipline expects, checked
+  against each item on its own merits rather than assumed):
+  - **Drag-and-drop into the Scene/Viewport.** A real, separate, much
+    bigger feature -- no drag-and-drop exists anywhere in this engine's UI
+    today, and building the first one as a side effect of an Asset Browser
+    phase would bury a substantial new capability inside what should be a
+    read-only browsing phase.
+  - **Wiring the Material Inspector's `Browse...` button to this browser.**
+    That button's own existing comment (`editor_ui.cpp`, Phase 14e)
+    already documents exactly why it's `BeginDisabled()`'d: `Model`
+    instances (and therefore their `Material`s) are cached and shared via
+    `ResourceManager` across every entity that loaded the same asset path,
+    so letting the Inspector swap which model/material a live, shared
+    `Material` reference points at would silently repaint every other
+    entity sharing that same cached asset -- a real hazard, not a
+    hypothetical one, given `parented_demo_cube` and `falling_cube` already
+    share `assets/models/falling_cube.obj` in this project's own default
+    scene. Nothing about *building a read-only browser* changes that
+    hazard -- the button stays exactly as `BeginDisabled()`'d as Phase 14e
+    left it, comment untouched.
+  - **Importing new files into `assets/` from outside the project.** This
+    phase browses what's already there; it doesn't add to it. No file
+    dialog, no copy-into-`assets/` operation.
+  - **Thumbnails/previews.** A real separate feature of its own -- texture
+    thumbnails would need their own GPU-upload/caching path (loading every
+    texture in `assets/textures/` just to preview it, whether or not it's
+    ever used in the scene, is a meaningfully different cost profile than
+    `ResourceManager`'s own "load on first actual use" contract), and
+    models have no single obvious preview image at all. Text labels (no
+    icon glyphs, matching `renderSceneTreeNode()`'s own precedent) are
+    enough to identify a row this phase.
+- **Post-16 bug-review fix: an unreadable entry anywhere under
+  assets/models/ or assets/textures/ crashed the WHOLE ENGINE at startup**.
+  The first-pass `buildNode()` used the throwing
+  `fs::is_directory(path)`/`fs::directory_iterator(path)` overloads (no
+  `std::error_code` out-param) for everything below the top-level category
+  check, even though that top-level check itself already used the
+  non-throwing overloads correctly. Reviewer reproduced it directly: a
+  self-referencing symlink one level under a scratch `assets/models/` (a
+  realistic on-disk state -- a stray symlink loop from an install artifact
+  or backup tool, not a hypothetical) makes resolving that entry's type hit
+  `ELOOP` ("Too many levels of symbolic links"), which
+  `fs::is_directory(path)` surfaces as an uncaught `std::filesystem_error`.
+  Because `buildAssetTree()` runs inside `EditorUI`'s constructor, inside
+  `Application`'s own constructor, that exception propagated all the way
+  out of `Application`'s constructor -- `main.cpp`'s top-level `try`/`catch`
+  turned it into `LOG_ERROR("Fatal: ...")` + `EXIT_FAILURE`, taking down the
+  entire engine over a filesystem hiccup confined to one asset subdirectory,
+  not a cosmetic Assets-panel-only bug. Fixed by routing every filesystem
+  query in `buildNode()` through the `std::error_code`-taking overload, the
+  same discipline the top-level category check already modeled: a
+  directory's own `is_directory()` check, its `directory_iterator`
+  construction, advancing that iterator (`operator++`/`increment()` can
+  *also* throw mid-enumeration, not only at construction -- easy to miss,
+  since a plain range-based `for` silently calls the throwing
+  `operator++()`), and the sort comparator's own `is_directory()` calls
+  (used only for display ordering) are all now guarded. An entry whose type
+  can't be determined at all is left out of the returned tree entirely (with
+  a `LOG_WARN` noting what was skipped and why) rather than aborting the
+  whole walk -- see `asset_browser.hpp`'s own new "Unreadable entries never
+  abort the walk" comment for the documented contract, and
+  `asset_browser.cpp`'s `buildNode()`/`tryIsDirectory()` for the mechanics.
+  `asset_browser_test.cpp` gained a matching case: a scratch
+  `assets/models/` containing a real file plus a self-referencing symlink
+  now asserts `buildAssetTree()` returns normally (wrapped in a
+  `try`/`catch` that fails the test outright if it ever throws again) with
+  the readable sibling present and the broken symlink silently absent --
+  confirmed to actually exercise the new code path via the executable's own
+  stdout (`[WARN] Asset Browser: skipping unreadable entry "models/
+  self_loop"...`), not just a passing exit code.
+- **Post-16 bug-review fix (second pass): a permission-denied subdirectory
+  rendered as a silently-empty folder, with no diagnostic anywhere**. The
+  first-pass fix above reached for
+  `fs::directory_options::skip_permission_denied` when constructing
+  `buildNode()`'s `directory_iterator`, reasoning that it would let an
+  EACCES-on-open failure degrade for free. It does degrade -- but that
+  flag's own documented standard-library behavior is to swallow the
+  failure and hand back zero entries WITHOUT ever setting `iterEc`, so
+  `buildNode()`'s own error-handling branch never even ran for this case.
+  The practical effect: a permission-denied directory rendered in the
+  Assets panel as an ordinary, childless leaf row -- no expand arrow, no
+  `LOG_WARN`, nothing -- genuinely indistinguishable, both in the log and
+  in the actual editor GUI, from a directory that is simply, unremarkably
+  empty. A level designer staring at the panel itself (not tailing stdout)
+  had no way to tell those two states apart. Fixed by dropping
+  `skip_permission_denied` entirely: `directory_iterator`'s plain
+  `(path, error_code&)` constructor DOES set `iterEc` on EACCES, so a
+  permission-denied directory now falls through to the exact same
+  `LOG_WARN`-and-continue path (`asset_browser.cpp`'s own `buildNode()`)
+  every other unreadable thing in this file already used -- reported, not
+  silently absorbed, while still never throwing.
+  `asset_browser_test.cpp` gained a matching case, honestly scoped to what
+  this project's own sandboxed environment can actually verify: this test
+  process runs as root (confirmed via `geteuid()`, not assumed), and root
+  bypasses ordinary Linux DAC permission checks -- `chmod 000 dir && ls
+  dir` still succeeds as root, checked directly while writing this fix --
+  so a plain chmod-based test would have silently proven nothing. The test
+  instead forks a short-lived child, drops ONLY that child's effective uid
+  to "nobody" (uid 65534, seteuid -- reversible, process-local, the parent
+  itself stays root throughout) before calling `buildAssetTree()` there, so
+  the OS genuinely enforces the permission against that child process, and
+  reports pass/fail back via its exit code; a non-root environment (or one
+  where the privilege drop itself fails) takes a separate, explicitly
+  labeled path rather than asserting a result it couldn't actually
+  establish. Confirmed to actually exercise the new code path the same way
+  as the symlink case above: running the test binary directly shows
+  `[WARN] Asset Browser: could not list directory "models/locked"
+  (Permission denied)...` before `all checks passed`, not just a green exit
+  code.
+- **Verify**: a clean rebuild (`rm -rf build && cmake -B build -S . &&
+  cmake --build build -j`) compiles with **zero warnings** under `-Wall
+  -Wextra` (`asset_browser.cpp`/`asset_browser_test.cpp` included -- no
+  extra link flag needed for `<filesystem>` on this project's GCC 13
+  toolchain). `ctest` reports **9/9** (`asset_browser_test` new -- category
+  allowlist coverage proving `shaders/`/`scenes/` are excluded even when
+  physically present alongside `models/`/`textures/` in the same scratch
+  tree, recursive nesting, deterministic directories-before-files/
+  alphabetical sort order, a missing single category, a wholly assetless
+  root, a self-referencing symlink degrading gracefully instead of
+  throwing, and (the second post-review addition above) a permission-denied
+  subdirectory being detected/logged rather than silently absorbed, all
+  against a scratch directory under `std::filesystem::temp_directory_path()`
+  -- never this project's own real `assets/` tree, so results never depend
+  on what that directory happens to contain on a given day). A
+  `tools/run_headless.sh` run
+  (`ENGINE_MAX_FRAMES=60 ENGINE_SHOW_DEBUG_UI=1`) logs the byte-identical
+  clustered-lighting occupancy Phase 15a/15b/15c's own baseline recorded
+  (2136 -> 2155/2304 clusters occupied, avg 3.565543 -> 3.581903
+  lights/occupied cluster) and **zero** `[ERROR]` lines across two
+  independent runs -- direct confirmation this phase's changes (Assets
+  panel content only) touch nothing in the rendering/lighting pipeline, the
+  expected result since `buildAssetTree()` never runs anywhere near
+  render(). Inspected as a screenshot: the Assets panel shows two real,
+  collapsed tree rows labeled `models` and `textures` (each with a real
+  expand arrow) in place of the old placeholder sentence, docked in its
+  original Phase 14a position beneath the Scene panel.
 
 ## Libraries used and why
 

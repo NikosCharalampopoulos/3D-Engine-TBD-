@@ -154,9 +154,33 @@
 // 15c comment), but it does not drive this engine's actual rendered view
 // this phase, so there is nothing analogous to activeDirectionalLight for
 // this panel to display.
+//
+// Phase 15d: the "Assets" panel's placeholder text is replaced by a real,
+// read-only file/folder tree of assets/models/ and assets/textures/ (see
+// asset_browser.hpp's own header comment for exactly which subdirectories
+// are "browsable" and why) with expand/collapse and click-to-select, the
+// same TreeNodeEx()-based interaction renderSceneTreeNode() already
+// established for the Scene panel -- see editor_ui.cpp's own Phase 15d
+// comment (at renderAssetTreeNode()) for the row-drawing half. Unlike the
+// Scene panel's tree, this one is built exactly ONCE, in this class's own
+// constructor, not every renderDockspaceShell() call -- see
+// asset_browser.hpp's own "Caching" comment for why a filesystem tree that
+// cannot change at runtime today doesn't need buildSceneTree()'s own
+// "rebuilt fresh every frame" treatment. The selected row is this class's
+// own private state (selectedAssetPath_ below), not threaded through
+// renderDockspaceShell() the way selectedEntity is: nothing outside this
+// class reads it this phase (no Inspector wiring, no viewport hookup, no
+// drag-and-drop -- all deliberately out of this phase's own scope, see
+// README.md's Phase 15d section), so it's a purely cosmetic "which row is
+// highlighted" concern local to this one panel, with none of
+// selectedEntity's cross-panel/cross-frame reasons (application.hpp's own
+// Phase 14d comment) to live on Application instead.
 
 #include <optional>
+#include <string>
+#include <vector>
 
+#include "engine/asset_browser.hpp"
 #include "engine/ecs.hpp"
 
 struct GLFWwindow;
@@ -365,6 +389,21 @@ private:
     // here never reaches an actual framebuffer construction/resize call.
     int viewportWidth_ = 0;
     int viewportHeight_ = 0;
+
+    // Phase 15d: built exactly once, in the constructor -- see this class's
+    // own header comment above and asset_browser.hpp's own "Caching"
+    // comment for why a one-time build (not buildSceneTree()'s own
+    // every-frame rebuild) is the correct match for a filesystem tree that
+    // cannot change at runtime today.
+    std::vector<AssetTreeNode> assetTree_;
+    // The currently-highlighted Assets-panel row, identified by its own
+    // AssetTreeNode::relativePath (e.g. "textures/skybox/left.png") -- a
+    // plain string key rather than an EntityId-shaped identifier, since an
+    // asset-tree row isn't an ECS entity at all. Purely local, cosmetic
+    // "which row is selected" state -- see this class's own header comment
+    // above for why this lives here instead of being threaded through
+    // renderDockspaceShell() the way selectedEntity is.
+    std::optional<std::string> selectedAssetPath_;
 };
 
 }  // namespace engine

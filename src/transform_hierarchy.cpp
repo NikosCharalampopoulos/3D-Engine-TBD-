@@ -167,8 +167,17 @@ void destroyEntityOrphaningChildren(EntityRegistry& registry, EntityId id) {
     // protect against (each<T>() indexes by position, and remove() below can
     // move a different entity's data into the slot the iterator hasn't
     // visited yet, or shrink the very range it's iterating).
+    //
+    // Post-14f bug-review fix: `hasNewWorldTransform` below (originally
+    // absent -- every Orphan implicitly assumed decompose() had succeeded,
+    // since only successes were ever pushed here at all) is what makes this
+    // struct correct for BOTH glm::decompose() outcomes, not just the
+    // succeeding one -- see the "unconditional orphan, conditional
+    // Transform-overwrite" comment on the loop below for why that split
+    // exists.
     struct Orphan {
         EntityId id;
+        bool hasNewWorldTransform;
         glm::vec3 position;
         glm::quat rotation;
         glm::vec3 scale;
@@ -191,18 +200,28 @@ void destroyEntityOrphaningChildren(EntityRegistry& registry, EntityId id) {
         // never happen, but don't silently misbehave if it somehow does"
         // case this codebase consistently guards elsewhere (see e.g.
         // resolveWorldMatrix()'s own cycle/dangling-parent handling just
-        // above). On failure, the child is still orphaned (its Parent is
-        // still removed below) but keeps whatever LOCAL transform it
-        // already had rather than this function guessing at one -- a
-        // visible jump in this one unreachable-today edge case is strictly
-        // better than silently discarding the child's transform data or
-        // aborting the whole delete.
+        // above).
         glm::vec3 scale(1.0f);
         glm::quat rotation(1.0f, 0.0f, 0.0f, 0.0f);
         glm::vec3 translation(0.0f);
         glm::vec3 skew(0.0f);
         glm::vec4 perspective(0.0f, 0.0f, 0.0f, 1.0f);
-        if (glm::decompose(world, scale, rotation, translation, skew, perspective)) {
+        const bool decomposed = glm::decompose(world, scale, rotation, translation, skew, perspective);
+        // Post-14f bug-review fix: `childId` is pushed into `orphans`
+        // UNCONDITIONALLY now -- decompose() succeeding or failing only
+        // decides whether the apply loop below overwrites this child's
+        // Transform, never whether the child gets orphaned at all. Before
+        // this fix, a failed decompose() meant `childId` never made it into
+        // `orphans`, which meant the loop below never reached its
+        // `removeComponent<Parent>()` call for it either -- leaving this
+        // child's Parent still pointing at `id` right up until `id` is
+        // destroyed a few lines down, at which point resolveWorldMatrix()'s
+        // own dangling-parent fallback (this file's header comment above)
+        // would silently reinterpret the child's stale LOCAL transform as a
+        // WORLD one: exactly the visible-teleport bug this whole function
+        // exists to prevent, on the one path that was supposed to be
+        // guarding against it.
+        if (decomposed) {
             // glm::decompose()'s returned quaternion is used AS-IS here, no
             // conjugate/inverse -- confirmed, not assumed, by an offline
             // round-trip check: build M = T * mat4_cast(rot) * S from a
@@ -212,15 +231,40 @@ void destroyEntityOrphaningChildren(EntityRegistry& registry, EntityId id) {
             // decomposedRot) * S' -- the rebuilt matrix matches M exactly
             // (max per-element diff 0.0), while rebuilding with
             // glm::conjugate(decomposedRot) instead does NOT (diff ~2.5).
-            orphans.push_back(Orphan{childId, translation, rotation, scale});
+            orphans.push_back(Orphan{childId, true, translation, rotation, scale});
+        } else {
+            // decompose() failed: no usable world-space position/rotation/
+            // scale to hand the apply loop below, so the position/rotation/
+            // scale fields here are meaningless placeholders (identity) --
+            // `hasNewWorldTransform = false` is what tells that loop to
+            // ignore them and leave this child's existing Transform
+            // untouched instead. The child still goes into `orphans` -- see
+            // the comment above.
+            orphans.push_back(Orphan{childId, false, glm::vec3(0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+                                      glm::vec3(1.0f)});
         }
     });
 
     for (const Orphan& orphan : orphans) {
-        if (Transform* transform = registry.getComponent<Transform>(orphan.id)) {
-            transform->setPosition(orphan.position);
-            transform->setRotation(orphan.rotation);
-            transform->setScale(orphan.scale);
+        // Post-14f bug-review fix: the Transform overwrite below is now
+        // gated on `hasNewWorldTransform` -- only decompose()-succeeded
+        // orphans get their position/rotation/scale replaced with the
+        // resolved world-space values. A decompose()-failed orphan falls
+        // straight through to `removeComponent<Parent>()` below with its
+        // existing Transform completely untouched: its current LOCAL values
+        // simply become its new, if-slightly-wrong, effective values -- a
+        // visible jump in this one unreachable-today edge case is strictly
+        // better than silently discarding the child's transform data or
+        // aborting the whole delete (same tradeoff this function's header
+        // comment above already accepts for the decompose-succeeds case;
+        // the only thing that's changed is that a decompose FAILURE no
+        // longer also skips orphaning itself).
+        if (orphan.hasNewWorldTransform) {
+            if (Transform* transform = registry.getComponent<Transform>(orphan.id)) {
+                transform->setPosition(orphan.position);
+                transform->setRotation(orphan.rotation);
+                transform->setScale(orphan.scale);
+            }
         }
         // Removes the Parent component outright (rather than leaving it set
         // to an invalid/dangling EntityId) so this child is a REAL root from
@@ -228,7 +272,10 @@ void destroyEntityOrphaningChildren(EntityRegistry& registry, EntityId id) {
         // buildSceneTree()'s own dangling-parent safety net, which exists to
         // tolerate an unexpected/buggy dangling reference, not to be this
         // function's own primary mechanism for an entirely expected,
-        // intentional state change.
+        // intentional state change. Unconditional regardless of
+        // `hasNewWorldTransform` -- every direct child becomes a real root
+        // either way, which is the actual fix here (see the push_back
+        // comment above).
         registry.removeComponent<Parent>(orphan.id);
     }
 
