@@ -680,6 +680,15 @@ private:
     // plumbing, see model.hpp's own Phase 14f comment for why. A no-op for
     // CreateEntityKind::kNone (defensive only -- every real call site above
     // already filters that out before calling this).
+    //
+    // Phase 15: CreateEntityKind::kPointLight follows the same Transform +
+    // NameComponent shape as Empty (no ModelComponent -- this engine has no
+    // light-gizmo mesh), plus a freshly addComponent<PointLight>()'d
+    // light.hpp component at its own struct defaults. render()'s own
+    // collectPointLights() call picks it up starting the very next frame --
+    // no further registration needed here, the same "components are opt-in,
+    // nothing else has to know about a new one" property ecs.hpp's own top
+    // comment promises for any new component type.
     void spawnEntityFromCreateMenu(CreateEntityKind kind);
 
     // Phase 9: one sphere in the PBR test-grid -- its own placement

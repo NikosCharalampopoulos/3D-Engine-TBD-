@@ -243,6 +243,7 @@ add_executable(engine_app
     src/debug_ui.cpp
     src/physics.cpp
     src/editor_ui.cpp
+    src/light.cpp
     src/transform_hierarchy.cpp
     src/scene_hierarchy.cpp
 )

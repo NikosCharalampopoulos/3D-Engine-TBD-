@@ -289,7 +289,8 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        hdri_loader.cpp, compute_shader.cpp,
                        cluster_light_culler.cpp, ssao.cpp,
                        scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp,
-                       input_action_map.cpp, physics.cpp, editor_ui.cpp)
+                       input_action_map.cpp, physics.cpp, editor_ui.cpp,
+                       light.cpp -- Phase 15)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -297,7 +298,8 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
                        scene_serialization, debug_ui, input_action_map, physics,
-                       editor_ui)
+                       editor_ui, light -- Phase 15's new PointLight ECS
+                       component)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -317,7 +319,10 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
 tests/                 scene_serialization_test.cpp (Phase 8b),
                        input_action_map_test.cpp (Phase 8d),
-                       physics_test.cpp (Phase 8e) + its own CMakeLists.txt
+                       physics_test.cpp (Phase 8e), ecs_test.cpp (Phase 14f),
+                       transform_hierarchy_test.cpp (Phase 14b),
+                       scene_hierarchy_test.cpp (Phase 14d),
+                       light_test.cpp (Phase 15) + its own CMakeLists.txt
                        (no longer just the Phase 0 placeholder)
 ```
 
@@ -4460,6 +4465,103 @@ already existed.
     `ENGINE_DEBUG_FORCE_DYNAMIC=scene` both log and render exactly as Phase
     14e's own README section already describes -- confirming this phase's
     `ecs.hpp`/`editor_ui.cpp` changes didn't disturb either debug aid.
+
+### Phase 15: real Point Light entities
+
+Phase 14f's own Create menu left "Point Light"/"Directional Light"/"Camera"
+`BeginDisabled()`'d, with a tooltip explaining each needed real, separate
+scope beyond a menu item. This phase closes the smallest of those three:
+point lights, since `basic.frag`/`pbr.frag` already treat them as a
+`uNumPointLights`-counted array (see `application.cpp`'s pre-existing
+`kPointLights` table), not a single fixed slot the way the directional
+"sun" light is -- making a point light ECS-driven doesn't need a new
+"active X" concept the way Directional Light and Camera still do, so those
+two stay disabled, with updated tooltips explaining why each is still its
+own follow-up.
+
+- **`light.hpp`/`light.cpp`** (new): a `PointLight` component (color +
+  the same `constant`/`linear`/`quadratic` attenuation triple
+  `kPointLights` already uses -- no position field, the same "Transform
+  already has it" precedent `physics.hpp`'s `Collider` sets), a
+  `PointLightSample` struct (a `PointLight`'s fields plus the position
+  pulled from that entity's own `Transform` -- field-for-field identical to
+  `application.cpp`'s old private `PointLightData`, which it replaces), and
+  `collectPointLights(registry, maxTotal, out)`: appends one
+  `PointLightSample` per entity that has both a `Transform` and a
+  `PointLight` to `out`, capped at `maxTotal` (extras silently skipped,
+  warned once). Depends on nothing but `ecs.hpp`/`transform.hpp`/`log.hpp`
+  -- no GL dependency, so `tests/light_test.cpp` exercises it with no live
+  GL context, the same "plain executable, links only the pure logic file
+  it's testing" shape `physics_test.cpp`/`transform_hierarchy_test.cpp`
+  already establish.
+- **`application.cpp`**: `render()` now builds one `pointLightSamples`
+  vector every frame -- `kPointLights`' 3 fixed, hand-tuned entries
+  (completely unchanged; every prior phase's own screenshot-verified
+  lighting baseline still holds) seeded first, then `collectPointLights()`
+  appends any live ECS point lights, up to `kMaxPointLights` (8, matching
+  `MAX_POINT_LIGHTS` in both fragment shaders). That one list now feeds
+  both the clustered-lighting cull (`clusterLightCuller_.cullLights()`) and
+  both shaders' `uPointLights` uniform upload, replacing the old
+  function-local `static` cache the cluster-culling code used to keep for
+  `kPointLights` -- correct pre-Phase-15 (that table never changed at
+  runtime) but wrong now that a user can create/delete point lights mid-run;
+  it's rebuilt fresh every frame instead. `kSpotLights` keeps its own
+  `static` cache -- spot lights aren't part of this phase's scope, still a
+  fixed compile-time table.
+- **`editor_ui.cpp`**: the Create menu's "Point Light" item is real now
+  (returns `CreateEntityKind::kPointLight`, no longer `BeginDisabled()`'d);
+  "Directional Light"'s tooltip no longer says "same reasoning as Point
+  Light" (it isn't, any more) and now explains the single-fixed-uniform-vs.
+  -array distinction above. The Inspector gains a new "Light" section
+  (`ColorEdit3` + three `DragFloat`s for the attenuation triple), shown only
+  for a selected entity with a `PointLight` component, fully live-editable
+  like Transform -- not read-only like Material, since a `PointLight` is a
+  genuinely per-entity `ComponentPool<PointLight>` entry with none of
+  Material's shared-Model-cache mutation hazard.
+- **`application.cpp`'s `spawnEntityFromCreateMenu()`**: `kPointLight`
+  follows Empty's shape (Transform + NameComponent, no ModelComponent --
+  this engine has no light-gizmo mesh to draw) plus a freshly
+  `addComponent<PointLight>()`'d component at its own struct defaults
+  (plain white, `kPointLights`' own (1.0, 0.7, 1.8) attenuation profile) --
+  an immediately-visible starting point the new Inspector section can
+  retune. `ENGINE_DEBUG_CREATE` gains a `pointlight` value, calling this
+  exact same production function so a headless run can prove it without a
+  real mouse, the same precedent every other `ENGINE_DEBUG_CREATE` value
+  already established.
+- **Deliberately not done this phase** (same "real, substantial, separate
+  scope" reasoning Phase 14f itself gave for deferring all three): scene
+  serialization for `PointLight` -- `saveScene()` exists
+  (`scene_serialization.cpp`) but nothing in this engine's UI calls it yet
+  (only `loadScene()` runs, once, at startup), so schema support for a
+  component no live code path would ever write is exactly the kind of
+  speculative, nothing-consumes-it addition this codebase's own established
+  style avoids (see `ecs.hpp`'s `NameComponent`/`physics.hpp`'s
+  mass-field comments for the same instinct applied elsewhere). A future
+  phase that adds a real "Save Scene" UI action should extend
+  `SceneEntityRecord`/`parseSceneRecords()`/`writeSceneRecords()` for
+  `PointLight` (and `scene_loader.cpp`'s registry-building side) at that
+  point, not before.
+- **Verify**: a clean rebuild compiles with **zero new warnings** under
+  `-Wall -Wextra`. `ctest` reports **7/7** (`light_test` new). A baseline
+  `tools/run_headless.sh` run (`ENGINE_MAX_FRAMES=60`, no debug env vars)
+  logs the exact same clustered-lighting occupancy as before this phase
+  (2136 -> 2155/2304 clusters occupied as the camera settles, avg ~3.58
+  lights/occupied cluster) and renders pixel-identical to the pre-Phase-15
+  scene -- confirming `kPointLights`' unchanged 3 entries plus zero ECS
+  point lights in the default scene really do reproduce the old fixed-array
+  behavior exactly. A second run with `ENGINE_DEBUG_CREATE=pointlight` +
+  `ENGINE_DEBUG_SELECT="Point Light"` + `ENGINE_SHOW_DEBUG_UI=1` logs
+  `Created entity "Point Light" (index 3) via the Scene panel's Create
+  menu`, zero `[ERROR]` lines, and the clustered-lighting average rises to
+  ~4.44 lights/occupied cluster -- direct proof the new light is actually
+  reaching the cluster culler, not just sitting inertly in the registry.
+  Inspected as a screenshot: the debug overlay's Scene Entities list shows
+  `Point Light` alongside `scene`/`falling_cube`/`parented_demo_cube`; the
+  Inspector shows it selected, labeled "Empty entity (no model)", with a
+  live Transform and a new "Light" section showing its white default
+  color; the Viewport shows a visibly brighter hotspot near the light's
+  spawn position (in front of the camera, per the existing Create-menu
+  placement heuristic) that isn't present in the baseline screenshot.
 
 ## Libraries used and why
 

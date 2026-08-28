@@ -26,6 +26,7 @@
 #include "engine/frustum.hpp"
 #include "engine/gl_debug.hpp"
 #include "engine/hdri_loader.hpp"
+#include "engine/light.hpp"
 #include "engine/log.hpp"
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
@@ -430,13 +431,12 @@ constexpr glm::vec3 kAmbientColor{0.15f, 0.15f, 0.18f};
 // forward, so its soft-edged cone visibly falls across the table/ground
 // area a camera looking at the scene from Application's default position
 // can actually see.
-struct PointLightData {
-    glm::vec3 position;
-    glm::vec3 color;
-    float constant;
-    float linear;
-    float quadratic;
-};
+// Phase 15: PointLightData used to be defined here, private to this file.
+// It's now light.hpp's own public PointLightSample -- field-for-field
+// identical -- since collectPointLights() (light.cpp) needs a type it can
+// return that this file also consumes, and duplicating an identical struct
+// in two places just to keep one of them "private" wasn't worth it. See
+// light.hpp's own comment for the full rationale.
 
 struct SpotLightData {
     glm::vec3 position;
@@ -496,7 +496,7 @@ struct SpotLightData {
 // 8 spheres at comparable range regardless of column, and is kept close to
 // neutral white (not tinted like kPointLights[0]/[1]) so it doesn't bias the
 // metallic row's own white-vs-albedo-tinted highlight comparison.
-constexpr std::array<PointLightData, 3> kPointLights = {{
+constexpr std::array<PointLightSample, 3> kPointLights = {{
     {{0.5f, 0.95f, 0.1f}, {6.0f, 2.1f, 0.9f}, 1.0f, 0.7f, 1.8f},
     {{-1.35f, 1.15f, -0.3f}, {0.15f, 0.55f, 1.0f}, 1.0f, 0.7f, 1.8f},
     {{1.7673f, 1.9f, 2.3108f}, {5.5f, 5.2f, 4.7f}, 1.0f, 0.7f, 1.8f},
@@ -509,12 +509,18 @@ constexpr std::array<SpotLightData, 1> kSpotLights = {{
     {{0.2f, 1.7f, 0.5f}, {-0.05f, -1.0f, -0.2f}, {0.3f, 1.0f, 0.35f}, 1.0f, 0.35f, 0.44f, 0.9762960f, 0.9396926f},
 }};
 
-// Kept in sync by hand with MAX_POINT_LIGHTS/MAX_SPOT_LIGHTS in basic.frag;
-// these static_asserts at least catch this file's own table growing past
-// what that shader's fixed-size arrays can hold, without needing a shared
-// constant across a GLSL/C++ boundary.
-static_assert(kPointLights.size() <= 8, "kPointLights exceeds MAX_POINT_LIGHTS in basic.frag");
-static_assert(kSpotLights.size() <= 4, "kSpotLights exceeds MAX_SPOT_LIGHTS in basic.frag");
+// Phase 15: MAX_POINT_LIGHTS in basic.frag/pbr.frag, promoted from a bare
+// literal (kept only in the static_assert below, pre-Phase-15) to a named
+// constant now that render() also passes it to collectPointLights() as the
+// live budget kPointLights' 3 fixed entries share with however many
+// ECS PointLight entities exist -- see this file's own Phase 15 render()
+// comment. Still kept in sync BY HAND with the shaders' own #define (no
+// shared constant across the GLSL/C++ boundary exists), same as
+// kMaxSpotLights below.
+constexpr std::size_t kMaxPointLights = 8;
+constexpr std::size_t kMaxSpotLights = 4;
+static_assert(kPointLights.size() <= kMaxPointLights, "kPointLights exceeds MAX_POINT_LIGHTS in basic.frag");
+static_assert(kSpotLights.size() <= kMaxSpotLights, "kSpotLights exceeds MAX_SPOT_LIGHTS in basic.frag");
 
 // Phase 2's fixed eye position, kept here only as a comment for context: it
 // was glm::vec3(0, 0, 3) looking at the origin with up (0, 1, 0). Phase 3's
@@ -875,7 +881,7 @@ constexpr float kSphereAO = 1.0f;
 // this engine -- see shader.hpp's "no caching" note); a handful of lights
 // times a few fields each per frame is not a cost worth optimizing away
 // yet.
-void uploadPointLight(Shader& shader, std::size_t index, const PointLightData& light) {
+void uploadPointLight(Shader& shader, std::size_t index, const PointLightSample& light) {
     const std::string prefix = "uPointLights[" + std::to_string(index) + "].";
     shader.setVec3(prefix + "position", light.position);
     shader.setVec3(prefix + "color", light.color);
@@ -1041,8 +1047,9 @@ std::string debugForceDynamicEntityNameFromEnv() {
     return value != nullptr ? std::string(value) : std::string();
 }
 
-// Phase 14f: ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty> (case-insensitive),
-// unset by default -- same getenv-gated-value shape as ENGINE_DEBUG_SELECT/
+// Phase 14f: ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty|pointlight>
+// (case-insensitive; "pointlight" added Phase 15), unset by default -- same
+// getenv-gated-value shape as ENGINE_DEBUG_SELECT/
 // ENGINE_DEBUG_FORCE_STATIC/_DYNAMIC above, but for
 // Application::spawnEntityFromCreateMenu() (the Scene panel's own Create
 // menu's real implementation) instead. Exists specifically so a headless run
@@ -1074,8 +1081,11 @@ CreateEntityKind debugCreateEntityKindFromEnv() {
     if (lowered == "empty") {
         return CreateEntityKind::kEmpty;
     }
+    if (lowered == "pointlight") {
+        return CreateEntityKind::kPointLight;
+    }
     LOG_WARN("ENGINE_DEBUG_CREATE=\"" + std::string(value) +
-              "\" is not one of cube/sphere/plane/empty; ignoring it and creating nothing");
+              "\" is not one of cube/sphere/plane/empty/pointlight; ignoring it and creating nothing");
     return CreateEntityKind::kNone;
 }
 
@@ -1306,6 +1316,28 @@ std::array<ClusterLightInput, std::tuple_size<LightTable>::value> toClusterLight
     for (std::size_t i = 0; i < lights.size(); ++i) {
         inputs[i] = ClusterLightInput{lights[i].position, lights[i].color, lights[i].constant, lights[i].linear,
                                        lights[i].quadratic};
+    }
+    return inputs;
+}
+
+// Phase 15: the same conversion as toClusterLightInputs() above, but for a
+// runtime std::vector<PointLightSample> -- render()'s own per-frame
+// kPointLights-plus-ECS point light list (see its own Phase 15 comment)
+// isn't a compile-time-sized std::array any more, so the template above
+// (whose return size is std::tuple_size<LightTable>::value, a compile-time
+// constant) can't be reused for it. A distinct name, not an overload of
+// toClusterLightInputs(), specifically so overload resolution between the
+// two never has to be reasoned about at a call site -- the two are used in
+// deliberately different places (this one only for the ECS-aware point
+// light list, the template above only for kSpotLights, still a fixed
+// compile-time table) and a distinct name makes that visible at the call
+// site itself, not just from the parameter type.
+std::vector<ClusterLightInput> pointLightSamplesToClusterInputs(const std::vector<PointLightSample>& lights) {
+    std::vector<ClusterLightInput> inputs;
+    inputs.reserve(lights.size());
+    for (const PointLightSample& light : lights) {
+        inputs.push_back(
+            ClusterLightInput{light.position, light.color, light.constant, light.linear, light.quadratic});
     }
     return inputs;
 }
@@ -2342,22 +2374,42 @@ void Application::render() {
     GL_CHECK(glClearColor(kClearR, kClearG, kClearB, kClearA));
     GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
 
+    // Phase 15: this frame's full point light list -- kPointLights' 3 fixed
+    // entries (application.cpp's own hand-tuned table, completely unchanged
+    // from every prior phase -- see that table's own comment) seeded first,
+    // then any live PointLight ECS entities appended by collectPointLights()
+    // (light.hpp), up to kMaxPointLights total. Rebuilt fresh every frame,
+    // unlike kSpotLights below (still a real function-local `static` --
+    // spot lights stay a fixed compile-time table this phase, see
+    // editor_ui.cpp's own Phase 15 comment on why Directional Light/Camera,
+    // and by extension spot lights, aren't part of this phase's scope):
+    // ECS point lights CAN be created (Scene panel's Create menu) or deleted
+    // mid-run, so caching this list once and reusing it every frame the way
+    // the pre-Phase-15 code did for the now-immutable kPointLights would
+    // silently miss every light created/deleted after the very first frame.
+    // Declared here (not inside the cluster-culling block below) so both
+    // the shader_/pbrShader_ upload loops further down in this same
+    // render() call can reuse this exact same list too, rather than each
+    // recomputing it (or the cluster culler and the shader uploads
+    // silently disagreeing about which lights exist this frame).
+    std::vector<PointLightSample> pointLightSamples(kPointLights.begin(), kPointLights.end());
+    collectPointLights(registry_, kMaxPointLights, pointLightSamples);
+
     // Phase 13d: re-cull every light against every cluster's (already-built,
     // see the constructor) AABB using this frame's own view matrix --
     // must run every frame the camera might have moved (effectively always
-    // in this engine, see clusterLightCuller_'s own header comment), even
-    // though kPointLights/kSpotLights themselves are fixed world-space
-    // constants that never move. The two light tables are converted to
-    // ClusterLightCuller's plain (position/color/attenuation) input form
-    // once (function-local static -- kPointLights/kSpotLights never
-    // change, so there's no reason to redo this conversion every frame)
-    // rather than every call.
+    // in this engine, see clusterLightCuller_'s own header comment). The
+    // spot light table is converted to ClusterLightCuller's plain
+    // (position/color/attenuation) input form once (function-local static --
+    // kSpotLights never changes, so there's no reason to redo this
+    // conversion every frame); the point light list above is converted
+    // fresh every frame instead, for the same "it can change mid-run" reason
+    // its own comment just gave.
     {
-        static const std::array<ClusterLightInput, kPointLights.size()> kPointLightInputs =
-            toClusterLightInputs(kPointLights);
+        const std::vector<ClusterLightInput> pointLightInputs = pointLightSamplesToClusterInputs(pointLightSamples);
         static const std::array<ClusterLightInput, kSpotLights.size()> kSpotLightInputs =
             toClusterLightInputs(kSpotLights);
-        clusterLightCuller_.cullLights(view, kPointLightInputs.data(), kPointLightInputs.size(),
+        clusterLightCuller_.cullLights(view, pointLightInputs.data(), pointLightInputs.size(),
                                         kSpotLightInputs.data(), kSpotLightInputs.size());
 
         // Phase 13d: periodic proof (not every frame -- a GPU->CPU
@@ -2432,10 +2484,13 @@ void Application::render() {
     // array each frame (see basic.frag's uNumPointLights/uPointLights and
     // uNumSpotLights/uSpotLights) -- the standard forward-rendering
     // "fixed-size uniform array + count" pattern, so the shader only loops
-    // over lights that actually exist rather than every array slot.
-    shader_->setInt("uNumPointLights", static_cast<int>(kPointLights.size()));
-    for (std::size_t i = 0; i < kPointLights.size(); ++i) {
-        uploadPointLight(*shader_, i, kPointLights[i]);
+    // over lights that actually exist rather than every array slot. Phase
+    // 15: uPointLights now comes from this frame's own pointLightSamples
+    // (kPointLights plus any live ECS point lights, see this function's
+    // own Phase 15 comment above), not straight from kPointLights.
+    shader_->setInt("uNumPointLights", static_cast<int>(pointLightSamples.size()));
+    for (std::size_t i = 0; i < pointLightSamples.size(); ++i) {
+        uploadPointLight(*shader_, i, pointLightSamples[i]);
     }
     shader_->setInt("uNumSpotLights", static_cast<int>(kSpotLights.size()));
     for (std::size_t i = 0; i < kSpotLights.size(); ++i) {
@@ -2567,9 +2622,11 @@ void Application::render() {
     // this on -- see that method and pbr.frag's own uSSREnabled comment.
     pbrShader_->setInt("uSSREnabled", 0);
 
-    pbrShader_->setInt("uNumPointLights", static_cast<int>(kPointLights.size()));
-    for (std::size_t i = 0; i < kPointLights.size(); ++i) {
-        uploadPointLight(*pbrShader_, i, kPointLights[i]);
+    // Phase 15: same pointLightSamples as shader_'s own upload above --
+    // see this function's own Phase 15 comment.
+    pbrShader_->setInt("uNumPointLights", static_cast<int>(pointLightSamples.size()));
+    for (std::size_t i = 0; i < pointLightSamples.size(); ++i) {
+        uploadPointLight(*pbrShader_, i, pointLightSamples[i]);
     }
     pbrShader_->setInt("uNumSpotLights", static_cast<int>(kSpotLights.size()));
     for (std::size_t i = 0; i < kSpotLights.size(); ++i) {
@@ -2947,6 +3004,16 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
             // parentable organizational node, not a flat "folder" label
             // that isn't a real entity at all).
             break;
+        case CreateEntityKind::kPointLight:
+            baseName = "Point Light";
+            // loadPath stays nullptr, same as Empty above -- this engine has
+            // no light-gizmo mesh to draw for it (nothing in this project
+            // renders a billboard/icon for a light today), so a Point Light
+            // entity is Transform + NameComponent + light.hpp's PointLight
+            // component, no ModelComponent. See this function's own
+            // post-switch block below for where the PointLight component
+            // itself gets added.
+            break;
         case CreateEntityKind::kNone:
         default:
             return;
@@ -2972,6 +3039,16 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
     if (loadPath != nullptr) {
         registry_.addComponent<ModelComponent>(
             entity, ModelComponent{resources_.getModel(*loadPath, *shader_), storedPath});
+    }
+    // Phase 15: a freshly Create'd Point Light starts at PointLight{}'s own
+    // struct defaults (plain white, the same (1.0, 0.7, 1.8) attenuation
+    // profile kPointLights already uses -- see light.hpp's own comment) --
+    // a sane, immediately-visible starting point the Inspector's new Light
+    // section (editor_ui.cpp) can then retune, not a placeholder nothing
+    // reads. render()'s own collectPointLights() call picks this entity up
+    // starting the very next frame, no further wiring needed here.
+    if (kind == CreateEntityKind::kPointLight) {
+        registry_.addComponent<PointLight>(entity, PointLight{});
     }
 
     LOG_INFO("Created entity \"" + uniqueName + "\" (index " + std::to_string(entity.index()) + ") via the Scene "

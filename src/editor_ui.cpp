@@ -22,6 +22,7 @@
 #include <cmath>
 #include <string>
 
+#include "engine/light.hpp"
 #include "engine/log.hpp"
 #include "engine/material.hpp"
 #include "engine/model.hpp"
@@ -198,18 +199,29 @@ CreateEntityKind renderCreateEntityMenuItems() {
 
     ImGui::Separator();
 
+    // Phase 15: "Point Light" is real now -- light.hpp's new PointLight
+    // component plus application.cpp's collectPointLights()-based upload
+    // (see that file's own Phase 15 comment) means a created point light
+    // actually lights the scene, the same "real, working" treatment
+    // Cube/Sphere/Plane/Empty above already got in Phase 14f. Directional
+    // Light and Camera stay BeginDisabled()'d below -- each is its own
+    // separate, substantial scope Phase 15's own brief declines to also
+    // take on: a directional "sun" light isn't array-based like point
+    // lights (basic.frag/pbr.frag read a single fixed kLightDirection/
+    // kLightColor pair, not a uNumDirectionalLights-counted array), so
+    // making it ECS-driven needs an "which entity is the active sun"
+    // concept this engine has no notion of yet -- structurally the same
+    // open problem Camera's own "which entity is the active camera" is,
+    // just for a different uniform.
+    if (ImGui::MenuItem("Point Light")) {
+        result = CreateEntityKind::kPointLight;
+    }
+
     // Shown (matching the originally approved mockup) but disabled, not
     // omitted -- see editor_ui.hpp's own CreateEntityKind comment for the
-    // full "why deferred" reasoning: a real Point/Directional Light or
-    // Camera entity needs a genuinely new ECS component type (and, for
-    // lights, rewiring basic.frag/pbr.frag's shading to read from the ECS
-    // instead of application.cpp's existing fixed kPointLights/kSpotLights
-    // arrays; for a camera, an "which entity is the active camera" concept
-    // this engine has no notion of anywhere today) -- real, substantial,
-    // separate scope well beyond "add a menu item", so this phase declines
-    // to half-build either. Same BeginDisabled()-plus-explanatory-tooltip
-    // treatment this project's own Inspector already established for
-    // "Browse..." (Phase 14e, material.hpp) and, until this very phase,
+    // full "why deferred" reasoning. Same BeginDisabled()-plus-explanatory-
+    // tooltip treatment this project's own Inspector already established
+    // for "Browse..." (Phase 14e, material.hpp) and, until Phase 14f,
     // "Delete Object" itself -- ImGui::BeginDisabled() makes the item itself
     // unclickable (no dangling half-wired handler to accidentally trigger),
     // while ImGuiHoveredFlags_AllowWhenDisabled lets IsItemHovered() still
@@ -222,11 +234,10 @@ CreateEntityKind renderCreateEntityMenuItems() {
             ImGui::SetTooltip("%s", tooltip);
         }
     };
-    disabledCreateMenuItem("Point Light",
-                            "Not implemented yet -- needs a new Light ECS component plus shading-pipeline "
-                            "wiring. A natural follow-up to Phase 14f, not yet a numbered phase.");
     disabledCreateMenuItem("Directional Light",
-                            "Not implemented yet -- same reasoning as \"Point Light\" above.");
+                            "Not implemented yet -- unlike Point Light (Phase 15), this engine's directional "
+                            "\"sun\" light is a single fixed uniform, not an array; making it ECS-driven needs "
+                            "an \"active sun\" concept this engine doesn't have yet.");
     disabledCreateMenuItem("Camera",
                             "Not implemented yet -- needs a Camera ECS component and an \"active camera\" "
                             "concept this engine doesn't have yet.");
@@ -437,6 +448,36 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
             "Note: this engine has no entity-vs-entity collision yet. A static Collider here is a real "
             "physics state, but nothing currently collides against it -- only dynamic (RigidBody) entities "
             "get ground-plane collision.");
+    }
+
+    // --- Light -------------------------------------------------------------
+    // Phase 15: shown only for an entity that actually has a PointLight
+    // component -- i.e. one created via the Create menu's new "Point Light"
+    // item (or ENGINE_DEBUG_CREATE=pointlight), never for
+    // "scene"/"falling_cube"/etc, which have no PointLight and so show no
+    // Light section at all, the same "opt-in per entity, section only
+    // appears when the component does" shape the Physics section above
+    // already establishes for RigidBody/Collider.
+    //
+    // Fully live, like Transform -- not read-only like Material: a PointLight
+    // is a genuinely per-entity ComponentPool<PointLight> entry (ecs.hpp),
+    // with none of Material's "this Model, and therefore this Material, is
+    // shared/cached across every entity using the same asset" caveat (see
+    // this file's own Material section comment above), so there is no
+    // shared-mutation footgun here to guard against.
+    if (PointLight* light = registry.getComponent<PointLight>(id)) {
+        if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::ColorEdit3("Color", &light->color.x);
+            // Same (constant, linear, quadratic) attenuation profile
+            // application.cpp's own kPointLights table already exposes as
+            // three independent floats -- see that table's own comment for
+            // what they mean. Range/step match the Inspector's existing
+            // "Collider Half-Extent" DragFloat just above (Physics section).
+            ImGui::DragFloat("Constant", &light->constant, 0.01f, 0.0f, 10.0f);
+            ImGui::DragFloat("Linear", &light->linear, 0.01f, 0.0f, 10.0f);
+            ImGui::DragFloat("Quadratic", &light->quadratic, 0.01f, 0.0f, 10.0f);
+            ImGui::TextDisabled("Position comes from this entity's own Transform above.");
+        }
     }
 
     ImGui::Separator();

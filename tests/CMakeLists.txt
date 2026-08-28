@@ -110,3 +110,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME ecs_test COMMAND ecs_test)
+
+# Phase 15 adds light_test, testing engine::collectPointLights()
+# (src/light.cpp) in isolation -- same "plain executable, links only the
+# pure logic file it's testing" shape as physics_test/transform_hierarchy_test
+# above. light.cpp depends only on ecs.hpp/transform.hpp/log.hpp (all
+# header-only or GL-free), so this needs no live GL context/GPU either --
+# just GLM for glm::vec3.
+add_executable(light_test
+    light_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/light.cpp
+)
+target_include_directories(light_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(light_test PRIVATE glm::glm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(light_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME light_test COMMAND light_test)

@@ -114,6 +114,16 @@
 //     entities; Application::render() is what actually acts on a non-kNone
 //     return value, since only Application owns the ResourceManager/Shader/
 //     Camera a new entity needs.
+//
+// Phase 15: "Point Light" in that same Create menu is now real too -- see
+// light.hpp for the new PointLight ECS component this adds and
+// Application::spawnEntityFromCreateMenu()'s own Phase 15 comment for what
+// it builds. Directional Light and Camera stay BeginDisabled()'d -- see
+// editor_ui.cpp's own Phase 15 comment on renderCreateEntityMenuItems() for
+// why each is still its own separately-scoped follow-up. The Inspector also
+// gains a live "Light" section (color + attenuation, editable exactly like
+// Transform already is -- see renderInspectorPanel()'s own Phase 15
+// comment) for any selected entity that has a PointLight component.
 
 #include <optional>
 
@@ -144,6 +154,13 @@ enum class CreateEntityKind {
     kSphere,
     kPlane,
     kEmpty,
+    // Phase 15: a real point light entity (Transform + NameComponent +
+    // light.hpp's PointLight component, no ModelComponent -- see
+    // Application::spawnEntityFromCreateMenu()'s own Phase 15 comment).
+    // Directional Light and Camera stay BeginDisabled()'d in the Create
+    // menu -- see editor_ui.cpp's own Phase 15 comment for why those two are
+    // separately-scoped follow-ups, not folded into this one.
+    kPointLight,
 };
 
 // Phase 14d: the currently-selected entity's on-screen bounding box, already
