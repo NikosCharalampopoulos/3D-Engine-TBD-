@@ -199,22 +199,38 @@ CreateEntityKind renderCreateEntityMenuItems() {
 
     ImGui::Separator();
 
-    // Phase 15: "Point Light" is real now -- light.hpp's new PointLight
+    // Phase 15a: "Point Light" is real now -- light.hpp's new PointLight
     // component plus application.cpp's collectPointLights()-based upload
-    // (see that file's own Phase 15 comment) means a created point light
+    // (see that file's own Phase 15a comment) means a created point light
     // actually lights the scene, the same "real, working" treatment
-    // Cube/Sphere/Plane/Empty above already got in Phase 14f. Directional
-    // Light and Camera stay BeginDisabled()'d below -- each is its own
-    // separate, substantial scope Phase 15's own brief declines to also
-    // take on: a directional "sun" light isn't array-based like point
-    // lights (basic.frag/pbr.frag read a single fixed kLightDirection/
-    // kLightColor pair, not a uNumDirectionalLights-counted array), so
-    // making it ECS-driven needs an "which entity is the active sun"
-    // concept this engine has no notion of yet -- structurally the same
-    // open problem Camera's own "which entity is the active camera" is,
-    // just for a different uniform.
+    // Cube/Sphere/Plane/Empty above already got in Phase 14f.
     if (ImGui::MenuItem("Point Light")) {
         result = CreateEntityKind::kPointLight;
+    }
+
+    // Phase 15b: "Directional Light" is real now too -- light.hpp's new
+    // DirectionalLight component plus application.cpp's
+    // resolveActiveDirectionalLight()-based upload (see that header's own
+    // Phase 15b comment) means a created-and-active directional light
+    // actually replaces the fixed kLightDirection/kLightColor "sun" this
+    // frame, cascaded shadows included. This one WAS the harder of the two
+    // Phase 15a deferred (see that phase's own README section): unlike point
+    // lights, basic.frag/pbr.frag read a single fixed uLightDirection/
+    // uLightColor pair, not a uNumDirectionalLights-counted array, and it's
+    // also this engine's one shadow-casting light (renderShadowPass()/
+    // computeCascades(), application.cpp) -- so making it ECS-driven needed
+    // an "active sun" concept this engine had no notion of before this
+    // phase. That's Application's own activeDirectionalLight_
+    // (application.hpp) now -- "the most recently Create'd Directional
+    // Light entity" (set in spawnEntityFromCreateMenu(), application.cpp),
+    // the simplest rule that fits an engine with no multi-select UI concept
+    // at all yet. Only Camera remains genuinely open below: it's a
+    // structurally similar "which entity is active" problem, but for this
+    // engine's actual rendered view (a free-fly Camera object, not an ECS
+    // entity) rather than one uniform pair -- different enough in kind, not
+    // just in scope, to stay deferred on its own.
+    if (ImGui::MenuItem("Directional Light")) {
+        result = CreateEntityKind::kDirectionalLight;
     }
 
     // Shown (matching the originally approved mockup) but disabled, not
@@ -234,10 +250,6 @@ CreateEntityKind renderCreateEntityMenuItems() {
             ImGui::SetTooltip("%s", tooltip);
         }
     };
-    disabledCreateMenuItem("Directional Light",
-                            "Not implemented yet -- unlike Point Light (Phase 15), this engine's directional "
-                            "\"sun\" light is a single fixed uniform, not an array; making it ECS-driven needs "
-                            "an \"active sun\" concept this engine doesn't have yet.");
     disabledCreateMenuItem("Camera",
                             "Not implemented yet -- needs a Camera ECS component and an \"active camera\" "
                             "concept this engine doesn't have yet.");
@@ -261,7 +273,13 @@ CreateEntityKind renderCreateEntityMenuItems() {
 // be a footgun), and Physics (the real static/dynamic split, wired through
 // physics.hpp's setEntityStatic() -- see that function's own header comment
 // for the full mechanism).
-void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& selectedEntity) {
+// Phase 15b: `activeDirectionalLight` -- see editor_ui.hpp's own Phase 15b
+// header comment and renderDockspaceShell()'s own Phase 15b comment for what
+// this is (Application's own activeDirectionalLight_, read-only here) and
+// why it's threaded through as a third parameter rather than looked up some
+// other way.
+void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& selectedEntity,
+                           std::optional<EntityId> activeDirectionalLight) {
     if (!selectedEntity.has_value()) {
         // Matches this panel's pre-14e placeholder tone (see the removed
         // "Inspector -- coming in Phase 14e" line) rather than an empty/
@@ -451,7 +469,7 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
     }
 
     // --- Light -------------------------------------------------------------
-    // Phase 15: shown only for an entity that actually has a PointLight
+    // Phase 15a: shown only for an entity that actually has a PointLight
     // component -- i.e. one created via the Create menu's new "Point Light"
     // item (or ENGINE_DEBUG_CREATE=pointlight), never for
     // "scene"/"falling_cube"/etc, which have no PointLight and so show no
@@ -510,6 +528,55 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
             ImGui::DragFloat("Quadratic", &light->quadratic, 0.01f, 0.0f, 10.0f, "%.3f",
                               ImGuiSliderFlags_AlwaysClamp);
             ImGui::TextDisabled("Position comes from this entity's own Transform above.");
+        }
+    }
+
+    // --- Light (Directional) ----------------------------------------------
+    // Phase 15b: shown only for an entity with a DirectionalLight component --
+    // same "opt-in per entity" shape as the PointLight section just above,
+    // and just as fully live (a genuinely per-entity ComponentPool<
+    // DirectionalLight> entry, no Material-style shared-cache caveat).
+    //
+    // Unlike PointLight's section, this one also surfaces something that has
+    // no point-light equivalent: whether THIS entity is the one entity (if
+    // any) actually driving the scene's single uLightDirection/uLightColor
+    // pair and shadow frustum right now -- see light.hpp's own
+    // resolveActiveDirectionalLight() comment and application.hpp's own
+    // activeDirectionalLight_ comment for the full "why only one, and which
+    // one" design. Without this line, two Directional Light entities would
+    // render IDENTICAL Inspector sections while only one of them is actually
+    // doing anything -- confusing in a way no other component in this
+    // engine's Inspector has to account for, since every other component
+    // type here (Transform, Material, Physics, PointLight) affects its own
+    // entity only, never competes with a sibling entity for one shared
+    // uniform slot.
+    if (DirectionalLight* dirLight = registry.getComponent<DirectionalLight>(id)) {
+        if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::ColorEdit3("Color", &dirLight->color.x);
+            // No ImGuiSliderFlags_AlwaysClamp/min-max floor here, unlike
+            // PointLight's Constant field just above -- see light.hpp's own
+            // DirectionalLight comment for why a per-AXIS floor would be
+            // actively wrong for a direction (any single axis can
+            // legitimately be exactly 0.0 for a purely axis-aligned
+            // direction). The one real hazard -- the whole VECTOR
+            // degenerating to (at or near) zero -- is guarded where the
+            // value is actually CONSUMED instead (resolveActiveDirectionalLight(),
+            // light.cpp), which is the only place that can tell "the whole
+            // vector" apart from "one axis" in the first place.
+            ImGui::DragFloat3("Direction", &dirLight->direction.x, 0.01f);
+            ImGui::TextDisabled(
+                "Points FROM the light TOWARD the scene (same convention as this engine's fixed \"sun\").");
+
+            const bool isActive = activeDirectionalLight.has_value() && *activeDirectionalLight == id;
+            if (isActive) {
+                ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f),
+                                    "Active: this entity is currently lighting the scene (and casting its "
+                                    "shadows).");
+            } else {
+                ImGui::TextDisabled(
+                    "Inactive: only the most recently created Directional Light entity is active at a time; "
+                    "this one exists but isn't currently affecting shading/shadows.");
+            }
         }
     }
 
@@ -635,7 +702,8 @@ void EditorUI::buildInitialLayout(ImGuiID dockspaceId) {
 
 CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                                  std::optional<EntityId>& selectedEntity,
-                                                 const SelectionOutline* outline) {
+                                                 const SelectionOutline* outline,
+                                                 std::optional<EntityId> activeDirectionalLight) {
     // DockSpaceOverViewport() is the built-in "just cover the whole main
     // viewport" helper (creates its own invisible host window internally) --
     // simpler than manually building a host window + ImGui::DockSpace()
@@ -807,7 +875,7 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     ImGui::End();
 
     ImGui::Begin("Inspector");
-    renderInspectorPanel(registry, selectedEntity);
+    renderInspectorPanel(registry, selectedEntity, activeDirectionalLight);
     ImGui::End();
 
     return createRequest;

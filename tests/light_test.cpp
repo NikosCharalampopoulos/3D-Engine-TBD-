@@ -1,9 +1,17 @@
-// Phase 15's own test: exercises engine::collectPointLights() (src/light.cpp)
+// Phase 15a's own test: exercises engine::collectPointLights() (src/light.cpp)
 // in isolation -- same "plain executable, links only the pure logic file
 // it's testing" shape as physics_test.cpp (see that file's own header
 // comment). light.cpp depends only on ecs.hpp/transform.hpp, neither of
 // which touch GL/Window at all, so this needs no live window/GL context/GPU
 // either.
+//
+// Phase 15b extends this same file (rather than a new directional_light_test.cpp)
+// with engine::resolveActiveDirectionalLight() coverage -- it's the exact
+// same "pure logic in light.cpp, no GL/Window dependency" shape
+// collectPointLights() above already has, tested against the same kind of
+// fresh EntityRegistry each case builds by hand, so a second small test
+// executable just to test the SAME translation unit's second function would
+// only duplicate this file's own header/boilerplate for no isolation benefit.
 
 #include "engine/light.hpp"
 
@@ -140,6 +148,79 @@ int main() {
 
         expectTrue(overflowed, "maxTotal already met by pre-seeded entries: the entity is reported as an overflow");
         expectTrue(samples.size() == 2, "maxTotal already met by pre-seeded entries: nothing appended");
+    }
+
+    // --- resolveActiveDirectionalLight(): no active entity (default
+    // EntityId{}, the "nothing" sentinel) returns `fallback` unchanged --
+    // this is what keeps a scene with zero Directional Light entities (every
+    // scene before Phase 15b, and this engine's own default scene today)
+    // rendering exactly as it did before this phase -----------------------
+    {
+        engine::EntityRegistry registry;
+        const engine::DirectionalLight fallback{glm::vec3(0.6f, -0.7f, 0.35f), glm::vec3(1.0f, 0.95f, 0.85f)};
+
+        const engine::DirectionalLight resolved =
+            engine::resolveActiveDirectionalLight(registry, engine::EntityId(), fallback);
+
+        expectNear(resolved.direction.x, fallback.direction.x, "no active entity: resolved direction == fallback");
+        expectNear(resolved.color.r, fallback.color.r, "no active entity: resolved color == fallback");
+    }
+
+    // --- An active entity that actually has a DirectionalLight component
+    // returns THAT component's own direction/color, not `fallback` ---------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::DirectionalLight>(
+            id, engine::DirectionalLight{glm::vec3(1.0f, -2.0f, 3.0f), glm::vec3(0.1f, 0.2f, 0.3f)});
+        const engine::DirectionalLight fallback{glm::vec3(0.6f, -0.7f, 0.35f), glm::vec3(1.0f, 0.95f, 0.85f)};
+
+        const engine::DirectionalLight resolved = engine::resolveActiveDirectionalLight(registry, id, fallback);
+
+        expectNear(resolved.direction.x, 1.0f, "active entity: resolved direction.x matches its component");
+        expectNear(resolved.direction.y, -2.0f, "active entity: resolved direction.y matches its component");
+        expectNear(resolved.direction.z, 3.0f, "active entity: resolved direction.z matches its component");
+        expectNear(resolved.color.r, 0.1f, "active entity: resolved color.r matches its component");
+    }
+
+    // --- An active id that no longer has a DirectionalLight component
+    // (entity destroyed, or the component otherwise removed/never added)
+    // falls back to `fallback`, exactly like "no active entity" above --
+    // ecs.hpp's own EntityId comment: getComponent() on such an id is always
+    // a safe nullptr, never UB, so this must not crash either -------------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        // Note: no addComponent<DirectionalLight>() call for `id` at all --
+        // this stands in for both "component was never added" and "entity
+        // was destroyed" (destroyEntity() leaves getComponent() returning
+        // nullptr exactly the same way an id that never had the component
+        // does -- see ecs.hpp's own destroyEntity()/EntityId comments).
+        const engine::DirectionalLight fallback{glm::vec3(0.6f, -0.7f, 0.35f), glm::vec3(1.0f, 0.95f, 0.85f)};
+
+        const engine::DirectionalLight resolved = engine::resolveActiveDirectionalLight(registry, id, fallback);
+
+        expectNear(resolved.direction.x, fallback.direction.x,
+                   "active id with no DirectionalLight component: resolved direction == fallback");
+    }
+
+    // --- A degenerate (zero-length) direction on the active entity falls
+    // back to `fallback` too, rather than reaching glm::normalize() with an
+    // unusable input downstream (see resolveActiveDirectionalLight()'s own
+    // light.hpp comment for the div-by-zero/NaN hazard this guards) --------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::DirectionalLight>(
+            id, engine::DirectionalLight{glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.1f, 0.2f, 0.3f)});
+        const engine::DirectionalLight fallback{glm::vec3(0.6f, -0.7f, 0.35f), glm::vec3(1.0f, 0.95f, 0.85f)};
+
+        const engine::DirectionalLight resolved = engine::resolveActiveDirectionalLight(registry, id, fallback);
+
+        expectNear(resolved.direction.x, fallback.direction.x,
+                   "zero-length active direction: resolved direction == fallback, not the degenerate value");
+        expectNear(resolved.color.r, fallback.color.r,
+                   "zero-length active direction: resolved color == fallback too (the whole component is rejected)");
     }
 
     if (failures == 0) {

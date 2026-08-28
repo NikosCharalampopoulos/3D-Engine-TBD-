@@ -681,7 +681,7 @@ private:
     // CreateEntityKind::kNone (defensive only -- every real call site above
     // already filters that out before calling this).
     //
-    // Phase 15: CreateEntityKind::kPointLight follows the same Transform +
+    // Phase 15a: CreateEntityKind::kPointLight follows the same Transform +
     // NameComponent shape as Empty (no ModelComponent -- this engine has no
     // light-gizmo mesh), plus a freshly addComponent<PointLight>()'d
     // light.hpp component at its own struct defaults. render()'s own
@@ -689,6 +689,19 @@ private:
     // no further registration needed here, the same "components are opt-in,
     // nothing else has to know about a new one" property ecs.hpp's own top
     // comment promises for any new component type.
+    //
+    // Phase 15b: CreateEntityKind::kDirectionalLight follows the identical
+    // Transform + NameComponent (no ModelComponent) shape, plus a freshly
+    // addComponent<DirectionalLight>()'d light.hpp component at its own
+    // struct defaults -- but ALSO, unlike kPointLight, immediately
+    // overwrites activeDirectionalLight_ (below) with this new entity's id.
+    // That one extra assignment IS the entirety of this phase's "which
+    // entity is active" mechanism -- see activeDirectionalLight_'s own
+    // comment below for why "most recently created" is the deliberately
+    // simplest rule that still makes sense with no multi-select UI concept
+    // anywhere else in this engine, and light.hpp's own
+    // resolveActiveDirectionalLight() for where render() reads this member
+    // back out each frame.
     void spawnEntityFromCreateMenu(CreateEntityKind kind);
 
     // Phase 9: one sphere in the PBR test-grid -- its own placement
@@ -1091,7 +1104,7 @@ private:
     // ssaoDisabled_/ENGINE_SSAO_DISABLE. Default false (SSR on).
     bool ssrDisabled_ = false;
 
-    // Phase 15: this Application's own edge-tracking state for
+    // Phase 15a: this Application's own edge-tracking state for
     // collectPointLights()'s (light.hpp) overflow warning -- true once
     // render() has seen collectPointLights() report an overflow for
     // registry_ and not yet seen it clear. collectPointLights() itself is
@@ -1109,6 +1122,50 @@ private:
     // it to that frame's result. Default false (not overflowing), matching
     // every other bool member in this class defaulting to "off/normal."
     bool pointLightOverflowActive_ = false;
+
+    // Phase 15b: which ECS entity (if any) is the "active" directional
+    // light -- the one whose light.hpp DirectionalLight component's own
+    // direction/color actually feed the scene's single uLightDirection/
+    // uLightColor uniform pair and cascaded-shadow frustum this frame,
+    // INSTEAD OF kLightDirection/kLightColor (application.cpp), rather than
+    // alongside them the way ECS point lights add to kPointLights. std::
+    // nullopt (the default, matching selectedEntity_/physicsVerifyEntity_
+    // above) means no entity is active -- which is also the state of every
+    // scene before this phase and this engine's own default scene today, so
+    // resolveActiveDirectionalLight() (light.hpp) falls back to
+    // kLightDirection/kLightColor unchanged and every prior phase's own
+    // screenshot-verified lighting/shadow baseline holds exactly (see
+    // README.md's own Phase 15b Verify section).
+    //
+    // Set in exactly one place: spawnEntityFromCreateMenu()'s own Phase 15b
+    // case, to the entity it just created, unconditionally overwriting
+    // whatever this held before. That is this phase's whole "which entity is
+    // active" rule -- "the most recently Create'd Directional Light entity"
+    // -- deliberately the simplest one that still makes sense: this engine
+    // has no multi-select UI concept anywhere yet (the Scene Hierarchy is
+    // single-click-to-select, see scene_hierarchy.hpp), so there is no
+    // existing notion of "the user chose entity X out of several" for a
+    // richer rule (e.g. an explicit per-entity "Set Active" button) to build
+    // on -- adding one just for this would be exactly the kind of
+    // speculative UI surface this codebase's own established style avoids
+    // (see e.g. ecs.hpp's NameComponent comment for the same instinct
+    // applied elsewhere). A later phase that adds real multi-entity
+    // selection is the right place to revisit this into an explicit choice
+    // instead of an implicit "last created wins" one.
+    //
+    // Deliberately NEVER reset back to std::nullopt when the entity it names
+    // is deleted (there is no delete-time hook that could do so today -- the
+    // Inspector's "Delete Object" button, editor_ui.cpp, only clears
+    // selectedEntity_, which it already owns by reference) -- this is safe
+    // by construction, not an oversight: resolveActiveDirectionalLight()
+    // itself tolerates a stale id exactly the way registry_.getComponent<T>()
+    // already does everywhere else in this codebase (see ecs.hpp's own
+    // EntityId comment -- a destroyed entity's id just returns nullptr from
+    // getComponent() forever after, never UB), so a stale
+    // activeDirectionalLight_ silently and correctly falls back to
+    // kLightDirection/kLightColor the very next frame, with no explicit
+    // cleanup required.
+    std::optional<EntityId> activeDirectionalLight_;
 };
 
 }  // namespace engine

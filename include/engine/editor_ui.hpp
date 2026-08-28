@@ -115,15 +115,32 @@
 //     return value, since only Application owns the ResourceManager/Shader/
 //     Camera a new entity needs.
 //
-// Phase 15: "Point Light" in that same Create menu is now real too -- see
+// Phase 15a: "Point Light" in that same Create menu is now real too -- see
 // light.hpp for the new PointLight ECS component this adds and
-// Application::spawnEntityFromCreateMenu()'s own Phase 15 comment for what
+// Application::spawnEntityFromCreateMenu()'s own Phase 15a comment for what
 // it builds. Directional Light and Camera stay BeginDisabled()'d -- see
-// editor_ui.cpp's own Phase 15 comment on renderCreateEntityMenuItems() for
+// editor_ui.cpp's own Phase 15a comment on renderCreateEntityMenuItems() for
 // why each is still its own separately-scoped follow-up. The Inspector also
 // gains a live "Light" section (color + attenuation, editable exactly like
-// Transform already is -- see renderInspectorPanel()'s own Phase 15
+// Transform already is -- see renderInspectorPanel()'s own Phase 15a
 // comment) for any selected entity that has a PointLight component.
+//
+// Phase 15b: "Directional Light" is real too now -- see light.hpp for the new
+// DirectionalLight ECS component and Application::spawnEntityFromCreateMenu()'s
+// own Phase 15b comment for what it builds. Camera alone stays
+// BeginDisabled()'d -- see editor_ui.cpp's own Phase 15b comment on
+// renderCreateEntityMenuItems() for why. renderDockspaceShell() below gains
+// one new parameter, `activeDirectionalLight` -- Application's own
+// activeDirectionalLight_ (application.hpp), read-only from EditorUI's own
+// side (only Application::spawnEntityFromCreateMenu() ever changes it, on
+// creation -- see that member's own comment for the "most recently created"
+// rule), passed through to the Inspector's new "Light" section for a
+// selected DirectionalLight entity so it can show whether THIS entity is
+// the one actually driving the scene's single uLightDirection/uLightColor
+// pair right now, or just an inactive entity that happens to also have the
+// component -- see renderInspectorPanel()'s own Phase 15b comment for why
+// that distinction matters and is worth surfacing, not just the color/
+// direction fields themselves.
 
 #include <optional>
 
@@ -154,13 +171,24 @@ enum class CreateEntityKind {
     kSphere,
     kPlane,
     kEmpty,
-    // Phase 15: a real point light entity (Transform + NameComponent +
+    // Phase 15a: a real point light entity (Transform + NameComponent +
     // light.hpp's PointLight component, no ModelComponent -- see
-    // Application::spawnEntityFromCreateMenu()'s own Phase 15 comment).
-    // Directional Light and Camera stay BeginDisabled()'d in the Create
-    // menu -- see editor_ui.cpp's own Phase 15 comment for why those two are
-    // separately-scoped follow-ups, not folded into this one.
+    // Application::spawnEntityFromCreateMenu()'s own Phase 15a comment).
+    // Camera stays BeginDisabled()'d in the Create menu -- see editor_ui.cpp's
+    // own Phase 15b comment for why it's still its own separately-scoped
+    // follow-up.
     kPointLight,
+    // Phase 15b: a real directional light entity (Transform + NameComponent +
+    // light.hpp's DirectionalLight component, no ModelComponent -- same
+    // "no light-gizmo mesh to draw" shape as kPointLight above -- see
+    // Application::spawnEntityFromCreateMenu()'s own Phase 15b comment). Also
+    // becomes this Application's new activeDirectionalLight_ the instant it's
+    // created (see that member's own application.hpp comment for the "most
+    // recently created" rule) -- so, unlike kPointLight, creating one has an
+    // immediate side effect on what the ONE directional light this engine
+    // actually renders/casts shadows with looks like, not just "one more
+    // entity added to a budget."
+    kDirectionalLight,
 };
 
 // Phase 14d: the currently-selected entity's on-screen bounding box, already
@@ -265,8 +293,16 @@ public:
     // `selectedEntity` -- unlike selection, "what was just requested"
     // doesn't need to persist across frames or be readable from outside this
     // one call, only acted on once, immediately after it's returned.
+    // Phase 15b: `activeDirectionalLight` -- see this class's own header
+    // comment (Phase 15b paragraph) for what it's for and why it's a plain
+    // std::optional<EntityId> BY VALUE (read-only here, unlike
+    // `selectedEntity`'s read-write reference above) rather than a second
+    // reference parameter: EditorUI never assigns Application's
+    // activeDirectionalLight_ itself, only displays it, so there is nothing
+    // for a reference to let this function write back.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
-                                           std::optional<EntityId>& selectedEntity, const SelectionOutline* outline);
+                                           std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
+                                           std::optional<EntityId> activeDirectionalLight);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()

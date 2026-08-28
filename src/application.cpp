@@ -431,7 +431,7 @@ constexpr glm::vec3 kAmbientColor{0.15f, 0.15f, 0.18f};
 // forward, so its soft-edged cone visibly falls across the table/ground
 // area a camera looking at the scene from Application's default position
 // can actually see.
-// Phase 15: PointLightData used to be defined here, private to this file.
+// Phase 15a: PointLightData used to be defined here, private to this file.
 // It's now light.hpp's own public PointLightSample -- field-for-field
 // identical -- since collectPointLights() (light.cpp) needs a type it can
 // return that this file also consumes, and duplicating an identical struct
@@ -509,11 +509,11 @@ constexpr std::array<SpotLightData, 1> kSpotLights = {{
     {{0.2f, 1.7f, 0.5f}, {-0.05f, -1.0f, -0.2f}, {0.3f, 1.0f, 0.35f}, 1.0f, 0.35f, 0.44f, 0.9762960f, 0.9396926f},
 }};
 
-// Phase 15: MAX_POINT_LIGHTS in basic.frag/pbr.frag, promoted from a bare
+// Phase 15a: MAX_POINT_LIGHTS in basic.frag/pbr.frag, promoted from a bare
 // literal (kept only in the static_assert below, pre-Phase-15) to a named
 // constant now that render() also passes it to collectPointLights() as the
 // live budget kPointLights' 3 fixed entries share with however many
-// ECS PointLight entities exist -- see this file's own Phase 15 render()
+// ECS PointLight entities exist -- see this file's own Phase 15a render()
 // comment. Still kept in sync BY HAND with the shaders' own #define (no
 // shared constant across the GLSL/C++ boundary exists), same as
 // kMaxSpotLights below.
@@ -1047,8 +1047,9 @@ std::string debugForceDynamicEntityNameFromEnv() {
     return value != nullptr ? std::string(value) : std::string();
 }
 
-// Phase 14f: ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty|pointlight>
-// (case-insensitive; "pointlight" added Phase 15), unset by default -- same
+// Phase 14f: ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty|pointlight|
+// directionallight> (case-insensitive; "pointlight" added Phase 15a,
+// "directionallight" added Phase 15b), unset by default -- same
 // getenv-gated-value shape as ENGINE_DEBUG_SELECT/
 // ENGINE_DEBUG_FORCE_STATIC/_DYNAMIC above, but for
 // Application::spawnEntityFromCreateMenu() (the Scene panel's own Create
@@ -1084,8 +1085,12 @@ CreateEntityKind debugCreateEntityKindFromEnv() {
     if (lowered == "pointlight") {
         return CreateEntityKind::kPointLight;
     }
+    if (lowered == "directionallight") {
+        return CreateEntityKind::kDirectionalLight;
+    }
     LOG_WARN("ENGINE_DEBUG_CREATE=\"" + std::string(value) +
-              "\" is not one of cube/sphere/plane/empty/pointlight; ignoring it and creating nothing");
+              "\" is not one of cube/sphere/plane/empty/pointlight/directionallight; ignoring it and creating "
+              "nothing");
     return CreateEntityKind::kNone;
 }
 
@@ -1320,9 +1325,9 @@ std::array<ClusterLightInput, std::tuple_size<LightTable>::value> toClusterLight
     return inputs;
 }
 
-// Phase 15: the same conversion as toClusterLightInputs() above, but for a
+// Phase 15a: the same conversion as toClusterLightInputs() above, but for a
 // runtime std::vector<PointLightSample> -- render()'s own per-frame
-// kPointLights-plus-ECS point light list (see its own Phase 15 comment)
+// kPointLights-plus-ECS point light list (see its own Phase 15a comment)
 // isn't a compile-time-sized std::array any more, so the template above
 // (whose return size is std::tuple_size<LightTable>::value, a compile-time
 // constant) can't be reused for it. A distinct name, not an overload of
@@ -2321,13 +2326,37 @@ void Application::render() {
     const float aspect =
         viewportHeight_ != 0 ? static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_) : 1.0f;
 
+    // Phase 15b: this frame's actual directional-light direction/color --
+    // resolveActiveDirectionalLight() (light.hpp) returns
+    // activeDirectionalLight_'s own DirectionalLight component when one
+    // genuinely exists (and its direction isn't degenerate), else
+    // kLightDirection/kLightColor completely unchanged -- see that
+    // function's own comment for exactly why/when each case applies, and
+    // application.hpp's own activeDirectionalLight_ comment for the "most
+    // recently created" rule that decides which entity (if any) gets to be
+    // `activeDirectionalLight_` in the first place. Resolved once here,
+    // BEFORE the cascades this same light drives are built below, and reused
+    // by every uLightDirection/uLightColor upload further down this same
+    // render() call (shader_, pbrShader_) -- so the shadow frustum and the
+    // shading math can never disagree about which light this frame is
+    // actually using, the same "compute once, reuse everywhere this frame"
+    // discipline pointLightSamples (further down) already follows for point
+    // lights.
+    const DirectionalLight activeLight = resolveActiveDirectionalLight(
+        registry_, activeDirectionalLight_.value_or(EntityId()), DirectionalLight{kLightDirection, kLightColor});
+
     // Phase 13c: the camera's own aspect ratio (computed above) feeds
     // computeCascades()'s per-cascade sub-frustum construction (see
     // Camera::getProjectionMatrix's near/far overload), so cascades must be
     // (re)computed here, fresh every frame, same as the frustum/view/
-    // projection matrices below -- never cached across frames.
+    // projection matrices below -- never cached across frames. Phase 15b:
+    // built from activeLight.direction (above), not kLightDirection
+    // directly any more -- the two are identical whenever no Directional
+    // Light entity is active, so this is a no-op change for every scene that
+    // doesn't use this phase's new feature (see this engine's own default
+    // scene, still zero Directional Light entities).
     const std::array<Cascade, kCascadeCount> cascades =
-        computeCascades(camera_, aspect, glm::normalize(kLightDirection));
+        computeCascades(camera_, aspect, glm::normalize(activeLight.direction));
     std::array<glm::mat4, kCascadeCount> lightSpaceMatrices{};
     for (int i = 0; i < kCascadeCount; ++i) {
         lightSpaceMatrices[static_cast<std::size_t>(i)] = cascades[static_cast<std::size_t>(i)].lightSpaceMatrix;
@@ -2374,14 +2403,14 @@ void Application::render() {
     GL_CHECK(glClearColor(kClearR, kClearG, kClearB, kClearA));
     GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
 
-    // Phase 15: this frame's full point light list -- kPointLights' 3 fixed
+    // Phase 15a: this frame's full point light list -- kPointLights' 3 fixed
     // entries (application.cpp's own hand-tuned table, completely unchanged
     // from every prior phase -- see that table's own comment) seeded first,
     // then any live PointLight ECS entities appended by collectPointLights()
     // (light.hpp), up to kMaxPointLights total. Rebuilt fresh every frame,
     // unlike kSpotLights below (still a real function-local `static` --
     // spot lights stay a fixed compile-time table this phase, see
-    // editor_ui.cpp's own Phase 15 comment on why Directional Light/Camera,
+    // editor_ui.cpp's own Phase 15a comment on why Directional Light/Camera,
     // and by extension spot lights, aren't part of this phase's scope):
     // ECS point lights CAN be created (Scene panel's Create menu) or deleted
     // mid-run, so caching this list once and reusing it every frame the way
@@ -2464,8 +2493,12 @@ void Application::render() {
     shader_->setMat4("uView", view);
     shader_->setMat4("uProjection", projection);
     uploadCascades(*shader_, cascades);
-    shader_->setVec3("uLightDirection", kLightDirection);
-    shader_->setVec3("uLightColor", kLightColor);
+    // Phase 15b: activeLight.direction/.color (resolved above, before
+    // cascades), not kLightDirection/kLightColor directly any more -- see
+    // that resolution's own comment for why the two are identical whenever
+    // no Directional Light entity is active.
+    shader_->setVec3("uLightDirection", activeLight.direction);
+    shader_->setVec3("uLightColor", activeLight.color);
     shader_->setVec3("uAmbientColor", kAmbientColor);
     shader_->setVec3("uViewPos", camera_.position());
 
@@ -2503,7 +2536,7 @@ void Application::render() {
     // over lights that actually exist rather than every array slot. Phase
     // 15: uPointLights now comes from this frame's own pointLightSamples
     // (kPointLights plus any live ECS point lights, see this function's
-    // own Phase 15 comment above), not straight from kPointLights.
+    // own Phase 15a comment above), not straight from kPointLights.
     shader_->setInt("uNumPointLights", static_cast<int>(pointLightSamples.size()));
     for (std::size_t i = 0; i < pointLightSamples.size(); ++i) {
         uploadPointLight(*shader_, i, pointLightSamples[i]);
@@ -2614,8 +2647,10 @@ void Application::render() {
     pbrShader_->setMat4("uView", view);
     pbrShader_->setMat4("uProjection", projection);
     uploadCascades(*pbrShader_, cascades);
-    pbrShader_->setVec3("uLightDirection", kLightDirection);
-    pbrShader_->setVec3("uLightColor", kLightColor);
+    // Phase 15b: same activeLight.direction/.color shader_ already got above
+    // -- see that upload's own comment.
+    pbrShader_->setVec3("uLightDirection", activeLight.direction);
+    pbrShader_->setVec3("uLightColor", activeLight.color);
     pbrShader_->setVec3("uViewPos", camera_.position());
 
     // Phase 13d: see shader_'s identical upload above (Phase 14c: also
@@ -2638,8 +2673,8 @@ void Application::render() {
     // this on -- see that method and pbr.frag's own uSSREnabled comment.
     pbrShader_->setInt("uSSREnabled", 0);
 
-    // Phase 15: same pointLightSamples as shader_'s own upload above --
-    // see this function's own Phase 15 comment.
+    // Phase 15a: same pointLightSamples as shader_'s own upload above --
+    // see this function's own Phase 15a comment.
     pbrShader_->setInt("uNumPointLights", static_cast<int>(pointLightSamples.size()));
     for (std::size_t i = 0; i < pointLightSamples.size(); ++i) {
         uploadPointLight(*pbrShader_, i, pointLightSamples[i]);
@@ -2964,7 +2999,8 @@ void Application::render() {
     // tree/already-finished 3D pass.
     editorUI_.newFrame();
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
-        viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr);
+        viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr,
+        activeDirectionalLight_);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
     }
@@ -3030,6 +3066,14 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
             // post-switch block below for where the PointLight component
             // itself gets added.
             break;
+        case CreateEntityKind::kDirectionalLight:
+            baseName = "Directional Light";
+            // loadPath stays nullptr, same reason as kPointLight above --
+            // see this function's own post-switch block below for where the
+            // DirectionalLight component itself gets added, and for where
+            // this new entity also becomes activeDirectionalLight_
+            // (application.hpp).
+            break;
         case CreateEntityKind::kNone:
         default:
             return;
@@ -3056,7 +3100,7 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
         registry_.addComponent<ModelComponent>(
             entity, ModelComponent{resources_.getModel(*loadPath, *shader_), storedPath});
     }
-    // Phase 15: a freshly Create'd Point Light starts at PointLight{}'s own
+    // Phase 15a: a freshly Create'd Point Light starts at PointLight{}'s own
     // struct defaults (plain white, the same (1.0, 0.7, 1.8) attenuation
     // profile kPointLights already uses -- see light.hpp's own comment) --
     // a sane, immediately-visible starting point the Inspector's new Light
@@ -3065,6 +3109,20 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
     // starting the very next frame, no further wiring needed here.
     if (kind == CreateEntityKind::kPointLight) {
         registry_.addComponent<PointLight>(entity, PointLight{});
+    }
+    // Phase 15b: a freshly Create'd Directional Light starts at
+    // DirectionalLight{}'s own struct defaults -- see light.hpp's own
+    // comment on why those defaults are deliberately NOT kLightDirection/
+    // kLightColor's own values, unlike PointLight{} mirroring kPointLights'
+    // shared attenuation profile above. Also unconditionally becomes this
+    // Application's new activeDirectionalLight_ -- application.hpp's own
+    // comment on that member has the full "why most-recently-created" design
+    // discussion; the short version is that overwriting it here,
+    // unconditionally, on every kDirectionalLight creation IS that rule, in
+    // its entirety.
+    if (kind == CreateEntityKind::kDirectionalLight) {
+        registry_.addComponent<DirectionalLight>(entity, DirectionalLight{});
+        activeDirectionalLight_ = entity;
     }
 
     LOG_INFO("Created entity \"" + uniqueName + "\" (index " + std::to_string(entity.index()) + ") via the Scene "

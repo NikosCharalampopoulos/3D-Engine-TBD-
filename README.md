@@ -290,7 +290,8 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        cluster_light_culler.cpp, ssao.cpp,
                        scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp,
                        input_action_map.cpp, physics.cpp, editor_ui.cpp,
-                       light.cpp -- Phase 15)
+                       light.cpp -- Phase 15a, extended Phase 15b with
+                       DirectionalLight/resolveActiveDirectionalLight())
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -298,8 +299,8 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
                        scene_serialization, debug_ui, input_action_map, physics,
-                       editor_ui, light -- Phase 15's new PointLight ECS
-                       component)
+                       editor_ui, light -- Phase 15a's new PointLight ECS
+                       component, extended Phase 15b with DirectionalLight)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -322,8 +323,9 @@ tests/                 scene_serialization_test.cpp (Phase 8b),
                        physics_test.cpp (Phase 8e), ecs_test.cpp (Phase 14f),
                        transform_hierarchy_test.cpp (Phase 14b),
                        scene_hierarchy_test.cpp (Phase 14d),
-                       light_test.cpp (Phase 15) + its own CMakeLists.txt
-                       (no longer just the Phase 0 placeholder)
+                       light_test.cpp (Phase 15a, extended Phase 15b with
+                       resolveActiveDirectionalLight() coverage) + its own
+                       CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
 A single executable target (`engine_app`) is built for now. A future phase
@@ -4466,7 +4468,7 @@ already existed.
     14e's own README section already describes -- confirming this phase's
     `ecs.hpp`/`editor_ui.cpp` changes didn't disturb either debug aid.
 
-### Phase 15: real Point Light entities
+### Phase 15a: real Point Light entities
 
 Phase 14f's own Create menu left "Point Light"/"Directional Light"/"Camera"
 `BeginDisabled()`'d, with a tooltip explaining each needed real, separate
@@ -4562,6 +4564,130 @@ own follow-up.
   color; the Viewport shows a visibly brighter hotspot near the light's
   spawn position (in front of the camera, per the existing Create-menu
   placement heuristic) that isn't present in the baseline screenshot.
+
+### Phase 15b: real Directional Light entities
+
+Phase 15a closed the smaller of the two Create-menu light gaps it inherited
+from Phase 14f; this phase closes the harder one. Unlike a point light,
+`basic.frag`/`pbr.frag` read a single fixed `uLightDirection`/`uLightColor`
+uniform pair (`application.cpp`'s `kLightDirection`/`kLightColor`), not a
+`uNumX`-counted array, and that same pair is also this engine's ONE
+shadow-casting light (`renderShadowPass()`/`computeCascades()`, built
+directly from it). So a Directional Light entity can't just "grow an array
+with live data" the way Point Light could -- there has to be a notion of
+which ONE entity (if any) is actually driving that single uniform pair/
+shadow frustum this frame, which this engine had no notion of before now.
+
+- **`light.hpp`/`light.cpp`**: a new `DirectionalLight` component
+  (`direction` + `color`, mirroring `kLightDirection`/`kLightColor`'s own
+  meaning field-for-field) and `resolveActiveDirectionalLight(registry,
+  active, fallback)`: returns `active`'s own `DirectionalLight` component
+  when `active` is a valid entity that actually has one and its direction
+  hasn't degenerated to (at or near) the zero vector, else `fallback`
+  unchanged. Deliberately NOT an array-oriented `PointLightSample`-shaped
+  type -- there is still only ever one active directional light in the
+  actual rendering pipeline, so the resolved per-frame value has exactly the
+  component's own shape, reused directly rather than duplicated into a
+  bespoke sample struct. `direction` is a plain field, NOT derived from the
+  entity's own `Transform::rotation()` the way a first glance at
+  `PointLight`'s "reuse the Transform" precedent might suggest: the
+  Inspector's Transform section only ever edits a single Rot-Y degree field
+  (Phase 14e), which can never express `kLightDirection`'s own steep
+  downward pitch, so a direct `direction` field (the same precedent
+  `application.cpp`'s pre-existing `SpotLightData` already set) is the only
+  form that's actually editable to something useful. `DirectionalLight{}`'s
+  own defaults are deliberately NOT `kLightDirection`/`kLightColor`'s values
+  (unlike `PointLight{}` mirroring `kPointLights`' shared attenuation
+  profile) -- a point light is additive, so matching an existing light's
+  tuning is a fine "immediately visible" starting point, but a directional
+  light REPLACES `kLightDirection`/`kLightColor` outright once active, so
+  identical defaults would make a freshly created-and-activated entity
+  visually indistinguishable from having done nothing at all. Instead it
+  defaults to a steeper "high noon" angle (still on `kLightDirection`'s own
+  `+x, +z` side, so its shadow stays camera-visible per that constant's own
+  Phase 7a comment) paired with a cool "moonlight" tint, so creating one is
+  immediately, visibly a different light. Depends on nothing but
+  `ecs.hpp`/`transform.hpp` -- no GL dependency, so `tests/light_test.cpp`
+  (extended, not a new file -- same translation unit as
+  `collectPointLights()`) exercises it with no live GL context either.
+- **`application.hpp`/`application.cpp`**: a new `activeDirectionalLight_`
+  member (`std::optional<EntityId>`, default `std::nullopt`) -- "which
+  entity is active" resolves to the simplest rule that fits an engine with
+  no multi-select UI concept anywhere yet: the most recently Create'd
+  Directional Light entity, set unconditionally in
+  `spawnEntityFromCreateMenu()`'s own new `kDirectionalLight` case (Transform
+  + NameComponent, no ModelComponent -- the same shape `kPointLight` already
+  established -- plus a freshly `addComponent<DirectionalLight>()`'d
+  component at its own defaults). `render()` now resolves
+  `resolveActiveDirectionalLight(registry_, activeDirectionalLight_.value_or(EntityId()),
+  DirectionalLight{kLightDirection, kLightColor})` once, before
+  `computeCascades()` runs, and reuses that single result for the cascade
+  build and both `shader_`/`pbrShader_` `uLightDirection`/`uLightColor`
+  uploads -- so the shadow frustum and the shading math can never disagree
+  about which light this frame is actually using. A stale
+  `activeDirectionalLight_` (its entity later deleted) is never explicitly
+  cleared -- `resolveActiveDirectionalLight()` already tolerates a stale id
+  exactly the way `getComponent<T>()` does everywhere else in this codebase,
+  so it silently and correctly falls back to `kLightDirection`/`kLightColor`
+  the next frame with no cleanup required. `ENGINE_DEBUG_CREATE` gains a
+  `directionallight` value, calling this exact same production function.
+- **`editor_ui.hpp`/`editor_ui.cpp`**: the Create menu's "Directional Light"
+  item is real now (returns `CreateEntityKind::kDirectionalLight`, no longer
+  `BeginDisabled()`'d) -- only "Camera" stays disabled, for the reason its
+  own (unchanged, still accurate) tooltip already gives. The Inspector gains
+  a live "Light" section for a selected `DirectionalLight` entity
+  (`ColorEdit3` + `DragFloat3` for direction, no per-axis clamp -- see that
+  section's own comment for why a floor here would be wrong for a direction,
+  unlike Point Light's `Constant` field) that also shows whether THIS entity
+  is the currently active one -- without that line, two Directional Light
+  entities would render identical Inspector sections while only one of them
+  actually affects the scene, a distinction no other component in this
+  engine's Inspector has to account for.
+  `renderDockspaceShell()`/`renderInspectorPanel()` both gain one new
+  read-only `activeDirectionalLight` parameter (Application's own
+  `activeDirectionalLight_`, threaded through the same way `outline` already
+  is) to make that comparison.
+- **Deliberately not done this phase** (same reasoning Phase 15a gave for
+  its own equivalent gaps): Camera stays deferred -- a structurally similar
+  "which entity is active" problem, but for this engine's actual rendered
+  view (a free-fly `Camera` object, not an ECS entity) rather than one
+  uniform pair, different enough in kind to stay its own separately-scoped
+  follow-up, not folded into this one. No explicit "Set Active" UI control
+  either -- "most recently created" is the whole mechanism; a richer rule
+  would need a multi-select concept this engine doesn't have anywhere else
+  yet, and building one just for this would be exactly the kind of
+  speculative UI surface this codebase's own established style avoids. No
+  scene serialization for `DirectionalLight`, for the identical "nothing
+  consumes it yet" reason Phase 15a gave for `PointLight`.
+- **Verify**: a clean rebuild compiles with **zero new warnings** under
+  `-Wall -Wextra`. `ctest` reports **7/7** (`light_test` extended with four
+  new `resolveActiveDirectionalLight()` cases: active-entity-wins,
+  no-active-falls-back, stale/missing-component-falls-back, and
+  degenerate-zero-length-direction-falls-back). A baseline
+  `tools/run_headless.sh` run (`ENGINE_MAX_FRAMES=60`, no debug env vars)
+  logs the byte-identical clustered-lighting occupancy Phase 15a's own
+  baseline recorded (2136 -> 2155/2304 clusters occupied, avg 3.565543 ->
+  3.581903 lights/occupied cluster) and zero `[ERROR]` lines -- confirming
+  a scene with zero Directional Light entities (this engine's own default
+  scene, still true today) renders exactly as it did before this phase, no
+  regression to the one shadow-casting light every prior phase's own
+  screenshot baseline depends on. A second run with
+  `ENGINE_DEBUG_CREATE=directionallight` + `ENGINE_DEBUG_SELECT="Directional
+  Light"` + `ENGINE_SHOW_DEBUG_UI=1` logs `Created entity "Directional
+  Light" (index 3) via the Scene panel's Create menu`, zero `[ERROR]` lines,
+  and the SAME clustered-lighting stats as the baseline (a directional light
+  is correctly outside the point/spot cluster budget entirely, unlike Phase
+  15's point light). Inspected as a screenshot: the debug overlay's Scene
+  Entities list shows `Directional Light` alongside
+  `scene`/`falling_cube`/`parented_demo_cube`; the Inspector shows it
+  selected, labeled "Empty entity (no model)", with a live Transform and a
+  new "Light" section whose color swatch reads `(140, 179, 255)` -- exactly
+  `DirectionalLight{}`'s own default cool tint; the Viewport shows a
+  dramatically different lighting result from the baseline (the warm,
+  low-angle sun's bright hotspot and long shadows are replaced by a cooler,
+  more overhead look), direct visual proof `resolveActiveDirectionalLight()`
+  is actually feeding the shader/shadow pass, not just sitting inertly in
+  the registry.
 
 ## Libraries used and why
 
