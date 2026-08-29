@@ -19,6 +19,8 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <cstring>
+#include <filesystem>
 #include <string>
 
 #include "engine/asset_browser.hpp"
@@ -33,6 +35,7 @@
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
 #include "engine/physics.hpp"
+#include "engine/scene_file_ops.hpp"
 #include "engine/scene_hierarchy.hpp"
 #include "engine/texture.hpp"
 #include "engine/transform.hpp"
@@ -132,6 +135,52 @@ void renderTextureBrowsePopup(const std::vector<AssetTreeNode>& assetTree,
             ImGui::PushID(file->relativePath.c_str());
             if (ImGui::Selectable(file->relativePath.c_str())) {
                 textureAssignRequested = "assets/" + file->relativePath;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+    }
+
+    ImGui::EndPopup();
+}
+
+// Phase 18i: the File > Open Scene... popup body -- opened by that menu
+// item's own `ImGui::OpenPopup("Open Scene")` call (renderDockspaceShell(),
+// below), called EVERY frame the same "must keep running after the File
+// menu itself has closed" reason renderSaveAsPopup() (private member
+// function, below -- see its own header comment) is. A free function, not a
+// member one, unlike renderSaveAsPopup(): this popup owns no persistent
+// cross-frame state of its own (no text field to remember -- just a fresh
+// listSceneFileNames() call and a click), the identical "free function vs.
+// member function" split renderTextureBrowsePopup() above/updateGizmo()
+// (private, header) already establish for the same reason.
+//
+// listSceneFileNames() (scene_file_ops.hpp) is called fresh every frame
+// this popup is open, not cached -- see that function's own header comment
+// for why a flat, small, single-directory listing needs no one-time-build
+// caching the way buildAssetTree()'s own much larger recursive walk does;
+// concretely, this means a scene just Saved As during this same run
+// immediately shows up the very next time this popup is opened, with no
+// extra invalidation logic anywhere.
+void renderOpenScenePopup(std::optional<std::string>& openSceneRequested) {
+    if (!ImGui::BeginPopup("Open Scene")) {
+        return;
+    }
+
+    const std::vector<std::string> sceneNames = listSceneFileNames(resolveAssetPath("assets/scenes"));
+    if (sceneNames.empty()) {
+        // Reachable in practice only if assets/scenes/ itself were ever
+        // deleted out from under a running process -- kDefaultScenePath is
+        // checked into this project, so an ordinary checkout/build always
+        // has at least "default" to show here.
+        ImGui::TextDisabled("No scene files found under assets/scenes/.");
+    } else {
+        ImGui::BeginChild("OpenSceneList", ImVec2(240.0f, 160.0f), true);
+        for (const std::string& name : sceneNames) {
+            ImGui::PushID(name.c_str());
+            if (ImGui::Selectable(name.c_str())) {
+                openSceneRequested = name;
                 ImGui::CloseCurrentPopup();
             }
             ImGui::PopID();
@@ -2110,6 +2159,62 @@ void EditorUI::renderTitleBar(bool showCustomTitleBar, bool windowMaximized, std
     ImGui::End();
 }
 
+// Phase 18i: see this method's own editor_ui.hpp comment for the full
+// design (why a member function, why called unconditionally every frame
+// rather than nested inside `if (ImGui::BeginMenu("File"))`).
+void EditorUI::renderSaveAsPopup(const std::string& currentScenePath, std::optional<std::string>& saveAsRequested) {
+    if (!ImGui::BeginPopup("Save Scene As")) {
+        return;
+    }
+
+    ImGui::TextUnformatted("Scene name:");
+    ImGui::SetNextItemWidth(240.0f);
+    ImGui::InputText("##SaveAsName", saveAsNameBuffer_.data(), saveAsNameBuffer_.size());
+
+    // Live preview/validation, re-derived from the buffer's own current
+    // contents every single frame this popup is open -- sanitizeSceneName()
+    // (scene_file_ops.hpp) is a small, pure function with nothing expensive
+    // in it, so there is no reason to only recompute this on a text-changed
+    // event the way a heavier validation might need to.
+    const std::optional<std::string> sanitized = sanitizeSceneName(std::string(saveAsNameBuffer_.data()));
+    std::string targetPath;
+    bool willOverwrite = false;
+    if (sanitized.has_value()) {
+        targetPath = sceneRelativePathForName(*sanitized);
+        std::error_code existsError;
+        willOverwrite = std::filesystem::exists(resolveAssetPath(targetPath), existsError) && !existsError;
+        ImGui::TextDisabled("Will save to: %s", targetPath.c_str());
+        if (willOverwrite) {
+            // This engine's plain Save Scene has always silently overwritten
+            // its own target file with no confirmation step (see
+            // Application::saveCurrentScene()'s own comment) -- Save As
+            // follows the identical convention, so this is purely an
+            // informational heads-up, not a blocking confirmation the way a
+            // real "Overwrite? Yes/No" dialog would be.
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "A file with this name already exists and will be "
+                                                                    "overwritten.");
+        }
+        if (resolveAssetPath(targetPath) == currentScenePath) {
+            ImGui::TextDisabled("(this is the currently open scene)");
+        }
+    } else {
+        ImGui::TextDisabled("Enter a name using letters, digits, '_', or '-'.");
+    }
+
+    ImGui::BeginDisabled(!sanitized.has_value());
+    if (ImGui::Button("Save")) {
+        saveAsRequested = *sanitized;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
 CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                                  std::optional<EntityId>& selectedEntity,
                                                  std::optional<EntityId> activeDirectionalLight, bool hasActiveCamera,
@@ -2124,7 +2229,10 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  const glm::mat4& cameraProjection,
                                                  std::optional<EntityId>& deleteEntityRequested,
                                                  std::optional<Command>& transformEditCommitted, bool canUndo,
-                                                 bool canRedo, bool& undoRequested, bool& redoRequested) {
+                                                 bool canRedo, bool& undoRequested, bool& redoRequested,
+                                                 bool& newSceneRequested, std::optional<std::string>& saveAsRequested,
+                                                 const std::string& currentScenePath,
+                                                 std::optional<std::string>& openSceneRequested) {
     // Phase 18h: the identical "false/empty every frame except the one
     // where the real thing actually happened" reset every other
     // out-parameter here already follows.
@@ -2132,6 +2240,11 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     transformEditCommitted.reset();
     undoRequested = false;
     redoRequested = false;
+    // Phase 18i: the identical reset, for the identical reason -- see this
+    // class's own updated header comment.
+    newSceneRequested = false;
+    saveAsRequested.reset();
+    openSceneRequested.reset();
     // Phase 17d: the identical "false/empty every frame except the one where
     // the real thing actually happened" reset every other out-parameter in
     // this function already follows (see e.g. cameraCaptureRequested just
@@ -2190,6 +2303,13 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     saveSceneRequested = false;
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
+            // Phase 18i: New Scene -- a plain, immediate menu click, no
+            // confirmation prompt (see Application::newScene()'s own
+            // application.hpp comment for why that's this phase's own
+            // deliberate, documented choice, not an oversight).
+            if (ImGui::MenuItem("New Scene")) {
+                newSceneRequested = true;
+            }
             // The shortcut string ("Ctrl+S") is display-only -- ImGui
             // MenuItem() shortcut text is never itself an input binding (see
             // Dear ImGui's own documentation for MenuItem()); the actual
@@ -2204,10 +2324,31 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
             if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
                 saveSceneRequested = true;
             }
+            // Phase 18i: Save As... -- the text buffer is cleared HERE, on
+            // the very click that opens the popup, not once at construction
+            // -- so a previous Save As session's leftover text never lingers
+            // into a fresh one (matching this popup's own "opened fresh
+            // each time" UX, the same reason a real file-save dialog doesn't
+            // pre-fill your last-used filename by default either).
+            if (ImGui::MenuItem("Save As...")) {
+                saveAsNameBuffer_.fill('\0');
+                ImGui::OpenPopup("Save Scene As");
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Open Scene...")) {
+                ImGui::OpenPopup("Open Scene");
+            }
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
     }
+    // Phase 18i: called EVERY frame, not nested inside
+    // `if (ImGui::BeginMenu("File"))` above -- see renderSaveAsPopup()'s own
+    // editor_ui.hpp comment for exactly why (a popup keeps rendering across
+    // every later frame once opened, well after the menu itself that
+    // launched it has closed).
+    renderSaveAsPopup(currentScenePath, saveAsRequested);
+    renderOpenScenePopup(openSceneRequested);
 
     // DockSpaceOverViewport() is the built-in "just cover the whole main
     // viewport" helper (creates its own invisible host window internally) --

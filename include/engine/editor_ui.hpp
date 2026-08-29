@@ -295,6 +295,7 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <optional>
 #include <string>
 #include <utility>
@@ -731,6 +732,45 @@ public:
     // undo()/redo() when either comes back true, immediately after this
     // call returns, the same "report intent, act right after" shape every
     // other out-parameter here already follows.
+    //
+    // Phase 18i: three more File-menu actions, the identical "EditorUI
+    // reports intent, Application acts" shape every out-parameter above
+    // already establishes -- see this class's own updated header comment
+    // and editor_ui.cpp's own renderSaveAsPopup()/renderOpenScenePopup()
+    // comments for the full popup design.
+    //
+    // `newSceneRequested`: unconditionally reset to false at the top of
+    // every call, set true the one frame File > New Scene is clicked. No
+    // popup of its own -- see this class's own header comment for why a
+    // plain, immediate menu click (no confirmation) is this phase's own
+    // deliberate, documented choice.
+    //
+    // `saveAsRequested`: unconditionally reset to std::nullopt at the top of
+    // every call, set to an ALREADY-sanitizeSceneName()'d name (never the
+    // popup's own raw, unsanitized text-field contents) the one frame its
+    // "Save" button is clicked -- that button is itself disabled whenever
+    // the current text doesn't sanitize to anything usable, so a non-nullopt
+    // result here is always a real, saveSceneAs()-ready name.
+    // `currentScenePath` is Application's own currentScenePath_, read-only
+    // BY VALUE (the identical shape `activeDirectionalLight` above already
+    // uses for state EditorUI only ever DISPLAYS, never assigns) -- the
+    // popup's own live preview line shows exactly what file this save would
+    // create/overwrite (`sceneRelativePathForName()`'d from the current text
+    // field), and its "already exists" warning needs to know what's
+    // currently open only to phrase that warning correctly, not to gate
+    // anything (this engine's plain Save Scene already silently overwrites,
+    // and Save As follows the identical convention -- see
+    // Application::saveSceneAs()'s own comment).
+    //
+    // `openSceneRequested`: unconditionally reset to std::nullopt at the top
+    // of every call, set to one of `sceneNamesUnderScenesDir`'s own entries
+    // the one frame a user clicks it in the Open Scene popup's list.
+    // `sceneNamesUnderScenesDir` is listSceneFileNames()'d (scene_file_ops.hpp)
+    // fresh every frame the popup is open (a flat, single-directory,
+    // small-file-count listing -- see that function's own header comment for
+    // why this needs no one-time caching the way buildAssetTree()'s own much
+    // larger recursive walk does), so a scene saved via Save As during THIS
+    // same run immediately appears in the very next time this popup opens.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity,
                                            std::optional<EntityId> activeDirectionalLight, bool hasActiveCamera,
@@ -744,7 +784,10 @@ public:
                                            const glm::mat4& cameraProjection,
                                            std::optional<EntityId>& deleteEntityRequested,
                                            std::optional<Command>& transformEditCommitted, bool canUndo, bool canRedo,
-                                           bool& undoRequested, bool& redoRequested);
+                                           bool& undoRequested, bool& redoRequested, bool& newSceneRequested,
+                                           std::optional<std::string>& saveAsRequested,
+                                           const std::string& currentScenePath,
+                                           std::optional<std::string>& openSceneRequested);
 
     // Phase 18e: the headless verification hook behind ENGINE_DEBUG_GIZMO_DRAG
     // (see that env var's own application.cpp comment for the full design).
@@ -820,6 +863,32 @@ private:
     // in that case, exactly this project's pre-Phase-17d layout.
     void renderTitleBar(bool showCustomTitleBar, bool windowMaximized, std::pair<int, int> windowPos,
                          TitleBarAction& action);
+
+    // Phase 18i: the File > Save As... popup body -- opened by that menu
+    // item's own `ImGui::OpenPopup("Save Scene As")` call
+    // (renderDockspaceShell(), editor_ui.cpp), called EVERY frame
+    // (unconditionally, not nested inside `if (ImGui::BeginMenu("File"))`)
+    // the same way renderTextureBrowsePopup()'s own call site already has
+    // to be -- a Dear ImGui popup keeps rendering across every later frame
+    // once opened, well after the File menu itself has closed (menus
+    // auto-close on their own MenuItem click), so gating this call on the
+    // menu still being open would open the popup but then never actually
+    // draw it. A private member function (like renderTitleBar() above,
+    // unlike free-function renderTextureBrowsePopup()) because it owns
+    // `saveAsNameBuffer_`'s persistent cross-frame text-field contents --
+    // the identical reason renderTitleBar()/updateGizmo() are member
+    // functions rather than free ones.
+    //
+    // `currentScenePath` is Application's own currentScenePath_, read-only
+    // (this popup only ever DISPLAYS it, in its own "already exists"
+    // warning line -- never assigns it, matching every other read-only
+    // Application-owned value this class already displays, e.g.
+    // `activeDirectionalLight`). `saveAsRequested` is set to the current
+    // text field's own sanitizeSceneName()'d value -- never the raw,
+    // unsanitized buffer contents -- the one frame this popup's own "Save"
+    // button (disabled whenever the current text sanitizes to nothing
+    // usable) is clicked.
+    void renderSaveAsPopup(const std::string& currentScenePath, std::optional<std::string>& saveAsRequested);
 
     // Phase 18e: the translate gizmo's own mouse-interaction handling --
     // hit-testing which axis (if any) the mouse is over, running
@@ -982,6 +1051,21 @@ private:
     // ImGui's own single-active-item model), so one shared member -- not one
     // per field -- is enough to cover all three.
     std::optional<TransformSnapshot> pendingInspectorTransformEditBefore_;
+
+    // Phase 18i: the Save As popup's own text field contents -- persistent,
+    // cross-frame state (not a local inside renderSaveAsPopup()) because
+    // Dear ImGui's InputText() needs a stable buffer address across frames
+    // for the SAME reason every other ImGui text-editing widget does (it
+    // mutates this buffer directly via a raw char* each frame it's drawn,
+    // not a per-frame value-in/value-out call). std::array<char, 64>, not a
+    // std::string -- ImGui::InputText()'s own plain-C-buffer contract
+    // (imgui.h) needs a fixed-capacity char* + byte count, matching this
+    // header's own kMaxSceneNameLength-shaped cap (scene_file_ops.cpp) with
+    // a little headroom. Reset to empty each time the popup is freshly
+    // opened (see renderSaveAsPopup()'s own editor_ui.cpp comment for
+    // exactly when), so a previous Save As's leftover text never lingers
+    // into a later one.
+    std::array<char, 64> saveAsNameBuffer_{};
 };
 
 }  // namespace engine

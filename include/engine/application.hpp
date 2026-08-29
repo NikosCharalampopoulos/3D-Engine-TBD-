@@ -1010,6 +1010,113 @@ private:
     // actually achieve.
     void saveCurrentScene();
 
+    // Phase 18i: shared cleanup for "the current scene's entities are about
+    // to be wholesale replaced" -- both newScene() and openScene() below are
+    // exactly that kind of transition, so both call this first. Destroys
+    // every entity registry_ currently has (collected via its own
+    // Transform pool -- see scene_serialization.hpp's own "every entity this
+    // schema can represent has a Transform" comment for why that pool is a
+    // complete enumeration of "every real entity," the identical premise
+    // saveScene() itself already relies on), via the same generic,
+    // Parent-unaware EntityRegistry::destroyEntity() primitive
+    // destroyEntityOrphaningChildren() is itself built on -- no orphan-vs-
+    // cascade decision is needed here the way a single Delete Object has,
+    // since EVERY entity is being destroyed together; there is no "child
+    // left behind" case to decide between when nothing survives at all.
+    //
+    // Also resets every other piece of per-scene ephemeral state a scene
+    // transition invalidates: selectedEntity_ (nothing in the incoming scene
+    // can be what was selected in the old one), activeDirectionalLight_ (its
+    // own stale-id tolerance -- see that member's own header comment -- only
+    // means this ISN'T strictly required for correctness, not that leaving a
+    // stale reference around across a scene change a user can actually see
+    // happen makes sense), and undoStack_ (UndoStack::clear() -- Phase 18h's
+    // own undoStack_ comment already named this exact moment as the right
+    // place to do it: "a future phase that adds a real Scene > Open/Load UI
+    // is the right place to decide whether undo history should survive that
+    // action... clearing it there too" -- this confirms that call).
+    void clearSceneForTransition();
+
+    // Phase 18i: File > New Scene -- starts a genuinely empty scene (no
+    // entities at all, standard "start fresh" semantics, not a reload of the
+    // checked-in demo content) via clearSceneForTransition() above, then
+    // resets currentScenePath_ to kUntitledScenePath (application.cpp) --
+    // this scene has never been saved anywhere yet, so a following plain
+    // Ctrl+S/Save Scene targets that untitled path (creating the file only
+    // once the user actually saves), exactly the way a brand-new document in
+    // most editors behaves.
+    //
+    // No confirmation prompt: this engine has no "unsaved changes" dirty-
+    // tracking anywhere (every phase through 18h's own saveCurrentScene()
+    // comment is explicit that this is out of scope), and inventing one
+    // purely to gate a confirmation dialog here would be real, separate
+    // scope this phase doesn't need -- see this method's own application.cpp
+    // comment for the full reasoning. A plain, immediate action, the same
+    // "simpler choice when either is reasonable" bias this codebase already
+    // shows elsewhere (e.g. physics.hpp's own RigidBody mass-field comment).
+    void newScene();
+
+    // Phase 18i: File > Save As... -- `sanitizedName` is assumed to already
+    // be sanitizeSceneName()'s own output (scene_file_ops.hpp): its one real
+    // caller (render()'s own Save As popup handling) only ever calls this
+    // once the popup's own live preview has confirmed the current text field
+    // sanitizes to a real name (the popup's Save button is disabled
+    // otherwise), and ENGINE_DEBUG_SAVE_SCENE_AS's own constructor-time call
+    // sanitizes its env var value the identical way before calling this, so
+    // this method itself does no further validation. Builds the real
+    // assets/scenes/<sanitizedName>.json path (sceneRelativePathForName()),
+    // calls the exact same saveScene() (scene_serialization.hpp)
+    // saveCurrentScene() above already does, then updates currentScenePath_
+    // to the new path -- a following plain Save Scene targets THIS file from
+    // now on, not kDefaultScenePath/whatever currentScenePath_ held before.
+    void saveSceneAs(const std::string& sanitizedName);
+
+    // Phase 18i: File > Open Scene... -- `sceneName` is one of the base
+    // names listSceneFileNames() (scene_file_ops.hpp) actually found under
+    // assets/scenes/: its one real caller (render()'s own Open Scene popup)
+    // only ever passes a name that popup itself just listed, and
+    // ENGINE_DEBUG_OPEN_SCENE mirrors it for headless verification.
+    //
+    // Pre-validates the target file by calling parseSceneRecords() BEFORE
+    // touching the live scene at all -- see this method's own application.cpp
+    // comment for exactly why a corrupt/malformed scene file must never wipe
+    // the CURRENTLY loaded scene out from under the user on its way to
+    // failing (this engine's loadScene() already throws on bad input, the
+    // same "propagate a specific, LOG_ERROR'd reason" contract this
+    // constructor's own startup loadScene() call already relies on -- see
+    // that call site's own comment -- but a bad file picked from an
+    // in-editor popup, unlike a bad file at STARTUP, must degrade to "stay
+    // on the scene already loaded," never take the whole editor down with
+    // it). Once that pre-check succeeds, performs the identical
+    // clearSceneForTransition() + loadScene() + currentScenePath_ update
+    // newScene()/saveSceneAs() themselves already establish.
+    //
+    // A file that passes that pre-check can still fail later, inside the
+    // real loadScene() call, if some record's modelPath/texture path names
+    // an asset that doesn't exist or won't load -- parseSceneRecords() only
+    // validates JSON/schema shape, not that every referenced asset is
+    // actually reachable. loadScene()'s own per-record loop has no
+    // rollback of its own (scene_loader.cpp: restoreEntityFromRecord()
+    // creates each record's entity and adds its non-model components
+    // BEFORE ever touching that record's model path), so a later record's
+    // asset failure would otherwise leave every earlier record's entity
+    // already live in registry_ when the exception reaches this method.
+    // openScene()'s own catch block calls clearSceneForTransition() AGAIN
+    // in that case, specifically to destroy that partial set of entities,
+    // so this failure mode still ends in a genuinely empty registry_ --
+    // exactly what a real newScene() produces, not a half-loaded scene
+    // silently passed off as usable -- and currentScenePath_ is left
+    // unchanged (still whatever it was before this call), never repointed
+    // at a file whose load did not actually succeed. What IS a documented,
+    // accepted gap: the scene that was open before this call is still
+    // gone -- clearSceneForTransition() already cleared it before
+    // loadScene() was even attempted, and this method makes no attempt to
+    // restore it, the identical "no recovery of the previous state" risk
+    // profile loadScene() already has at STARTUP for a bad
+    // assets/scenes/default.json, just reached from a live in-editor
+    // action instead of process launch.
+    void openScene(const std::string& sceneName);
+
     // Phase 18h: the real "Delete Object" implementation -- the one place
     // this class actually destroys an entity via
     // destroyEntityOrphaningChildren() (transform_hierarchy.hpp) now,
@@ -1459,6 +1566,25 @@ private:
     // logging registry_'s resulting state after each call.
     int debugUndoCount_ = 0;
     int debugRedoCount_ = 0;
+    // Phase 18i: ENGINE_DEBUG_NEW_SCENE/ENGINE_DEBUG_SAVE_SCENE_AS/
+    // ENGINE_DEBUG_OPEN_SCENE's own parsed state -- see those three env
+    // vars' own application.cpp comments (debugNewSceneFromEnv()/
+    // debugSaveSceneAsFromEnv()/debugOpenSceneNamesFromEnv()) for the full
+    // design. update() consumes these at fixed scripted frames
+    // (kDebugSaveSceneAsFrame/kDebugNewSceneFrame/kDebugOpenSceneBaseFrame,
+    // application.cpp), the identical "parsed once at startup, consumed
+    // later at a fixed frame" shape debugUndoCount_/debugRedoCount_
+    // themselves already establish just above. debugSaveSceneAsName_ is
+    // already sanitizeSceneName()'d by the constructor (empty means unset,
+    // matching every other empty-string-means-absent ENGINE_DEBUG_* string
+    // var in this class); debugOpenSceneNames_ is consumed one entry per
+    // scripted frame, `kDebugOpenSceneFrameSpacing` frames apart, so a
+    // single run can chain more than one Open Scene action in sequence (see
+    // debugOpenSceneNamesFromEnv()'s own comment for why that needs a LIST,
+    // unlike every other single-value debug var here).
+    bool debugNewSceneRequested_ = false;
+    std::string debugSaveSceneAsName_;
+    std::vector<std::string> debugOpenSceneNames_;
     // This engine's one actual rendered view -- still exactly what it was
     // from Phase 3 onward: a free-fly camera driven each frame by real
     // WASD/mouse input (or the scripted ENGINE_CAMERA_DEMO path), entirely
@@ -1642,24 +1768,47 @@ private:
     // cleanup required.
     std::optional<EntityId> activeDirectionalLight_;
 
+    // Phase 18i: the scene file this Application currently considers "the
+    // one Save Scene/Ctrl+S saves to" -- replacing the pre-Phase-18i
+    // assumption (kDefaultScenePath, application.cpp) that this was always
+    // one single, fixed file. Already-resolved (via resolveAssetPath(), the
+    // same form kDefaultScenePath itself is stored in, and the exact form
+    // saveScene()/loadScene() both take as their own `path` parameter --
+    // see scene_serialization.hpp) -- never the shorter "assets/scenes/
+    // foo.json" relative form sceneRelativePathForName() (scene_file_ops.hpp)
+    // produces, so saveCurrentScene() can pass this straight through with no
+    // further resolution at its own call site.
+    //
+    // Starts as kDefaultScenePath in the constructor -- byte-identical to
+    // this engine's entire pre-Phase-18i behavior, whether or not
+    // ENGINE_LEGACY_SCENE was set (see saveCurrentScene()'s own updated
+    // comment for why the legacy-scene path also targets kDefaultScenePath
+    // here, exactly as it silently already did before this phase). Changed
+    // in exactly three places, all of them real scene TRANSITIONS: newScene()
+    // (-> kUntitledScenePath), saveSceneAs() (-> the freshly chosen path),
+    // and openScene() (-> the path just loaded from). A plain Save Scene
+    // itself never touches this member -- saving to "the file already open"
+    // does not change which file that is.
+    std::string currentScenePath_;
+
     // Phase 18h: this Application's own command-stack undo/redo history --
     // see undo_stack.hpp's own header comment for the full design. Every
     // real mutation this class pushes onto it goes through deleteEntity()/
     // spawnEntityFromCreateMenu()'s own trailing push, or render()'s own
     // transformEditCommitted handling -- see each's own comment.
     //
-    // Deliberately NOT cleared/preserved across a scene reload -- this
-    // engine has exactly one real "load a scene" call site
-    // (ENGINE_LEGACY_SCENE's own loadScene() call, constructor) and no
-    // in-editor "load a different scene" UI at all yet, so there is no live
-    // call site where preserving history across a reload would even matter
-    // today; a future phase that adds a real Scene > Open/Load UI is the
-    // right place to decide whether undo history should survive that
-    // action (this project's own established "smallest correct increment"
-    // discipline -- see e.g. physics.hpp's own RigidBody mass-field comment
-    // -- argues for clearing it there too: an undo step referencing a
-    // SceneEntityRecord/EntityId from a scene that's no longer even loaded
-    // is meaningless at best, actively confusing at worst).
+    // Phase 18i update: this member's own pre-18i comment named "a future
+    // phase that adds a real Scene > Open/Load UI" as the right place to
+    // decide whether undo history should survive a scene transition, and
+    // leaned toward clearing it there -- Phase 18i IS that phase, and
+    // confirms exactly that call: clearSceneForTransition() (this class,
+    // above) calls undoStack_.clear() as part of both newScene()'s and
+    // openScene()'s own cleanup, for precisely the reason already
+    // anticipated here -- an undo step referencing a SceneEntityRecord/
+    // EntityId from a scene that's no longer even loaded is meaningless at
+    // best, actively confusing at worst. UndoStack::clear() itself was added
+    // by Phase 18h specifically so this later call would have something
+    // ready to call (see undo_stack.hpp's own clear() comment).
     UndoStack undoStack_;
 
     // Phase 15e: edge-triggered state for the Ctrl+S "Save Scene" keyboard

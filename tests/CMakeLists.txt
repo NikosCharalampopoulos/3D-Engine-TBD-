@@ -347,3 +347,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME undo_stack_test COMMAND undo_stack_test)
+
+# Phase 18i adds scene_file_ops_test, testing engine::sanitizeSceneName()/
+# sceneRelativePathForName()/listSceneFileNames() (src/scene_file_ops.cpp) in
+# isolation -- same "plain executable, links only the pure logic file it's
+# testing" shape as asset_drop_test/asset_browser_test above.
+# scene_file_ops.cpp depends only on <filesystem> (no ecs.hpp, no GLM, no
+# GL/ImGui at all), so, like asset_browser_test, this needs no engine library
+# dependency beyond the standard library itself.
+add_executable(scene_file_ops_test
+    scene_file_ops_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/scene_file_ops.cpp
+)
+target_include_directories(scene_file_ops_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(scene_file_ops_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME scene_file_ops_test COMMAND scene_file_ops_test)

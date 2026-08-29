@@ -256,6 +256,7 @@ add_executable(engine_app
     src/camera_component.cpp
     src/shading_mode.cpp
     src/undo_stack.cpp
+    src/scene_file_ops.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

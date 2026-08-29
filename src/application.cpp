@@ -17,9 +17,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -37,6 +39,7 @@
 #include "engine/model.hpp"
 #include "engine/paths.hpp"
 #include "engine/physics.hpp"
+#include "engine/scene_file_ops.hpp"
 #include "engine/scene_serialization.hpp"
 #include "engine/transform_hierarchy.hpp"
 
@@ -157,6 +160,17 @@ const std::string kScenePath = resolveAssetPath("assets/models/scene.obj");
 // C++. See this class's own Phase 8b constructor comment for the
 // ENGINE_LEGACY_SCENE escape hatch back to that hardcoded path.
 const std::string kDefaultScenePath = resolveAssetPath("assets/scenes/default.json");
+
+// Phase 18i: where newScene()'s currentScenePath_ points until the user
+// actually saves it somewhere -- see that member's own application.hpp
+// comment for why this is a plain std::string sentinel path (not a
+// std::optional<std::string>) and currentScenePath_'s own comment for why
+// this specific choice was made. Never read/written by anything at startup
+// -- it only ever becomes currentScenePath_'s value via newScene(), and this
+// engine never creates a file at this path on its own (a plain Save Scene
+// after New Scene is what would first write it, exactly like saving a
+// brand-new, never-yet-saved document in any other editor).
+const std::string kUntitledScenePath = resolveAssetPath("assets/scenes/untitled.json");
 
 // Phase 14f: the three mesh assets the Scene panel's Create menu's
 // "Cube"/"Sphere"/"Plane" items load. "Cube" deliberately REUSES
@@ -1444,6 +1458,76 @@ bool debugSaveSceneFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 18i: ENGINE_DEBUG_NEW_SCENE=1, unset by default -- same plain
+// on/off getenv-gated-behavior shape as ENGINE_DEBUG_SAVE_SCENE immediately
+// above (nothing to name -- New Scene always does the same thing regardless
+// of what's currently loaded). Exists specifically so a headless run -- no
+// real File > New Scene mouse click under Xvfb -- can prove Application::
+// newScene() actually empties registry_, by calling the exact same function
+// a real menu click calls (the same "debug env var calls the real function
+// the UI calls" precedent every other ENGINE_DEBUG_* var here already
+// establishes). See README.md's own Phase 18i Verify section for the full
+// Save As -> New Scene -> Open Scene proof this makes possible.
+bool debugNewSceneFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_NEW_SCENE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
+// Phase 18i: ENGINE_DEBUG_SAVE_SCENE_AS=<raw name>, unset (empty) by
+// default -- the debug-env-var counterpart to the Save As popup's own text
+// field, so a headless run can prove Application::saveSceneAs() actually
+// writes a NEW file and repoints currentScenePath_ at it, without a real
+// mouse/keyboard to type into that popup. Deliberately returns the RAW env
+// var value, unsanitized -- sanitizeSceneName() (scene_file_ops.hpp) is run
+// against it at this function's own call site (the constructor, below),
+// the identical point a real popup's own text field would be sanitized at
+// (EditorUI's own live preview, editor_ui.cpp), so this free function's own
+// contract stays "just read the env var," matching every other
+// debug*FromEnv() function in this file, none of which do domain validation
+// of their own value either (e.g. debugAssignTextureFromEnv() just above
+// splits on ':' but never checks the texture path actually exists).
+std::string debugSaveSceneAsFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_SAVE_SCENE_AS");
+    return value != nullptr ? std::string(value) : std::string();
+}
+
+// Phase 18i: ENGINE_DEBUG_OPEN_SCENE=<name>[,<name>...], unset (empty) by
+// default -- the debug-env-var counterpart to the Open Scene popup's own
+// clickable list. A COMMA-SEPARATED LIST, not a single name, unlike every
+// other value-carrying ENGINE_DEBUG_* var in this file: this phase's own
+// verification needs to prove a whole CHAIN of Open Scene actions in one
+// run (loading a just-Saved-As scene back, then loading back to "default"),
+// and unlike ENGINE_DEBUG_UNDO/_REDO's own repeated-call-of-the-SAME-action
+// shape, each step here needs a DIFFERENT target name -- there is no
+// single fixed "the" scene to open more than once. update()'s own scripted
+// frames consume one entry per call, each kDebugOpenSceneFrameSpacing
+// frames apart (see this file's own Phase 18i update() comment), so a
+// single process launch can chain "open A, then open B" the way multiple
+// separate process launches never could (New Scene/currentScenePath_/
+// undoStack_ are all live, in-process state a fresh launch can't resume
+// mid-sequence).
+std::vector<std::string> debugOpenSceneNamesFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_OPEN_SCENE");
+    std::vector<std::string> names;
+    if (value == nullptr || *value == '\0') {
+        return names;
+    }
+    const std::string raw(value);
+    std::size_t start = 0;
+    while (start <= raw.size()) {
+        const std::size_t comma = raw.find(',', start);
+        const std::string entry = raw.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!entry.empty()) {
+            names.push_back(entry);
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return names;
+}
+
 // Phase 15f: ENGINE_DEBUG_ASSIGN_TEXTURE=<entity name>:<texture path>, unset
 // by default -- the debug-env-var counterpart to the Material Inspector's
 // own real "Browse..." popup (editor_ui.cpp), so a headless run (no real
@@ -1800,6 +1884,32 @@ constexpr GizmoAxis kDebugGizmoDragAxis = GizmoAxis::kX;
 constexpr std::uint64_t kDebugUndoFrame = 25;
 constexpr std::uint64_t kDebugRedoFrame = 30;
 
+// Phase 18i: ENGINE_DEBUG_SAVE_SCENE_AS/ENGINE_DEBUG_NEW_SCENE/
+// ENGINE_DEBUG_OPEN_SCENE's own scripted frames -- spaced comfortably after
+// kDebugRedoFrame above (rather than interleaved with it) so a headless run
+// combining this phase's own debug vars with Phase 18h's ENGINE_DEBUG_UNDO/
+// _REDO still produces a clean, easy-to-read timeline where every earlier
+// action has fully settled before this phase's own scene-transition
+// sequence begins -- New Scene in particular wipes out everything any
+// earlier CREATE/DELETE/UNDO/REDO action touched, so running it any EARLIER
+// than kDebugRedoFrame would make those other hooks' own proof meaningless
+// (there would be nothing left in registry_ for them to act on). Ten frames
+// apart from each other (rather than five, like kDebugUndoFrame/
+// kDebugRedoFrame's own spacing) -- a scene transition involves real
+// GL-adjacent work (loadScene()'s own resources_.getModel() calls), so a
+// slightly wider settle window keeps a screenshot taken right after one of
+// these frames unambiguous, the identical reasoning kDebugUndoFrame/
+// kDebugRedoFrame's own comment already gives for its own five-frame gap,
+// just scaled up for heavier per-step work.
+constexpr std::uint64_t kDebugSaveSceneAsFrame = 40;
+constexpr std::uint64_t kDebugNewSceneFrame = 50;
+// ENGINE_DEBUG_OPEN_SCENE's own list is consumed one entry per frame,
+// `kDebugOpenSceneFrameSpacing` frames apart starting at this base -- see
+// debugOpenSceneNamesFromEnv()'s own comment for why a LIST, not a single
+// name, is what this one env var carries.
+constexpr std::uint64_t kDebugOpenSceneBaseFrame = 60;
+constexpr std::uint64_t kDebugOpenSceneFrameSpacing = 10;
+
 }  // namespace
 
 Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames, bool maximized,
@@ -2109,6 +2219,18 @@ Application::Application(int width, int height, const std::string& title, std::u
         }
     }
 
+    // Phase 18i: currentScenePath_ always starts as kDefaultScenePath here,
+    // regardless of which branch above actually ran -- byte-identical to
+    // this engine's entire pre-Phase-18i behavior, whether or not
+    // ENGINE_LEGACY_SCENE was set (see saveCurrentScene()'s own updated
+    // comment for why the legacy-scene branch also targets kDefaultScenePath
+    // for saving, exactly as it silently already did before this phase: a
+    // legacy-built scene has no scene FILE it was "loaded from" at all, but
+    // Save Scene still needs somewhere real to write, and kDefaultScenePath
+    // -- the one file this whole engine already treats as its "the" scene
+    // file everywhere else -- is the only sensible default).
+    currentScenePath_ = kDefaultScenePath;
+
     // Phase 14f: ENGINE_DEBUG_CREATE -- see debugCreateEntityKindFromEnv()'s
     // own comment above for why this exists. Applied here, right after the
     // scene above finishes loading and BEFORE the ENGINE_DEBUG_SELECT block
@@ -2329,6 +2451,33 @@ Application::Application(int width, int height, const std::string& title, std::u
     // how many times to call undo()/redo().
     debugUndoCount_ = debugUndoOrRedoCountFromEnv("ENGINE_DEBUG_UNDO");
     debugRedoCount_ = debugUndoOrRedoCountFromEnv("ENGINE_DEBUG_REDO");
+
+    // Phase 18i: ENGINE_DEBUG_NEW_SCENE/ENGINE_DEBUG_SAVE_SCENE_AS/
+    // ENGINE_DEBUG_OPEN_SCENE -- see those three env vars' own
+    // debugNewSceneFromEnv()/debugSaveSceneAsFromEnv()/
+    // debugOpenSceneNamesFromEnv() comments above for the full design.
+    // debugSaveSceneAsName_ is sanitized HERE, once, via the exact same
+    // sanitizeSceneName() (scene_file_ops.hpp) a real Save As popup's own
+    // live preview runs its text field through -- an env var whose value
+    // doesn't sanitize to anything usable (e.g. unset, or entirely
+    // punctuation) is silently treated as "unset" (LOG_WARN'd, left empty),
+    // the identical tolerance debugAssignTextureFromEnv()'s own malformed-
+    // input handling already shows elsewhere in this file, rather than
+    // this constructor itself crashing/throwing over a malformed debug var.
+    {
+        const std::string rawSaveAsName = debugSaveSceneAsFromEnv();
+        if (!rawSaveAsName.empty()) {
+            const std::optional<std::string> sanitized = sanitizeSceneName(rawSaveAsName);
+            if (sanitized.has_value()) {
+                debugSaveSceneAsName_ = *sanitized;
+            } else {
+                LOG_WARN("ENGINE_DEBUG_SAVE_SCENE_AS=\"" + rawSaveAsName +
+                          "\" does not sanitize to a usable scene name; ignored");
+            }
+        }
+    }
+    debugNewSceneRequested_ = debugNewSceneFromEnv();
+    debugOpenSceneNames_ = debugOpenSceneNamesFromEnv();
 
     // Phase 15f: ENGINE_DEBUG_ASSIGN_TEXTURE -- see
     // debugAssignTextureFromEnv()'s own comment above for why this exists.
@@ -2810,6 +2959,49 @@ void Application::update(double deltaTime, const InputState& input) {
             });
             LOG_INFO("  after redo() #" + std::to_string(step) + ": " + std::to_string(entityCount) +
                       " named entities" + positions);
+        }
+    }
+
+    // Phase 18i: ENGINE_DEBUG_SAVE_SCENE_AS/ENGINE_DEBUG_NEW_SCENE/
+    // ENGINE_DEBUG_OPEN_SCENE's own scripted frames -- see
+    // kDebugSaveSceneAsFrame/kDebugNewSceneFrame/kDebugOpenSceneBaseFrame's
+    // own comment above for the exact timeline, and each function's own
+    // application.hpp comment for what it does. `logSceneState` mirrors the
+    // ENGINE_DEBUG_UNDO/_REDO blocks' own per-entity position log just
+    // above (a small local lambda, not a fourth near-identical copy of it),
+    // logged after EVERY one of this phase's own scripted steps so a
+    // headless run's log is a genuine step-by-step trace -- entity count AND
+    // currentScenePath_ at each transition -- not just a final snapshot.
+    const auto logSceneState = [this](const std::string& label) {
+        std::size_t entityCount = 0;
+        std::string names;
+        registry_.each<NameComponent>([&](EntityId /*id*/, NameComponent& nameComponent) {
+            ++entityCount;
+            names += "; " + nameComponent.name;
+        });
+        LOG_INFO("  " + label + ": " + std::to_string(entityCount) + " named entities" + names +
+                  "; currentScenePath_=\"" + currentScenePath_ + "\"");
+    };
+
+    if (frameCount_ == kDebugSaveSceneAsFrame && !debugSaveSceneAsName_.empty()) {
+        LOG_INFO("ENGINE_DEBUG_SAVE_SCENE_AS=\"" + debugSaveSceneAsName_ + "\": calling saveSceneAs() at frame " +
+                  std::to_string(frameCount_));
+        saveSceneAs(debugSaveSceneAsName_);
+        logSceneState("after saveSceneAs()");
+    }
+    if (frameCount_ == kDebugNewSceneFrame && debugNewSceneRequested_) {
+        LOG_INFO("ENGINE_DEBUG_NEW_SCENE: calling newScene() at frame " + std::to_string(frameCount_));
+        newScene();
+        logSceneState("after newScene()");
+    }
+    for (std::size_t i = 0; i < debugOpenSceneNames_.size(); ++i) {
+        const std::uint64_t stepFrame = kDebugOpenSceneBaseFrame + kDebugOpenSceneFrameSpacing * i;
+        if (frameCount_ == stepFrame) {
+            LOG_INFO("ENGINE_DEBUG_OPEN_SCENE: calling openScene(\"" + debugOpenSceneNames_[i] +
+                      "\") at frame " + std::to_string(frameCount_) + " (entry " + std::to_string(i + 1) + "/" +
+                      std::to_string(debugOpenSceneNames_.size()) + ")");
+            openScene(debugOpenSceneNames_[i]);
+            logSceneState("after openScene(\"" + debugOpenSceneNames_[i] + "\")");
         }
     }
 
@@ -4470,14 +4662,40 @@ void Application::render() {
     std::optional<Command> transformEditCommitted;
     bool undoRequested = false;
     bool redoRequested = false;
+    // Phase 18i: three more locals -- `newSceneRequested`/`saveAsRequested`/
+    // `openSceneRequested` mirror saveSceneRequested/textureAssignRequested's
+    // own "out-parameter, handled right below" shape. `currentScenePath_`
+    // itself is passed straight through, read-only, the identical by-value
+    // shape `activeDirectionalLight_`/`hasActiveCamera` above already use
+    // for state EditorUI only ever DISPLAYS. See renderDockspaceShell()'s
+    // own updated editor_ui.hpp comment for what each new parameter means.
+    bool newSceneRequested = false;
+    std::optional<std::string> saveAsRequested;
+    std::optional<std::string> openSceneRequested;
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, activeDirectionalLight_,
         hasActiveCamera, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
         cameraCaptureRequested, editShadingMode_, physicsRunning_, !window_.isDecorated(), window_.isMaximized(),
         window_.getWindowPos(), titleBarAction, renderCamera.position(), view, projection, deleteEntityRequested,
-        transformEditCommitted, undoStack_.canUndo(), undoStack_.canRedo(), undoRequested, redoRequested);
+        transformEditCommitted, undoStack_.canUndo(), undoStack_.canRedo(), undoRequested, redoRequested,
+        newSceneRequested, saveAsRequested, currentScenePath_, openSceneRequested);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
+    }
+    // Phase 18i: the File menu's own three new real trigger paths -- see
+    // newScene()/saveSceneAs()/openScene()'s own application.hpp comments.
+    // Order matters only in that these three are mutually exclusive within
+    // a single ImGui frame (a user can click at most one menu item/popup
+    // button per frame), so there's no meaningful interaction between them
+    // to get wrong here.
+    if (newSceneRequested) {
+        newScene();
+    }
+    if (saveAsRequested.has_value()) {
+        saveSceneAs(*saveAsRequested);
+    }
+    if (openSceneRequested.has_value()) {
+        openScene(*openSceneRequested);
     }
     // Phase 18h: the Inspector's "Delete Object" button's own real trigger
     // path -- see editor_ui.hpp's own updated comment for why EditorUI only
@@ -4880,7 +5098,7 @@ void Application::handleViewportAssetDrop(const std::string& assetRelativePath) 
 // Phase 15e: Save Scene's real implementation -- see this method's own
 // application.hpp comment for the full contract/design discussion. Writes
 // EVERY entity currently in registry_ (not just ones a user actually
-// touched this run) to kDefaultScenePath, exactly matching saveScene()'s
+// touched this run) to currentScenePath_, exactly matching saveScene()'s
 // own "serializes every entity with at least a Transform" contract
 // (scene_serialization.hpp) -- there is no per-entity "dirty" tracking
 // anywhere in this engine (an "unsaved changes" indicator is explicitly out
@@ -4888,9 +5106,153 @@ void Application::handleViewportAssetDrop(const std::string& assetRelativePath) 
 // is always a full, unconditional snapshot of the live scene, the same way
 // every prior phase's own saveScene() contract already promised even before
 // anything called it.
+//
+// Phase 18i update: was unconditionally kDefaultScenePath through Phase
+// 18h -- this is the one behavior change 18i makes to this pre-existing
+// method, generalizing "save to the ONE file this engine always knows
+// about" into "save to whichever file is currently open"
+// (currentScenePath_, application.hpp), which for an untouched fresh run is
+// still kDefaultScenePath (see the constructor's own Phase 18i comment) --
+// so Ctrl+S/File > Save Scene's own behavior in the ordinary, most-common
+// case is unchanged byte-for-byte, confirmed by this phase's own
+// no-regression pixel-diff (see README.md's own Phase 18i Verify section),
+// not merely assumed from the code alone.
 void Application::saveCurrentScene() {
-    saveScene(registry_, kDefaultScenePath, activeDirectionalLight_.value_or(EntityId()));
-    LOG_INFO("Saved scene to \"" + kDefaultScenePath + "\"");
+    saveScene(registry_, currentScenePath_, activeDirectionalLight_.value_or(EntityId()));
+    LOG_INFO("Saved scene to \"" + currentScenePath_ + "\"");
+}
+
+// Phase 18i: see this method's own application.hpp comment for the full
+// contract. `each<Transform>()` is collected into a plain vector FIRST,
+// not destroyed inline inside the each() callback itself -- ComponentPool's
+// own dense-array storage (ecs.hpp) means destroying an entity mid-iteration
+// would invalidate/rearrange the very pool each() is walking (a swap-remove,
+// the same reason spawnEntityFromCreateMenu()'s own captureEntityRecord()
+// call happens BEFORE destruction elsewhere in this file), so this collects
+// every live id first, into its own short-lived vector, then destroys each
+// one in a completely separate second loop.
+void Application::clearSceneForTransition() {
+    std::vector<EntityId> liveEntities;
+    registry_.each<Transform>([&](EntityId id, Transform& /*transform*/) { liveEntities.push_back(id); });
+    for (EntityId id : liveEntities) {
+        registry_.destroyEntity(id);
+    }
+
+    selectedEntity_.reset();
+    activeDirectionalLight_.reset();
+    undoStack_.clear();
+}
+
+// Phase 18i: see this method's own application.hpp comment for the full
+// contract/design discussion (why no confirmation prompt, why
+// kUntitledScenePath rather than std::nullopt).
+void Application::newScene() {
+    clearSceneForTransition();
+    currentScenePath_ = kUntitledScenePath;
+    LOG_INFO("New Scene: registry_ cleared to an empty scene; currentScenePath_ is now \"" + currentScenePath_ +
+              "\" (not written to disk until the next Save)");
+}
+
+// Phase 18i: see this method's own application.hpp comment for the full
+// contract. Does no validation of `sanitizedName` itself -- see that
+// comment for why this method trusts its callers to have already run it
+// through sanitizeSceneName() (scene_file_ops.hpp).
+void Application::saveSceneAs(const std::string& sanitizedName) {
+    const std::string resolvedPath = resolveAssetPath(sceneRelativePathForName(sanitizedName));
+    // Phase 18i: this engine's plain Save Scene has always silently
+    // overwritten kDefaultScenePath with no "are you sure" step (see
+    // saveCurrentScene()'s own comment/README.md's Phase 15e section) --
+    // Save As follows the identical convention for consistency, rather than
+    // introducing a NEW confirm-before-overwrite behavior this engine has
+    // never had anywhere else. The only difference here is a plain LOG_INFO
+    // naming whether this call is creating a brand-new file or replacing an
+    // existing one, purely for traceability (a headless run's own log, or a
+    // real user watching the console) -- not a behavior change, just a more
+    // informative message than saveCurrentScene()'s own single-file case
+    // ever needed.
+    std::error_code existsError;
+    const bool overwriting = std::filesystem::exists(resolvedPath, existsError) && !existsError;
+    saveScene(registry_, resolvedPath, activeDirectionalLight_.value_or(EntityId()));
+    currentScenePath_ = resolvedPath;
+    LOG_INFO(std::string("Save As: ") + (overwriting ? "overwrote existing file " : "saved new file ") + "\"" +
+              resolvedPath + "\"; currentScenePath_ updated -- a following Save Scene now targets this file");
+}
+
+// Phase 18i: see this method's own application.hpp comment for the full
+// contract/design discussion, in particular why the pre-validation
+// parseSceneRecords() call below has to run BEFORE clearSceneForTransition()
+// -- a corrupt/malformed scene file must never wipe the currently loaded
+// scene out from under the user on its way to failing.
+void Application::openScene(const std::string& sceneName) {
+    const std::string resolvedPath = resolveAssetPath(sceneRelativePathForName(sceneName));
+
+    // Pure-data validation only -- parseSceneRecords() (scene_serialization.hpp)
+    // touches no registry/GL/ResourceManager state at all, so a file that
+    // fails here (missing, not valid JSON, doesn't match the schema) leaves
+    // the CURRENTLY loaded scene completely untouched. This is deliberately
+    // NOT the only thing that can go wrong -- a record whose modelPath
+    // references a missing/unloadable asset only fails later, inside the
+    // real loadScene() call below, AFTER clearSceneForTransition() has
+    // already run (see this method's own application.hpp comment for why
+    // pre-flight-validating every referenced asset before committing to the
+    // clear, rather than just the pure JSON/schema pre-check here, is real,
+    // separate scope this method doesn't take on). That catch block below
+    // repeats clearSceneForTransition() on this path so a failed load still
+    // ends in a genuinely empty registry_ rather than a half-loaded one --
+    // what's accepted as a documented gap is narrower than "the registry
+    // ends up wrong": it's that the scene which was open before this
+    // openScene() call is still gone (clearSceneForTransition() already
+    // erased it before loadScene() was even attempted), the identical
+    // "no recovery of the previous state" risk profile loadScene() already
+    // has at STARTUP for a bad assets/scenes/default.json, just reached
+    // from a live in-editor action instead of process launch.
+    try {
+        parseSceneRecords(resolvedPath);
+    } catch (const std::exception& e) {
+        LOG_ERROR("Open Scene: \"" + resolvedPath + "\" could not be parsed (" + std::string(e.what()) +
+                    "); the currently loaded scene was left untouched");
+        return;
+    }
+
+    clearSceneForTransition();
+
+    EntityId loadedActiveDirectionalLight;
+    try {
+        loadScene(registry_, resolvedPath, resources_, *shader_, &loadedActiveDirectionalLight);
+    } catch (const std::exception& e) {
+        // Reachable only for the narrower "parsed fine, but a referenced
+        // model/texture asset itself couldn't load" failure mode named
+        // above. loadScene()'s own per-record loop (scene_loader.cpp) has
+        // no rollback of its own: restoreEntityFromRecord() creates each
+        // record's entity and adds its non-model components BEFORE it ever
+        // touches that record's model path, so a LATER record's model
+        // failure leaves every EARLIER record's entity already live in
+        // registry_ when this catch fires -- clearSceneForTransition()
+        // above already ran once (clearing the scene that was loaded
+        // before this openScene() call even started), but that is not the
+        // same thing as the load attempt itself having added nothing.
+        // Calling it again here is what actually makes good on this
+        // method's real contract for a failed load: destroy whatever
+        // partial set of entities this failed loadScene() call just
+        // created, so this run ends with the exact same genuinely-empty
+        // registry_ a real newScene() produces, not a half-populated one
+        // silently left behind from a partially-completed load.
+        clearSceneForTransition();
+        LOG_ERROR("Open Scene: \"" + resolvedPath + "\" passed its own JSON/schema validation but failed to load (" +
+                    std::string(e.what()) + "); the partially-loaded entities were rolled back and the scene is "
+                    "now genuinely empty -- see this method's own application.hpp comment. currentScenePath_ is "
+                    "left unchanged (still \"" + currentScenePath_ + "\") since this load did not succeed");
+        return;
+    }
+    if (loadedActiveDirectionalLight.valid()) {
+        activeDirectionalLight_ = loadedActiveDirectionalLight;
+    }
+
+    currentScenePath_ = resolvedPath;
+    std::size_t entityCount = 0;
+    registry_.each<Transform>([&](EntityId /*id*/, Transform& /*transform*/) { ++entityCount; });
+    LOG_INFO("Open Scene: loaded \"" + resolvedPath + "\" (" + std::to_string(entityCount) +
+              " entit(y/ies)); currentScenePath_ updated -- a following Save Scene now targets this file");
 }
 
 // Phase 18h: see this method's own application.hpp comment for the full

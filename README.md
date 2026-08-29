@@ -9400,6 +9400,328 @@ load/save itself all stay outside undo/redo, exactly as documented below.
     Parent link intact pre-deletion), and every recreated/captured record
     above round-trips its own values exactly.
 
+### Phase 18i: New Scene, Save As, Open Scene -- multiple named scene files
+
+Through Phase 18h this engine only ever knew about ONE scene file:
+`kDefaultScenePath`, hardcoded to `assets/scenes/default.json`. "Save Scene"
+(Ctrl+S / File > Save Scene) always overwrote that same file; there was no
+way to start a fresh empty scene, no way to save to a different file, and no
+way to load anything other than whatever `default.json` happened to hold at
+startup. The project owner's own explicit request: "I'd like to load or
+start a new scene so I can have multiple options." This phase closes that
+gap with three new File menu items -- New Scene, Save As..., Open Scene...
+-- and one small architectural change underneath all three: which scene
+file is "the" current one is now a tracked, changeable piece of state, not
+a compile-time constant.
+
+#### What
+
+- **`currentScenePath_` (new `Application` member) replaces the hardcoded
+  "every save targets `kDefaultScenePath`" assumption.** Starts as
+  `kDefaultScenePath` in the constructor, unconditionally, regardless of
+  whether `ENGINE_LEGACY_SCENE` was set -- byte-identical to every prior
+  phase's own behavior in the common case. Changed in exactly three places,
+  all of them real scene transitions: `newScene()` (-> a fixed sentinel
+  path, see below), `saveSceneAs()` (-> the freshly chosen path), and
+  `openScene()` (-> the path just loaded from). The existing plain "Save
+  Scene" (`saveCurrentScene()`) now saves to `currentScenePath_` instead of
+  always `kDefaultScenePath` -- the one behavior change to a pre-existing
+  method this phase makes, and a pure generalization: "save to the file I'm
+  currently working on" meant `kDefaultScenePath` in every case before this
+  phase (there was only ever one file to be "currently working on"), and
+  still does for an untouched fresh run.
+- **New Scene (`Application::newScene()`)** clears `registry_` to a
+  genuinely empty scene -- no entities at all, standard "start fresh"
+  semantics, not a reload of the checked-in demo content -- via a new
+  shared helper, `clearSceneForTransition()`: every entity registry_ has
+  (collected from its own Transform pool, the same "every entity this
+  schema can represent has a Transform" premise `saveScene()` already
+  relies on) is destroyed via `EntityRegistry::destroyEntity()`, then
+  `selectedEntity_`, `activeDirectionalLight_`, and `undoStack_` are all
+  reset/cleared. `currentScenePath_` becomes `kUntitledScenePath`
+  (`assets/scenes/untitled.json`) -- a fixed sentinel that is **never
+  written to disk by New Scene itself**; only a following Save/Save As
+  actually creates that file, the same "a brand-new, never-saved document"
+  behavior most editors give a fresh file. No confirmation prompt: this
+  engine has no "unsaved changes" dirty-tracking anywhere (every save has
+  always been an unconditional full snapshot, see Phase 15e), and inventing
+  one purely to gate a confirmation dialog here would be real, separate
+  scope -- a plain, immediate action is this project's own established
+  "simpler choice when either is reasonable" bias.
+- **Save As (`Application::saveSceneAs()`, File > Save As...)** is an
+  in-editor ImGui popup with a text field -- this engine has no native
+  OS file-picker dependency (GLFW provides none, and a new heavy dependency
+  for one popup is out of scope) -- that saves to
+  `assets/scenes/<sanitized name>.json`. The name is sanitized by a new
+  pure function, `sanitizeSceneName()` (`scene_file_ops.hpp`/`.cpp`): every
+  character that isn't a letter, digit, `_`, or `-` is stripped outright
+  (not escaped), interior whitespace collapses to `_`, and an input that
+  sanitizes to nothing at all (empty, whitespace-only, entirely punctuation)
+  is rejected (`std::nullopt`). Critically, `.` is not in the allowed set --
+  this is what makes a pathological input like `../../etc/passwd` harmless:
+  every `.` and `/` is simply gone, leaving one ordinary filename component
+  (`etcpasswd`) with no directory-traversal meaning left at all, rather than
+  needing a separate bespoke "reject `..`" check. The popup's own "Save"
+  button stays disabled until the current text field sanitizes to something
+  real, with a live preview line showing exactly which file the save would
+  create/overwrite. An existing file with the same name is **silently
+  overwritten**, matching this engine's own plain Save Scene, which has
+  always silently overwritten `kDefaultScenePath` with no confirmation step
+  (Phase 15e) -- Save As follows the identical convention for consistency
+  rather than introducing a brand-new "are you sure?" behavior this engine
+  has never had anywhere else; the popup does show a plain, non-blocking
+  "will be overwritten" heads-up line when that's the case, purely
+  informational.
+- **Open Scene (`Application::openScene()`, File > Open Scene...)** is a
+  second popup listing every `.json` file actually present under
+  `assets/scenes/` -- a new pure function, `listSceneFileNames()`
+  (`scene_file_ops.hpp`/`.cpp`), does the listing: a small, dedicated, flat,
+  single-directory walk (deliberately not a reuse of the Asset Browser's
+  much larger recursive `buildAssetTree()`, which handles two categories
+  and arbitrary subdirectory nesting neither of which `assets/scenes/`
+  actually needs), re-run fresh every frame the popup is open (cheap enough
+  that no one-time caching is needed, unlike `buildAssetTree()`'s own
+  constructor-time build) so a scene just Saved As during the same run
+  immediately shows up the next time the popup opens. Clicking an entry
+  replaces the current scene's entities with the loaded scene's (the exact
+  same `clearSceneForTransition()` helper New Scene uses -- loading a
+  different scene is exactly as much a scene transition as starting a new
+  one) and updates `currentScenePath_`. A malformed/corrupt scene file is
+  handled gracefully: `parseSceneRecords()` (the pure, non-`registry_`-
+  touching half of scene serialization) is called FIRST, as a pre-check,
+  before anything about the live scene is touched -- a file that fails
+  there (missing, invalid JSON, wrong schema) leaves the currently loaded
+  scene completely untouched, LOG_ERROR'd, no crash. A narrower failure mode
+  (the JSON parses fine, but a referenced model/texture asset itself can't
+  load) is only reachable after `clearSceneForTransition()` has already run
+  -- `loadScene()`'s own per-record loop has no rollback of its own (a
+  later record's asset failure leaves every earlier record's entity already
+  live in `registry_`), so `openScene()`'s own catch block calls
+  `clearSceneForTransition()` a second time to destroy that partial set of
+  entities, ending this failure mode in a genuinely empty `registry_` --
+  matching what a real New Scene produces, not a half-loaded scene -- and
+  leaving `currentScenePath_` unchanged rather than repointing it at a file
+  whose load didn't actually succeed. What's left as a documented, accepted
+  gap is narrower than that: the scene that was open before this call is
+  still gone (`clearSceneForTransition()` already cleared it before
+  `loadScene()` was even attempted, and this method makes no attempt to
+  restore it) -- the same risk profile `loadScene()` already has at STARTUP
+  for a bad `default.json`, just reached from a live in-editor action
+  instead of process launch (see "Deliberately not done" below).
+- **Reuses Phase 18h's own `captureEntityRecord()`/`restoreEntityFromRecord()`/
+  `saveScene()`/`loadScene()` machinery unchanged.** This phase adds
+  multi-file path management and UI around the existing save/load
+  machinery -- the scene JSON format itself
+  (`scene_serialization.hpp`'s `SceneEntityRecord`) is completely
+  untouched.
+- **Headless verification hooks, the same "debug env var calls the exact
+  same production function a real interaction would" precedent every prior
+  phase's own hooks establish:** `ENGINE_DEBUG_NEW_SCENE=1`,
+  `ENGINE_DEBUG_SAVE_SCENE_AS=<raw name>` (sanitized the identical way a
+  real popup's text field would be, at the SAME constructor-time call
+  site), and `ENGINE_DEBUG_OPEN_SCENE=<name>[,<name>...]` -- the one env
+  var in this whole file that carries a comma-separated LIST rather than a
+  single value, specifically so one headless run can chain more than one
+  Open Scene action in sequence (loading a just-Saved-As scene back, then
+  loading back to "default") the way multiple separate process launches
+  never could -- New Scene/`currentScenePath_`/`undoStack_` are all live,
+  in-process state a fresh process launch can't resume mid-sequence. Each
+  fires at its own fixed scripted frame (`kDebugSaveSceneAsFrame=40`,
+  `kDebugNewSceneFrame=50`, `kDebugOpenSceneBaseFrame=60` +
+  `kDebugOpenSceneFrameSpacing=10` per list entry), spaced comfortably after
+  Phase 18h's own `kDebugUndoFrame`/`kDebugRedoFrame=25/30` so a run
+  combining both phases' own hooks still produces a clean, easy-to-read
+  timeline.
+
+#### Confirming Phase 18h's own undo-history decision
+
+Phase 18h's own `undoStack_` comment (`application.hpp`) explicitly named
+"a future phase that adds a real Scene > Open/Load UI" as the right place
+to decide whether undo history should survive a scene transition, and
+leaned toward clearing it: "an undo step referencing a `SceneEntityRecord`/
+`EntityId` from a scene that's no longer even loaded is meaningless at
+best, actively confusing at worst." This phase IS that future phase, and
+confirms exactly that call -- `clearSceneForTransition()` calls
+`undoStack_.clear()` (a method Phase 18h added specifically so this later
+call would have something ready to call) as part of both New Scene's and
+Open Scene's own cleanup.
+
+#### Deliberately not done this phase (documented scope, not an oversight)
+
+- **No "unsaved changes" dirty-tracking/confirmation prompts anywhere** --
+  New Scene and a Save As over an existing file both act immediately, with
+  no "are you sure?" step. Explicitly out of scope per this phase's own
+  brief; inventing dirty-tracking purely to gate a confirmation dialog would
+  be real, separate scope this engine has never had any piece of before.
+- **No native OS Save/Open file dialog.** The in-editor ImGui popup
+  approach (a text field for Save As, a clickable list for Open Scene) is
+  the confirmed right scope -- GLFW provides no native file picker, and
+  adding a new heavy dependency for one small feature was explicitly ruled
+  out.
+- **A narrow, documented Open Scene failure gap:** a scene file that parses
+  as valid JSON/schema but references a missing/unloadable model or texture
+  asset only fails AFTER `clearSceneForTransition()` has already run. The
+  registry itself doesn't end up wrong from this -- `openScene()`'s own
+  catch block calls `clearSceneForTransition()` a second time to roll back
+  whatever partial entities that failed `loadScene()` call left behind
+  (`loadScene()`'s own per-record loop has no rollback of its own: a later
+  record's asset failure leaves every earlier record's entity already live
+  in `registry_`), so this run still ends in a genuinely empty scene, and
+  `currentScenePath_` is left unchanged rather than repointed at the file
+  whose load failed. What IS left as a gap: the scene that was open
+  *before* this `openScene()` call is still gone -- `clearSceneForTransition()`
+  already cleared it before `loadScene()` was even attempted, and nothing
+  reverts to it -- the identical risk profile this engine's own STARTUP
+  `loadScene()` call already has for a broken `default.json` (propagates
+  out of the constructor, `main()`'s own top-level `try`/`catch` prints and
+  exits), just reached from a live in-editor action instead of a process
+  launch, where it degrades to an empty scene + a `LOG_ERROR` instead of
+  exiting the whole process. Building a full pre-flight validation of every
+  referenced asset before committing to the clear (rather than just the
+  pure JSON/schema pre-check this phase already does) -- which would let a
+  failed Open Scene restore the PREVIOUS scene instead of ending up
+  empty -- would be real, separate scope for a failure mode this narrow.
+- **`kUntitledScenePath` is never garbage-collected/cleaned up** if a user
+  starts several New Scenes without saving any of them -- there's only ever
+  one fixed sentinel path, and each unsaved New Scene simply overwrites
+  whatever the last one's own eventual Save would have written there. No
+  "Untitled 2", "Untitled 3" numbering -- this engine has no multi-scene-
+  tab concept for that numbering to mean anything within.
+
+#### Verify
+
+- **Full clean rebuild** (`rm -rf build`, `cmake -B build -S .
+  -DCMAKE_BUILD_TYPE=Debug`, `cmake --build build`) produced **zero
+  warnings** from any engine source file. `ctest` reports **18/18
+  passing** -- the 17 pre-existing targets plus this phase's own new
+  `scene_file_ops_test`: real, non-trivial coverage of `sanitizeSceneName()`
+  (the ordinary case; interior whitespace -> `_`; unsafe characters
+  stripped, not rejected; a `../../etc/passwd`-shaped input sanitizing down
+  to a harmless `etcpasswd` with no traversal meaning surviving; leading/
+  trailing incidental punctuation trimmed; empty/whitespace-only/
+  entirely-stripped inputs all rejected; a pathologically long input
+  truncated rather than rejected), `sceneRelativePathForName()` (including
+  the "default" name resolving to the exact same relative path
+  `kDefaultScenePath` itself uses -- Open Scene's "default" entry and this
+  engine's original single scene file must be the SAME file, not a
+  look-alike), and `listSceneFileNames()` against a scratch directory (a
+  missing/empty `assets/scenes/` both yield an empty list, not an error;
+  only top-level `*.json` files are listed, sorted alphabetically, extension
+  stripped; a non-`.json` sibling and a nested subdirectory's own `.json`
+  file are both correctly excluded -- this is a flat listing, not a
+  recursive tree).
+- **No-regression pixel-diff, isolated to exactly the default-startup/
+  plain-Save-Scene case.** A pre-Phase-18i build (Phase 18h's own commit,
+  `5faa9b6`, built fresh in a separate `git worktree`) and this phase's
+  build were both run headlessly (`ENGINE_MAX_FRAMES=60`, no debug env
+  vars) and screenshotted via `tools/run_headless.sh`. `compare -metric AE`
+  between the two PNGs reports **0** differing pixels -- the two files are
+  in fact byte-identical (matching `md5sum` output) -- confirming
+  `currentScenePath_` starting as `kDefaultScenePath` and plain Save
+  Scene's generalization to `currentScenePath_` are both true no-ops for
+  the untouched, most-common case.
+- **Full wired-path proof: Save As -> New Scene (confirm empty) -> Open
+  Scene(saved) (confirm entities restored) -> Open Scene(default) (confirm
+  that still works too), one process run, exact entity counts/names and
+  `currentScenePath_` logged at every step.** Using
+  `ENGINE_DEBUG_SAVE_SCENE_AS="phase18i_proof scene!!"` (deliberately
+  carrying spaces and punctuation, to exercise sanitization for real, not
+  just in the unit test -- sanitizes to `phase18i_proof_scene`),
+  `ENGINE_DEBUG_NEW_SCENE=1`, and
+  `ENGINE_DEBUG_OPEN_SCENE=phase18i_proof_scene,default`, starting from the
+  real, unmodified `assets/scenes/default.json` (`parented_demo_cube`,
+  `scene`, `falling_cube`):
+  ```
+  after saveSceneAs(): 3 named entities; parented_demo_cube; scene; falling_cube;
+    currentScenePath_=".../assets/scenes/phase18i_proof_scene.json"
+  after newScene(): 0 named entities;
+    currentScenePath_=".../assets/scenes/untitled.json"
+  after openScene("phase18i_proof_scene"): 3 named entities; parented_demo_cube; scene; falling_cube;
+    currentScenePath_=".../assets/scenes/phase18i_proof_scene.json"
+  after openScene("default"): 3 named entities; parented_demo_cube; scene; falling_cube;
+    currentScenePath_=".../assets/scenes/default.json"
+  ```
+  Every value matches exactly what the design predicts: Save As writes a
+  brand-new file and repoints `currentScenePath_` at it without touching
+  the live registry at all (still 3 entities immediately after); New Scene
+  genuinely empties `registry_` (0 named entities, not 3) and repoints
+  `currentScenePath_` at the untitled sentinel, which the same run confirms
+  is never written to disk (no `untitled.json` appears under
+  `assets/scenes/` afterward); Open Scene restores exactly the saved
+  entities from the just-Saved-As file; a second Open Scene, back to
+  `"default"`, loads correctly too, proving this isn't a one-shot
+  mechanism. Four real screenshots, taken at wall-clock moments correlated
+  against this exact log's own timestamps, were inspected directly (Read
+  tool, not just file-size-sanity-checked): the Save As moment shows the
+  full default scene (pyramid/table/cube on the checkered platform) with
+  the Scene panel listing all three entities; the New Scene moment shows an
+  **empty Scene panel tree** (no rows at all) while the Viewport's own
+  hardcoded PBR sphere grid/ground plane -- Phase 9 furniture that lives
+  outside `registry_` entirely, not scene-file content -- correctly stays
+  visible, confirming "empty scene" means "no entities," not "blank
+  screen"; the two Open Scene moments both show the full scene restored,
+  pixel-similar to the very first screenshot.
+- **Malformed scene file handled gracefully, verified directly, not just
+  reasoned about.** A separate headless run pointed
+  `ENGINE_DEBUG_OPEN_SCENE` at a hand-written invalid-JSON file
+  (`{ this is not valid json !!!`): the process exited with code **0** (no
+  crash), logged a specific `parseSceneRecords`/`nlohmann::json` parse-error
+  message via `LOG_ERROR`, and the very next log line confirms the
+  currently loaded scene (`default.json`, all 3 entities) was left
+  completely untouched -- `openScene()`'s own pre-check
+  (`parseSceneRecords()` before `clearSceneForTransition()`) does exactly
+  what it's documented to do.
+- **The narrower "parses fine, but a referenced model asset doesn't exist"
+  failure mode, also verified directly, including a genuine registry-state
+  bug this checked in with an earlier draft of this same phase and a
+  follow-up fix.** An independent review caught it: the original catch
+  block around `loadScene()` claimed a failed load left `registry_`
+  established-empty, but `loadScene()`'s own per-record loop
+  (`scene_loader.cpp`) has no rollback of its own -- `restoreEntityFromRecord()`
+  creates each record's entity and adds its non-model components BEFORE
+  ever touching that record's model path, so a later record's asset
+  failure left every earlier record's entity already live in `registry_`
+  when the exception reached `openScene()`, and the catch block still
+  repointed `currentScenePath_` at the failed file regardless. Reproduced
+  directly against two hand-broken copies of `default.json` (model path
+  repointed at a nonexistent file) before any fix: breaking the 1st record
+  (`parented_demo_cube`) left **2** named entities in `registry_` (not 0);
+  breaking the 2nd record (`scene`) also left **2** (`parented_demo_cube`,
+  `scene`) (not 0) -- and both runs' `currentScenePath_` ended up pointing
+  at the broken file, meaning a completely ordinary next Ctrl+S would have
+  silently overwritten the original scene file with the truncated load.
+  Fixed by having `openScene()`'s own catch block call
+  `clearSceneForTransition()` a second time (destroying whatever partial
+  entities that failed `loadScene()` call left behind) and no longer
+  updating `currentScenePath_` on that path. Re-running the identical two
+  broken-file cases after the fix: both now log **0** named entities and a
+  `currentScenePath_` unchanged from before the failed `openScene()` call
+  (still `default.json`, the scene actually loaded going into the
+  attempt) -- matching a real `newScene()`'s own `0`-named-entity state
+  exactly, confirmed side by side in the same run, not a "restore the
+  previous scene" behavior (a different, larger feature than what this fix
+  does: the previous scene's own entities were already destroyed by
+  `clearSceneForTransition()` before `loadScene()` was ever attempted, and
+  nothing brings them back). `loadScene()` itself was left untouched -- its
+  other call site (this constructor's own startup load of
+  `kDefaultScenePath`, outside any try/catch here, propagating out to
+  `main()`'s top-level `try`/`catch` on failure) keeps its own pre-existing
+  behavior exactly as before.
+
+With Phase 18i, the full Phase 18 arc (18a-18i) is now complete: the
+floating viewport toolbar (18a), Play/Edit mode physics gating (18b),
+ground friction/terminal velocity (18c), a real 3D silhouette selection
+outline (18d), a real translate gizmo (18e), a scene Camera entity actually
+controlling Play mode plus real Wireframe/Solid/Rendered shading modes
+(18g), real undo/redo (18h), and now multiple named scenes with New/Save
+As/Open (18i) -- every gap this arc's own sub-phases named along the way is
+closed. As with the Phase 15 and Phase 17 arcs before it, each sub-phase
+closed exactly the gap in front of it: 18h's own `undoStack_` comment
+explicitly named "a future Scene > Open/Load UI" as unfinished business and
+proposed exactly the resolution this phase implements, the same
+"name the next gap explicitly, close it for real when its own phase
+arrives" discipline this project has followed since the Phase 14 arc.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
