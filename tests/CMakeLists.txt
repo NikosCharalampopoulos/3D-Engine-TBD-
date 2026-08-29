@@ -146,7 +146,7 @@ add_test(NAME light_test COMMAND light_test)
 # camera_component.hpp had no matching src/*.cpp at all -- it was a plain
 # data struct with no logic function of its own.
 #
-# Phase 18f adds two real, pure functions (resolveCameraWorldPose()/
+# Phase 18g adds two real, pure functions (resolveCameraWorldPose()/
 # resolveActiveCamera()) implemented in the new src/camera_component.cpp --
 # this target now links it, the same "plain executable, links only the pure
 # logic file it's testing" shape as light_test/transform_hierarchy_test
@@ -310,7 +310,7 @@ endif()
 
 add_test(NAME gizmo_test COMMAND gizmo_test)
 
-# Phase 18f adds shading_mode_test, testing engine::decideNextEditShadingMode()/
+# Phase 18g adds shading_mode_test, testing engine::decideNextEditShadingMode()/
 # engine::effectiveShadingMode() (src/shading_mode.cpp) in isolation -- same
 # "plain executable, links only the pure logic file it's testing" shape as
 # camera_capture_test/gizmo_test above. shading_mode.cpp depends on nothing

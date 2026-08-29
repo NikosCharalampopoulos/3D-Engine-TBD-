@@ -4,7 +4,7 @@
 // struct, the same "header-only, no matching .cpp" shape ecs_test.cpp's own
 // header comment already establishes for ecs.hpp itself.
 //
-// Phase 18f adds two real, pure functions to this same header --
+// Phase 18g adds two real, pure functions to this same header --
 // resolveCameraWorldPose() (a plain glm::mat4-in/CameraWorldPose-out
 // computation, no EntityRegistry at all) and resolveActiveCamera() (which
 // DOES need a live EntityRegistry) -- now implemented in the new
@@ -225,7 +225,7 @@ int main() {
     }
 
     // --- resolveActiveCamera(): no Camera entities at all ------------------
-    // The "zero Camera entities" baseline -- every scene before Phase 18f,
+    // The "zero Camera entities" baseline -- every scene before Phase 18g,
     // and this engine's own default scene today, must resolve to an invalid
     // `active` with zero ignored, exactly like resolveActiveDirectionalLight()'s
     // own "no active entity" fallback keeps every pre-existing scene

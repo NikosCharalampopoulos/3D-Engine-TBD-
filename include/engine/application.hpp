@@ -823,13 +823,13 @@ private:
     // in this class, because nothing in render() read "which entity is the
     // active camera" at all yet.
     //
-    // Phase 18f: still no member assignment here -- resolveActiveCamera()
+    // Phase 18g: still no member assignment here -- resolveActiveCamera()
     // (camera_component.hpp) resolves this fresh from registry_ every frame
     // render() runs instead (no "most recently created" bookkeeping needed;
     // see that function's own header comment for why). This call site is
     // only reachable at all while the Create menu's own "Camera" item is
     // enabled, i.e. while zero Camera entities currently exist (editor_ui.cpp's
-    // own Phase 18f renderCreateEntityMenuItems() comment) or via the
+    // own Phase 18g renderCreateEntityMenuItems() comment) or via the
     // ENGINE_DEBUG_CREATE headless hook, which -- like the UI -- is not
     // itself extra-guarded against creating a second one; the defensive
     // multiple-Camera-entity handling lives entirely in resolveActiveCamera()
@@ -1388,7 +1388,7 @@ private:
     // "activeCameraEntity_" member anywhere in this class through Phase
     // 18e, unlike activeDirectionalLight_ below, because nothing read one.
     //
-    // Phase 18f: still true for EDIT mode -- camera_ is what Edit mode
+    // Phase 18g: still true for EDIT mode -- camera_ is what Edit mode
     // renders from, unconditionally, whether or not a Camera entity exists,
     // exactly as every phase before this one. Play mode is now the one
     // exception: render() resolves which (if any) Camera entity is active
@@ -1400,7 +1400,7 @@ private:
     // `physicsRunning_` is true AND one exists, builds a temporary Camera
     // value from that entity's own resolved world pose + CameraComponent
     // optics and renders from THAT instead of camera_ for that one frame --
-    // see render()'s own Phase 18f comment for the full mechanism. camera_
+    // see render()'s own Phase 18g comment for the full mechanism. camera_
     // itself is still updated every frame regardless (update() never gates
     // camera_.processMovement()/processMouseInput() on this) -- only which
     // Camera value render() actually reads FROM for that frame's view/
@@ -1675,7 +1675,7 @@ private:
     // comment).
     bool physicsRunning_ = false;
 
-    // Phase 18f: which shading mode EDIT mode is currently set to --
+    // Phase 18g: which shading mode EDIT mode is currently set to --
     // mutated ONLY by a real toolbar button click (EditorUI's own
     // renderDockspaceShell(), the same "passed through and mutated by
     // reference" shape ssaoDisabled_/ssaoDebugMode_/physicsRunning_ above
@@ -1693,7 +1693,7 @@ private:
     // never touches the toolbar's repurposed lighting/texture-mode buttons.
     ShadingMode editShadingMode_ = ShadingMode::kRendered;
 
-    // Phase 18f: edge-tracking state for resolveActiveCamera()'s own
+    // Phase 18g: edge-tracking state for resolveActiveCamera()'s own
     // `ignoredCount` (camera_component.hpp) -- true once render() has seen
     // more than one Camera entity exist in registry_ (a hand-edited/loaded
     // scene JSON, since the Create menu's own UI-level restriction prevents
@@ -1702,13 +1702,13 @@ private:
     // warn again if it clears and later re-triggers" discipline
     // pointLightOverflowActive_ above already establishes for its own,
     // structurally similar "more than this engine's single-slot capacity
-    // actually supports" warning -- see render()'s own Phase 18f comment for
+    // actually supports" warning -- see render()'s own Phase 18g comment for
     // the exact comparison. Default false (no extra Camera entities),
     // matching every other bool member in this class defaulting to
     // "off/normal."
     bool cameraOverflowActive_ = false;
 
-    // Phase 18f: edge-tracking state for a LOG_INFO line proving the Create
+    // Phase 18g: edge-tracking state for a LOG_INFO line proving the Create
     // menu's "Camera" item is genuinely disabled -- true once render() has
     // seen `resolveActiveCamera(registry_).active.valid()` (i.e.
     // `hasActiveCamera`, the value passed to EditorUI::renderDockspaceShell())

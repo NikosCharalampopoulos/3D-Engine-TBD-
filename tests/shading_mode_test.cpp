@@ -1,4 +1,4 @@
-// Phase 18f's own test: exercises engine::decideNextEditShadingMode()/
+// Phase 18g's own test: exercises engine::decideNextEditShadingMode()/
 // engine::effectiveShadingMode() (src/shading_mode.cpp) in isolation -- same
 // "plain executable, links only the pure logic file it's testing" shape as
 // camera_capture_test/gizmo_test above. shading_mode.cpp depends on nothing

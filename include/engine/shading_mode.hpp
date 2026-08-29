@@ -1,7 +1,7 @@
 #ifndef ENGINE_SHADING_MODE_HPP
 #define ENGINE_SHADING_MODE_HPP
 
-// Phase 18f: real Wireframe/Solid/Rendered viewport shading modes -- repurposes
+// Phase 18g: real Wireframe/Solid/Rendered viewport shading modes -- repurposes
 // the Viewport toolbar's "lighting"/"texture-mode" buttons (Phase 17c icons),
 // which since Phase 18a/18b-era code have actually just toggled
 // Application::ssaoDisabled_/ssaoDebugMode_ -- the exact same two flags the
@@ -38,7 +38,7 @@ enum class ShadingMode {
 };
 
 // `current` is the persisted EDIT-mode choice (Application::editShadingMode_,
-// see application.hpp's own Phase 18f comment for why this is a distinct
+// see application.hpp's own Phase 18g comment for why this is a distinct
 // member from "what's actually rendered this frame"); at most one of
 // `wireframeButtonClicked`/`solidButtonClicked` is ever true in a real
 // ImGui frame (each maps to exactly one Button() press this same frame) --
@@ -48,7 +48,7 @@ enum class ShadingMode {
 // vanishingly-unlikely simultaneous-trigger case.
 ShadingMode decideNextEditShadingMode(ShadingMode current, bool wireframeButtonClicked, bool solidButtonClicked);
 
-// Phase 18f confirmed decision: Play mode always forces kRendered, restoring
+// Phase 18g confirmed decision: Play mode always forces kRendered, restoring
 // the prior Edit-mode choice the instant Play mode ends -- with NO separate
 // save/restore bookkeeping anywhere, because `editShadingMode` itself is
 // NEVER written by entering/leaving Play mode (only by an Edit-mode toolbar

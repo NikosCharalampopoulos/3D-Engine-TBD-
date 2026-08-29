@@ -8779,7 +8779,7 @@ the object along that one axis.
     draw nothing" guard genuinely produces zero visible difference when the
     whole feature never engages.
 
-### Phase 18f: a scene Camera entity actually controls Play mode, plus real Wireframe/Solid/Rendered shading modes
+### Phase 18g: a scene Camera entity actually controls Play mode, plus real Wireframe/Solid/Rendered shading modes
 
 Two independent deliverables, confirmed directly by the project owner. The
 first closes `camera_component.hpp`'s own Phase 15c gap head-on -- that
@@ -8872,7 +8872,7 @@ panel already exposed, making the toolbar wiring purely redundant.
   superseded-note convention Phase 18d's own selection-outline replacement
   already established. The paragraph explicitly scoping this feature out
   ("What this component deliberately is NOT...") is replaced by a "Phase
-  18f: this component stopped being inert" paragraph naming exactly what
+  18g: this component stopped being inert" paragraph naming exactly what
   changed and what (Edit mode, free-fly input handling) is still,
   deliberately, untouched.
 
@@ -8962,12 +8962,12 @@ panel already exposed, making the toolbar wiring purely redundant.
     identical large-diff symptom, while a fixed-delay manual capture (Xvfb
     + a flat 3-second sleep before exactly one `xwd`, bypassing the
     polling heuristic entirely) produced **`0`** differing pixels against a
-    pre-Phase-18f baseline build (`17347f8`, Phase 18e, built in a separate
+    pre-Phase-18g baseline build (`17347f8`, Phase 18e, built in a separate
     `git worktree` so the working tree under active edit was never
     touched) both times it was tried. All of this phase's own screenshot
     comparisons below use that same fixed-delay capture method.
   - **No-regression baseline**: default state (Rendered mode, no Camera
-    entity, Edit mode) -- `compare -metric AE` between the pre-18f
+    entity, Edit mode) -- `compare -metric AE` between the pre-18g
     baseline build and this phase's build reports **`0`** differing
     pixels, confirmed across two independent runs.
   - **Deliverable 1, Camera entity genuinely changes Play mode's vantage

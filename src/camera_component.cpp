@@ -1,6 +1,6 @@
 #include "engine/camera_component.hpp"
 
-// Phase 18f: camera_component.hpp's own two new pure functions -- see that
+// Phase 18g: camera_component.hpp's own two new pure functions -- see that
 // header's own comments for the full design of each. Both are deliberately
 // tiny (a handful of lines each); this .cpp exists at all only because
 // resolveActiveCamera() needs EntityRegistry::each<CameraComponent>(), a

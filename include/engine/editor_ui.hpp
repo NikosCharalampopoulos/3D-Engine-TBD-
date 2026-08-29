@@ -495,7 +495,7 @@ public:
     // activeDirectionalLight_ itself, only displays it, so there is nothing
     // for a reference to let this function write back.
     //
-    // Phase 18f: `hasActiveCamera`, the identical read-only-BY-VALUE shape,
+    // Phase 18g: `hasActiveCamera`, the identical read-only-BY-VALUE shape,
     // mirrors Application's own resolveActiveCamera(registry_).active.valid()
     // this frame (camera_component.hpp) -- true once a scene Camera entity
     // exists. renderCreateEntityMenuItems() (editor_ui.cpp) reads it to
@@ -595,7 +595,7 @@ public:
     // toggle at the time; the two F1 checkboxes remained the actual owning
     // UI for that pair the whole time.
     //
-    // Phase 18f repurposes those same two buttons for real Wireframe/Solid/
+    // Phase 18g repurposes those same two buttons for real Wireframe/Solid/
     // Rendered shading-mode control (see shading_mode.hpp's own header
     // comment for the full design), which is enough of a DIFFERENT feature
     // -- three states spread across two buttons, not two independent
@@ -605,7 +605,7 @@ public:
     // still real Application members, still toggled by the F1 overlay's own
     // checkboxes exactly as before -- this toolbar simply stops being a
     // second way to reach them. `editShadingMode` is Application's own
-    // editShadingMode_ (application.hpp's own Phase 18f comment) -- the
+    // editShadingMode_ (application.hpp's own Phase 18g comment) -- the
     // EDIT-mode choice, mutated ONLY by a real toolbar button click here,
     // never by Play/Pause (see that member's own comment for why "never
     // touched by entering/leaving Play mode" is what makes Play-forces-

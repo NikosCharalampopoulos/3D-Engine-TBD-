@@ -101,7 +101,7 @@ uniform sampler2D uBrdfLUT;
 uniform sampler2D uSSAOMap;
 uniform int uSSAOEnabled;
 
-// Phase 18f: Solid shading mode -- see basic.frag's own uSolidShading
+// Phase 18g: Solid shading mode -- see basic.frag's own uSolidShading
 // comment for the full design; the identical flag, just gating this
 // shader's own uAlbedoMap sample instead. When true (nonzero), albedo below
 // stays exactly uAlbedo (the material's own flat scalar color), completely
@@ -766,7 +766,7 @@ void main() {
     }
 
     vec3 albedo = uAlbedo;
-    // Phase 18f: Solid mode skips the texture sample outright -- see
+    // Phase 18g: Solid mode skips the texture sample outright -- see
     // uSolidShading's own comment above.
     if (uUseAlbedoMap != 0 && uSolidShading == 0) {
         albedo *= texture(uAlbedoMap, vTexCoord).rgb;

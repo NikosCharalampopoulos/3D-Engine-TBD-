@@ -45,7 +45,7 @@
 // camera (matching this engine's actual one) rather than an arbitrary
 // placeholder a user would have to already know how to correct.
 //
-// --- Phase 18f: this component stopped being inert -----------------------
+// --- Phase 18g: this component stopped being inert -----------------------
 // Phase 15c's own original version of this comment described this struct as
 // deliberately NOT a way to make an ECS entity control the rendered view --
 // "there is no 'active camera entity' concept anywhere in this file or its
@@ -69,7 +69,7 @@
 // Only Play mode's main render pass ever substitutes a Camera entity's own
 // resolved pose/optics in camera_'s place (Application::render(), guarded on
 // `physicsRunning_ && resolveActiveCamera(registry_).active.valid()`) -- see
-// that method's own Phase 18f comment for the full mechanism, including why
+// that method's own Phase 18g comment for the full mechanism, including why
 // it builds a temporary engine::Camera value from the entity's data rather
 // than threading a second view/projection pair through every render() sub-
 // pass by hand. There is still no "possess this entity, WASD/mouse input
@@ -99,7 +99,7 @@ struct CameraComponent {
     float farPlane = 100.0f;
 };
 
-// Phase 18f: the world-space eye position + look-at target a Camera
+// Phase 18g: the world-space eye position + look-at target a Camera
 // entity's own RESOLVED WORLD transform (transform_hierarchy.hpp's
 // resolveWorldMatrix(), which already folds in parenting) implies -- pure
 // glm::mat4-in, no EntityRegistry/ECS dependency at all, so it's testable
@@ -115,7 +115,7 @@ struct CameraComponent {
 // what lets Application::render() build a temporary Camera value from a
 // Camera entity's pose and then reuse EVERY other render()/renderShadowPass()/
 // computeCascades() call site completely unmodified -- see application.cpp's
-// own Phase 18f render() comment.
+// own Phase 18g render() comment.
 struct CameraWorldPose {
     glm::vec3 position{0.0f};
     glm::vec3 lookTarget{0.0f, 0.0f, -1.0f};
@@ -146,10 +146,10 @@ struct CameraWorldPose {
 // under rather than merely assuming away.
 CameraWorldPose resolveCameraWorldPose(const glm::mat4& worldMatrix);
 
-// Phase 18f: which (at most one) ECS entity is the scene's "active" Camera
+// Phase 18g: which (at most one) ECS entity is the scene's "active" Camera
 // this frame -- the entity whose resolved world pose + CameraComponent
 // optics actually drive Play mode's main render pass, INSTEAD OF
-// Application::camera_ -- see application.cpp's own Phase 18f render()
+// Application::camera_ -- see application.cpp's own Phase 18g render()
 // comment for exactly where/how this gets consumed, and Edit mode's own
 // total non-involvement (Application::camera_ is used unconditionally
 // there, regardless of this function's result).
@@ -164,9 +164,9 @@ CameraWorldPose resolveCameraWorldPose(const glm::mat4& worldMatrix);
 // stop, so "which camera renders this frame" isn't a competition among
 // several legitimate choices the way "which light casts THE shadow" is --
 // there is supposed to be at most ONE Camera entity in the scene at all
-// (the Create menu's own Phase 18f change disables the "Camera" item the
+// (the Create menu's own Phase 18g change disables the "Camera" item the
 // instant one exists, and re-enables it only once that one is deleted --
-// see editor_ui.cpp's own Phase 18f renderCreateEntityMenuItems() comment).
+// see editor_ui.cpp's own Phase 18g renderCreateEntityMenuItems() comment).
 // This function's own "first found by registry iteration order, count the
 // rest as ignored" rule therefore exists purely DEFENSIVELY, for the one
 // path the UI-level restriction above can't reach: a hand-edited or
@@ -192,7 +192,7 @@ CameraWorldPose resolveCameraWorldPose(const glm::mat4& worldMatrix);
 // stay silent while it persists" discipline application.cpp's own
 // collectPointLights() overflow handling already establishes) rather than
 // crash or silently pick a DIFFERENT entity every frame -- see
-// application.cpp's own Phase 18f render() comment for exactly how.
+// application.cpp's own Phase 18g render() comment for exactly how.
 struct ActiveCameraResolution {
     EntityId active;
     int ignoredCount = 0;

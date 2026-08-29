@@ -193,7 +193,7 @@ uniform int uClusterDebug;
 uniform sampler2D uSSAOMap;
 uniform int uSSAOEnabled;
 
-// Phase 18f: Solid shading mode -- true (nonzero) makes this shader skip its
+// Phase 18g: Solid shading mode -- true (nonzero) makes this shader skip its
 // own uDiffuseTexture sample entirely and shade with a flat vec4(1.0)
 // "texture" instead, so baseColor below falls back to just uTint (the
 // material's own tint color, already multiplied in either way) -- an
@@ -379,7 +379,7 @@ void main() {
 
     vec3 viewDir = normalize(uViewPos - vFragPos);
 
-    // Phase 18f: Solid mode substitutes a flat vec4(1.0) in place of the
+    // Phase 18g: Solid mode substitutes a flat vec4(1.0) in place of the
     // real texture sample -- baseColor below then reduces to plain uTint,
     // the material's own tint color, with every lighting term after this
     // point completely unaffected -- see uSolidShading's own comment above.

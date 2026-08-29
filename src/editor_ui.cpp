@@ -379,7 +379,7 @@ void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& 
 // clicked, the default behavior this engine's other popups (if any existed
 // yet) would already rely on too.
 //
-// `hasActiveCamera` (Phase 18f): true once a scene Camera entity already
+// `hasActiveCamera` (Phase 18g): true once a scene Camera entity already
 // exists -- see editor_ui.hpp's own updated renderDockspaceShell() comment.
 CreateEntityKind renderCreateEntityMenuItems(bool hasActiveCamera) {
     CreateEntityKind result = CreateEntityKind::kNone;
@@ -434,7 +434,7 @@ CreateEntityKind renderCreateEntityMenuItems(bool hasActiveCamera) {
     // Phase 15c: "Camera" is real now too -- the third and last of this
     // Create menu's own Phase 14f-inherited BeginDisabled()'d gaps.
     //
-    // Phase 18f: now BeginDisabled()'d again -- but for a completely
+    // Phase 18g: now BeginDisabled()'d again -- but for a completely
     // different reason than Phase 14f's original "not implemented yet" gap
     // (disabledCreateMenuItem() above still exists for exactly that other
     // reason, on genuinely-not-built items elsewhere; "Camera" now HAS a
@@ -1231,9 +1231,9 @@ bool toolbarIconButton(const char* strId, char32_t glyph, bool active, bool enab
 // establish elsewhere in this same function. That wiring was always purely
 // redundant with the F1 overlay's own checkboxes (the exact same two flags,
 // reachable two ways) rather than a real, DIFFERENT toolbar feature -- see
-// this function's own updated Phase 18f comment below for what replaces it.
+// this function's own updated Phase 18g comment below for what replaces it.
 //
-// Phase 18f repurposes those same two buttons for real Wireframe/Solid/
+// Phase 18g repurposes those same two buttons for real Wireframe/Solid/
 // Rendered shading-mode control -- see shading_mode.hpp's own header
 // comment for the full three-states-two-buttons design.
 // ssaoDisabled_/ssaoDebugMode_ themselves are UNCHANGED, still real
@@ -1298,7 +1298,7 @@ void renderViewportToolbar(ShadingMode& editShadingMode, bool& physicsRunning) {
 
     ImGui::SameLine();
 
-    // Phase 18f: `effective` is what BOTH buttons' own `active` highlight
+    // Phase 18g: `effective` is what BOTH buttons' own `active` highlight
     // reads from -- see this function's own updated header comment for why
     // that's deliberately NOT `editShadingMode` directly.
     const ShadingMode effective = effectiveShadingMode(physicsRunning, editShadingMode);
@@ -1325,7 +1325,7 @@ void renderViewportToolbar(ShadingMode& editShadingMode, bool& physicsRunning) {
     // The "image/texture-mode" slot maps to Solid -- objects shaded (basic
     // lighting still applied) but without their own diffuse/albedo texture,
     // exactly the "which IMAGE is the Viewport showing" reading this same
-    // slot already had pre-Phase-18f, just honestly repointed at a real
+    // slot already had pre-Phase-18g, just honestly repointed at a real
     // shading mode instead of a raw debug buffer view.
     if (toolbarIconButton(
             "texturemode", kIconTexture, /*active=*/effective == ShadingMode::kSolid, /*enabled=*/true,
