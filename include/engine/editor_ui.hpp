@@ -617,13 +617,31 @@ public:
     // comment above for exactly what each field means and why they're
     // bundled into one struct rather than four more separate parameters
     // appended to an already-long signature.
+    // Phase 18b: one more trailing `bool&`, `physicsRunning` -- Application's
+    // own new `physicsRunning_` (application.hpp), the real Edit/Play mode
+    // flag `stepPhysics()` is now gated behind (see that call site's own
+    // application.cpp comment). Threaded through exactly the SAME "EditorUI
+    // mutates Application's own state directly through a reference, no
+    // getter/setter round-trip" shape `ssaoDisabled`/`ssaoDebugMode` above
+    // already use, not a read-only snapshot plus a separate out-flag the way
+    // `cameraCaptured`/`cameraCaptureRequested` are: like those two SSAO
+    // toggles (and unlike camera capture -- see that pair's own Phase 16
+    // comment on why IT needs the two-flag split, since entering/exiting
+    // capture also has to call window_.setCursorCaptured() from
+    // Application's own side), a click on the toolbar's Play/Pause button
+    // has no OTHER side effect Application needs to gate on its own side of
+    // any render()/run() boundary -- EditorUI performing the assignment
+    // immediately, in place, is already the entire effect either button
+    // click has (Application::update() re-reads it next frame the same way
+    // it already re-reads ssaoDisabled_/ssaoDebugMode_ after this same
+    // call).
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
                                            std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
                                            std::optional<std::string>& textureAssignRequested,
                                            std::optional<std::string>& assetDropRequested, bool cameraCaptured,
                                            bool& cameraCaptureRequested, bool& ssaoDisabled, bool& ssaoDebugMode,
-                                           bool showCustomTitleBar, bool windowMaximized,
+                                           bool& physicsRunning, bool showCustomTitleBar, bool windowMaximized,
                                            std::pair<int, int> windowPos, TitleBarAction& titleBarAction);
 
     // The Viewport panel's own most recently recorded
@@ -701,6 +719,33 @@ private:
     // here never reaches an actual framebuffer construction/resize call.
     int viewportWidth_ = 0;
     int viewportHeight_ = 0;
+
+    // Post-18a fix (Phase 18b): the floating toolbar's own rendered
+    // button-group width, in pixels, as measured AFTER the group was last
+    // actually submitted -- used at the START of the NEXT
+    // renderViewportToolbarOverlay() call to compute where the group should
+    // start so its center lands on the Viewport panel's current horizontal
+    // center (see that function's own editor_ui.cpp comment for the
+    // centering math). The group's true width isn't knowable until AFTER
+    // Dear ImGui has actually laid out its six buttons -- exactly the same
+    // "can't know the bounding box until after submitting it" problem
+    // renderViewportToolbarOverlay()'s own background rect already solves
+    // for ITS size via ImDrawListSplitter (Phase 18a's own comment) -- but
+    // splitting channels only fixes ordering (paint the background behind
+    // buttons already submitted this same frame), not POSITION (the buttons'
+    // own start X has to be chosen before they're submitted at all). Using
+    // last frame's real measurement as this frame's prediction is the
+    // identical one-frame-lag, self-correcting shape viewportWidth_/
+    // viewportHeight() above already establish and document (Phase 14c) for
+    // the same underlying reason -- a redock/resize (or a Play/Pause click
+    // flipping which glyph is active, which doesn't change width, but a
+    // future toolbar change might) is reflected correctly within one frame,
+    // not perfectly on the very first one. Starts at 0.0f (frame 1 centers
+    // around a 0-wide group, i.e. renders left-of-center by half the real
+    // group's width; self-corrects to exactly centered from frame 2
+    // onward) -- the same harmless, documented frame-0 imperfection
+    // viewportWidth_/viewportHeight_ already accept.
+    float toolbarGroupWidthLastFrame_ = 0.0f;
 
     // Phase 15d: built exactly once, in the constructor -- see this class's
     // own header comment above and asset_browser.hpp's own "Caching"

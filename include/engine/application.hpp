@@ -1509,6 +1509,36 @@ private:
     // fixed frame RANGE now rather than either a single frame number or
     // continuously the way cameraDemoMode_/frustumCullDemoMode_ are.
     bool debugSimulateEscape_ = false;
+
+    // Phase 18b: the real Edit/Play mode flag -- true means physics
+    // simulation (update()'s own stepPhysics() call) actually advances this
+    // frame; false (the default) means it doesn't run at all, so every
+    // entity's Transform stays exactly where it was left -- see that call
+    // site's own header comment for the full "why gate this at all" story
+    // (the project owner's own complaint: fighting live gravity while just
+    // trying to select/inspect an entity). Default false (Edit mode, physics
+    // paused) rather than true -- the correct default for an editor (nothing
+    // should move until the user explicitly asks it to, by clicking Play),
+    // and matches the Viewport toolbar's own Pause button being the one
+    // shown highlighted/active by default (see editor_ui.cpp's own Phase
+    // 18b renderViewportToolbar() comment).
+    //
+    // Deliberately a single bool, not a bigger enum/state-machine type: this
+    // phase's own brief is explicit that ONLY the physics step itself gates
+    // on this (no scene-state snapshot/restore around Play->Stop, no
+    // separate "paused-while-playing" third state) -- a plain on/off flag is
+    // the whole truth of what this project needs today, the same
+    // "simplest-shape-that's-actually-correct, no speculative abstraction"
+    // discipline ssaoDisabled_/ssaoDebugMode_ above already follow for their
+    // own two-state toggles. Mutated in exactly two places: directly by
+    // EditorUI's own renderDockspaceShell() call (a Play/Pause button click
+    // -- see that method's own Phase 18b editor_ui.hpp comment for why this
+    // one, like ssaoDisabled_/ssaoDebugMode_, is passed through and mutated
+    // by reference rather than routed via a separate out-flag), and by this
+    // constructor below (ENGINE_DEBUG_FORCE_PLAY_MODE, for headless
+    // verification -- see debugForcePlayModeFromEnv()'s own application.cpp
+    // comment).
+    bool physicsRunning_ = false;
 };
 
 }  // namespace engine

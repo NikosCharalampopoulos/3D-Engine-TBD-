@@ -1271,29 +1271,38 @@ bool toolbarIconButton(const char* strId, char32_t glyph, bool active, bool enab
 // reference" shape `selectedEntity`/`cameraCaptureRequested` already
 // establish elsewhere in this same function.
 //
-// The other four -- grid, undo, play, pause -- are shown (matching the
-// mockup) but BeginDisabled()'d with an explanatory tooltip: this engine
-// has no viewport ground-plane grid overlay, no undo/redo history, and no
-// play/pause/restart simulation-state concept anywhere today. Verified, not
-// assumed, by a whole-codebase search this phase's own README section
-// records the results of -- every other hit for "grid" is the unrelated PBR
-// sphere test-grid/cluster-culling grid (Phase 9/13a), and "undo"/"play"/
-// "pause" turn up nowhere at all except editor_ui.hpp's own long-standing
-// Phase 14a comment ("no real inspector..., no Play/Pause/Restart or other
-// toolbar/menu-bar chrome") and transform_hierarchy.hpp's unrelated "there
-// is no 'undo' in this editor" aside. Each would be real, separate,
-// substantial scope this phase's own brief explicitly declines to
-// half-build -- the identical judgment call Phase 14f's own Create-menu
-// Point Light/Directional Light/Camera items already made (see README.md's
-// own Phase 14f section).
+// Two more -- grid, undo -- are still shown (matching the mockup) but
+// BeginDisabled()'d with an explanatory tooltip: this engine has no
+// viewport ground-plane grid overlay and no undo/redo history anywhere
+// today. Verified, not assumed, by a whole-codebase search Phase 17c's own
+// README section records the results of -- every other hit for "grid" is
+// the unrelated PBR sphere test-grid/cluster-culling grid (Phase 9/13a),
+// and "undo" turns up nowhere else at all except transform_hierarchy.hpp's
+// unrelated "there is no 'undo' in this editor" aside. Each would be real,
+// separate, substantial scope, the identical judgment call Phase 14f's own
+// Create-menu Point Light/Directional Light/Camera items already made (see
+// README.md's own Phase 14f section) -- Directional Light/Camera have since
+// both become real (Phase 15b/15c); grid/undo have not.
 //
-// `pause` is additionally drawn in the active/teal state (`active=true`,
-// unconditionally) -- matching the mockup's own pause button, shown
-// highlighted -- while STILL `enabled=false`: this phase reproduces the
-// mockup's visual exactly, without pretending a highlighted-but-inert
-// button means this engine has some real "currently paused" state behind
-// it (it does not -- see above).
-void renderViewportToolbar(bool& ssaoDisabled, bool& ssaoDebugMode) {
+// Phase 18b: `play`/`pause` are real now too -- see this class's own Phase
+// 18b README section for the full design. Both `enabled=true`. `physicsRunning`
+// is Application's own new `physicsRunning_` (application.hpp), passed
+// through by reference exactly the way `ssaoDisabled`/`ssaoDebugMode` above
+// already are -- clicking Play sets it true, clicking Pause sets it false,
+// and each button's own `active` highlight reads the SAME live flag rather
+// than a hardcoded stub value (Play highlighted while running, Pause
+// highlighted while stopped -- mutually exclusive by construction, since
+// both read the one bool). No `decideXyz()`-shaped pure function was
+// extracted for this the way `decideMaximizeRestoreToggle()`/
+// `decideCameraCapture()` were for THEIR own state transitions: unlike
+// those two (a toggle that flips relative to its own current value, or a
+// small state machine with multiple triggers/edge cases), each of these two
+// buttons unconditionally sets the SAME one flag to the SAME fixed literal
+// every time it's clicked -- "set true" / "set false" -- which is exactly
+// the "no decision left to make, just an assignment" shape `ssaoDisabled =
+// !ssaoDisabled`/`ssaoDebugMode = !ssaoDebugMode` above already established
+// needs no extracted helper either.
+void renderViewportToolbar(bool& ssaoDisabled, bool& ssaoDebugMode, bool& physicsRunning) {
     toolbarIconButton("grid", kIconGrid, /*active=*/false, /*enabled=*/false,
                        "Viewport grid overlay -- not implemented yet. This engine has no ground-plane "
                        "grid-drawing code anywhere today; a real one is separate, later scope.");
@@ -1343,16 +1352,39 @@ void renderViewportToolbar(bool& ssaoDisabled, bool& ssaoDebugMode) {
                        "anywhere today; a real one is separate, later scope.");
 
     ImGui::SameLine();
-    toolbarIconButton("play", kIconPlay, /*active=*/false, /*enabled=*/false,
-                       "Play -- not implemented yet. This engine has no play/pause/restart simulation-state "
-                       "concept -- physics simply runs continuously once the app starts; a real start/stop "
-                       "concept is separate, later scope.");
+    // Phase 18b: real -- click enters Play mode (physics simulation running).
+    // `active` highlights this button exactly while `physicsRunning` is
+    // true, live, the same "read the real flag back, don't hardcode" shape
+    // the lighting/texture-mode buttons above already use for
+    // ssaoDisabled/ssaoDebugMode.
+    if (toolbarIconButton(
+            "play", kIconPlay, /*active=*/physicsRunning, /*enabled=*/true,
+            physicsRunning
+                ? "Play: physics simulation is running (gravity/collision active). Click Pause to stop and "
+                  "return to Edit mode."
+                : "Play -- click to start physics simulation. Entities with useGravity will start falling; "
+                  "click Pause at any time to stop and return to Edit mode.")) {
+        physicsRunning = true;
+    }
 
     ImGui::SameLine();
-    toolbarIconButton("pause", kIconPause, /*active=*/true, /*enabled=*/false,
-                       "Pause -- not implemented yet (shown highlighted to match the reference mockup's own "
-                       "default state, not because this engine actually tracks a paused/running flag). Same "
-                       "missing simulation-state concept as \"Play\" above.");
+    // Phase 18b: real -- click enters Edit mode (physics simulation
+    // stopped). `active` highlights this button exactly while
+    // `physicsRunning` is false, so Play/Pause are always highlighted
+    // mutually exclusively (both read the SAME one bool, one negated).
+    // Default-active on a fresh Application (physicsRunning_ defaults
+    // false) -- matching the reference mockup's own default appearance,
+    // but now because this really IS the engine's current state, not a
+    // hardcoded stand-in for one (contrast Phase 17c's own version of this
+    // same button, whose header comment this replaces).
+    if (toolbarIconButton(
+            "pause", kIconPause, /*active=*/!physicsRunning, /*enabled=*/true,
+            !physicsRunning
+                ? "Pause: physics simulation is stopped (Edit mode) -- entities stay exactly where placed, free "
+                  "to inspect/select/arrange. Click Play to start simulating."
+                : "Pause -- click to stop physics simulation and return to Edit mode.")) {
+        physicsRunning = false;
+    }
 }
 
 // Phase 18a: draws renderViewportToolbar()'s six buttons as a floating
@@ -1422,10 +1454,31 @@ void renderViewportToolbar(bool& ssaoDisabled, bool& ssaoDebugMode) {
 // now feeds. Written back through these two out-params rather than returned
 // as a struct/pair so every existing call site keeps compiling unchanged
 // except the one that now actually reads them.
-void renderViewportToolbarOverlay(bool& ssaoDisabled, bool& ssaoDebugMode, ImVec2 originScreenPos,
+//
+// Post-18a fix (Phase 18b): the project owner asked for this bar HORIZONTALLY
+// CENTERED along the Viewport panel's own top edge (the standard Blender/
+// Unity convention their own brief names), not pinned to the top-left corner
+// the way Phase 18a originally placed it -- same vertical offset as before
+// (`margin` below the panel's own top edge), only the horizontal start
+// position changes. `viewportContentWidth` is the panel's own CURRENT
+// `ImGui::GetContentRegionAvail().x` (renderDockspaceShell()'s own
+// `contentRegion.x`, captured fresh at the top of every single call, same
+// variable Phase 14c's own comment already documents) -- passed in, not
+// re-queried here, since by the time THIS function runs `ImGui::Image()` has
+// already advanced the cursor, so a GetContentRegionAvail() call from inside
+// this function would answer a different, unrelated question (space left
+// below the image) rather than the panel's own full width. `groupWidth`
+// in/out: see its own editor_ui.hpp comment (`toolbarGroupWidthLastFrame_`)
+// for why this frame's centering has to be computed from last frame's real
+// measurement, and why that's an accepted, self-correcting one-frame lag
+// rather than a bug -- this function still updates it with this frame's OWN
+// now-known width before returning, same as `outBgMin`/`outBgMax` above are
+// only knowable this late.
+void renderViewportToolbarOverlay(bool& ssaoDisabled, bool& ssaoDebugMode, bool& physicsRunning,
+                                   ImVec2 originScreenPos, float viewportContentWidth, float& groupWidth,
                                    ImVec2& outBgMin, ImVec2& outBgMax) {
     // Matches applyEditorTheme()'s own WindowPadding (10,10) as the margin
-    // from the panel's own top-left corner, and the same value again as the
+    // from the panel's own top edge, and the same value again as the
     // background rect's own inset around the button group -- reusing an
     // already-established spacing constant rather than inventing a new
     // pixel literal for this one overlay.
@@ -1437,13 +1490,29 @@ void renderViewportToolbarOverlay(bool& ssaoDisabled, bool& ssaoDebugMode, ImVec
 
     // Channel 1: the real, interactive buttons -- exactly
     // renderViewportToolbar()'s own six ImGui::Button() calls, unmodified.
+    //
+    // Phase 18b: horizontal centering. `startX` is chosen so a group
+    // `groupWidth` pixels wide (last frame's real measurement, predicting
+    // this frame's) lands centered inside `viewportContentWidth` --
+    // `originScreenPos.x + (viewportContentWidth - groupWidth) * 0.5f`.
+    // Clamped to never start left of `originScreenPos.x + margin`: a
+    // viewport panel shrunk narrower than the toolbar itself would otherwise
+    // put `startX` left of the panel's own edge (a negative centering
+    // offset), which should instead just read as "pinned to the left margin,
+    // same as Phase 18a's original placement," not clipped off-panel.
+    const float startX =
+        std::max(originScreenPos.x + margin, originScreenPos.x + (viewportContentWidth - groupWidth) * 0.5f);
     splitter.SetCurrentChannel(drawList, 1);
-    ImGui::SetCursorScreenPos(ImVec2(originScreenPos.x + margin, originScreenPos.y + margin));
+    ImGui::SetCursorScreenPos(ImVec2(startX, originScreenPos.y + margin));
     ImGui::BeginGroup();
-    renderViewportToolbar(ssaoDisabled, ssaoDebugMode);
+    renderViewportToolbar(ssaoDisabled, ssaoDebugMode, physicsRunning);
     ImGui::EndGroup();
     const ImVec2 groupMin = ImGui::GetItemRectMin();
     const ImVec2 groupMax = ImGui::GetItemRectMax();
+    // This frame's own real, now-known width becomes the PREDICTION for
+    // next frame's `startX` above -- see `toolbarGroupWidthLastFrame_`'s own
+    // editor_ui.hpp comment.
+    groupWidth = groupMax.x - groupMin.x;
 
     // Channel 0: a translucent panel behind the group just submitted --
     // reusing this theme's own ImGuiCol_WindowBg (applyEditorTheme()'s
@@ -1974,9 +2043,9 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  std::optional<std::string>& textureAssignRequested,
                                                  std::optional<std::string>& assetDropRequested,
                                                  bool cameraCaptured, bool& cameraCaptureRequested,
-                                                 bool& ssaoDisabled, bool& ssaoDebugMode, bool showCustomTitleBar,
-                                                 bool windowMaximized, std::pair<int, int> windowPos,
-                                                 TitleBarAction& titleBarAction) {
+                                                 bool& ssaoDisabled, bool& ssaoDebugMode, bool& physicsRunning,
+                                                 bool showCustomTitleBar, bool windowMaximized,
+                                                 std::pair<int, int> windowPos, TitleBarAction& titleBarAction) {
     // Phase 17d: the identical "false/empty every frame except the one where
     // the real thing actually happened" reset every other out-parameter in
     // this function already follows (see e.g. cameraCaptureRequested just
@@ -2264,9 +2333,21 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // are new -- written back by renderViewportToolbarOverlay() itself
         // (its own header comment), and fed into the double-click guard just
         // below to close a real bug that guard's own comment describes.
+        //
+        // Post-18a fix (Phase 18b): `contentRegion.x` -- the SAME variable
+        // captured above, before ImGui::Image() ran -- is now also passed
+        // through as `viewportContentWidth`, and `physicsRunning_`/
+        // `toolbarGroupWidthLastFrame_` (this class's own new members) are
+        // threaded through by reference too. See
+        // renderViewportToolbarOverlay()'s own updated header comment for
+        // what each does; nothing about `toolbarBgMin`/`toolbarBgMax`
+        // themselves changes here -- they're still just read back from
+        // whatever rect the (now horizontally centered) group actually
+        // occupied this frame.
         ImVec2 toolbarBgMin;
         ImVec2 toolbarBgMax;
-        renderViewportToolbarOverlay(ssaoDisabled, ssaoDebugMode, panelScreenPos, toolbarBgMin, toolbarBgMax);
+        renderViewportToolbarOverlay(ssaoDisabled, ssaoDebugMode, physicsRunning, panelScreenPos, contentRegion.x,
+                                      toolbarGroupWidthLastFrame_, toolbarBgMin, toolbarBgMax);
 
         // Phase 16: the camera-capture trigger -- a double-click anywhere in
         // this panel's own content region, gated to only fire while NOT

@@ -7955,6 +7955,239 @@ OVER the viewport, not eating into it. This phase moves it.
     still hold, but the quote itself didn't match the source it claimed to
     be transcribed from. All three now quote the real line verbatim.
 
+- **Post-18a fix (Phase 18b): horizontal centering.** The project owner
+  looked at this phase's own overlay and asked for the standard Blender/
+  Unity convention instead of the top-left corner above: the toolbar
+  HORIZONTALLY CENTERED along the Viewport panel's top edge, same vertical
+  offset as before (still `margin` pixels below the panel's own top edge --
+  NOT dropped to the panel's vertical middle either). See Phase 18b's own
+  README section below for the full mechanics -- recorded here too, as a
+  note against the phase that actually introduced the top-left placement,
+  the same "Post-review fix"/"Also corrected in this pass" precedent this
+  section's own two bullets immediately above already establish for
+  recording a cross-phase touch-up against the phase it corrects, not only
+  under the later phase that made it.
+
+### Phase 18b: Play/Edit mode -- gate physics simulation to Play mode only
+
+The second item in the "Phase 18: editor usability + physics polish" arc
+Phase 18a opened. The project owner's own explicit complaint: **"the
+selection to have physics enabled seems extremely bad the way it acts not
+new user friendly."** From Phase 8e through Phase 18a, `stepPhysics()`
+(`application.cpp`'s `update()`) ran UNCONDITIONALLY every single frame --
+gravity and ground collision were always live, even while the user was only
+trying to select/inspect a physics-enabled entity in the editor, fighting
+live gravity the whole time. Standard editor convention (Unity/Unreal/
+Godot) is that simulation only runs in "Play mode"; the scene stays frozen
+in "Edit mode" so it can be freely arranged/inspected. This phase builds
+that real distinction and gates `stepPhysics()` behind it.
+
+- **What changed, precisely.** `Application` gains one new member,
+  `physicsRunning_` (`application.hpp`) -- a plain `bool`, default `false`.
+  `update()`'s own `stepPhysics(...)` call site (`application.cpp`) is now
+  `if (physicsRunning_) { stepPhysics(...); }` -- everything else about that
+  call (the `deltaTime`/`kMaxPhysicsTimestep` clamp, `kGroundY`, ordering
+  relative to the camera-driving branches below it) is byte-for-byte
+  unchanged; only whether it runs at all is new. The Viewport toolbar's
+  Play (`kIconPlay`) and Pause (`kIconPause`) buttons -- both stub,
+  `enabled=false` buttons since Phase 17c, `pause` additionally hardcoded
+  `active=true` to visually match the reference mockup's own default
+  appearance -- are now real: `renderViewportToolbar()`
+  (`editor_ui.cpp`) takes a new `bool& physicsRunning` parameter, both
+  buttons are `enabled=true`, clicking Play sets it `true`, clicking Pause
+  sets it `false`, and each button's own `active` highlight reads the SAME
+  live flag (Play highlighted while running, Pause highlighted while
+  stopped -- mutually exclusive by construction, since both read one bool,
+  one of them negated).
+- **Also this phase: the toolbar is now horizontally centered along the
+  Viewport panel's top edge, not pinned to its top-left corner.** A
+  separate, smaller fix bundled into this same phase at the project owner's
+  own request (standard Blender/Unity convention: the floating toolbar sits
+  centered along the top of the 3D view, not pinned to a corner, and NOT
+  dropped to the panel's own vertical middle either -- same vertical offset
+  as Phase 18a shipped, only the horizontal start position changes).
+  `renderViewportToolbarOverlay()` (`editor_ui.cpp`) computes its group's
+  own start X as `originScreenPos.x + (viewportContentWidth - groupWidth) *
+  0.5f` (clamped to never go left of the panel's own margin-inset edge, so
+  a panel shrunk narrower than the toolbar itself still reads as
+  left-pinned rather than clipped off-panel). `viewportContentWidth` is
+  `renderDockspaceShell()`'s own `contentRegion.x` -- `ImGui::
+  GetContentRegionAvail().x`, captured fresh at the very top of every
+  single call, the SAME variable Phase 14c's own comment already documents
+  -- so this is re-derived every frame, never cached, and stays correctly
+  centered across a live resize/redock exactly the way Phase 18a's own
+  re-anchoring-every-frame positioning already does. `groupWidth`, in
+  contrast, genuinely IS a one-frame-lagged value on purpose: the group's
+  own true rendered width isn't knowable until AFTER Dear ImGui has
+  actually laid out its six buttons (the same "can't know the bounding box
+  until you've submitted it" problem Phase 18a's own `ImDrawListSplitter`
+  background-rect trick already solves for SIZE, but splitting channels
+  only fixes paint ORDER, not the buttons' own start position, which has to
+  be chosen before they're submitted at all) -- so this frame's centering
+  uses LAST frame's real measurement (`EditorUI::toolbarGroupWidthLastFrame_`,
+  new, `editor_ui.hpp`) as its prediction, then overwrites that same member
+  with THIS frame's own now-known width for next frame to use, the
+  identical one-frame-lag, self-correcting shape `viewportWidth_`/
+  `viewportHeight()` already establish and document (Phase 14c) for the
+  same underlying reason. A redock/resize is reflected correctly within one
+  frame, same as that established precedent; frame 1 of a fresh
+  `EditorUI` centers around a 0-wide prediction (renders left-of-true-center
+  by half the real group's width for exactly one frame) and is exactly
+  centered from frame 2 onward -- the same harmless, already-accepted
+  frame-0 imperfection `viewportWidth_`/`viewportHeight_` already carry.
+  Verified visually below, not just reasoned about. The Post-Phase-18a
+  double-click-to-capture guard's own `toolbarBgMin`/`toolbarBgMax` rect
+  needed NO logic change to stay correct: it's still computed from
+  `groupMin`/`groupMax` read back via `GetItemRectMin()`/`Max()` AFTER the
+  (now horizontally centered) group is actually submitted, exactly as Phase
+  18a's own post-review fix already established -- moving WHERE the group
+  starts doesn't change that it's still measured live, from its own real,
+  just-submitted position, every single frame.
+- **A single `bool`, not an enum -- and why that's the right call, not a
+  shortcut.** The brief this phase started from offered either shape. A
+  single bool is simplest-shape-that's-actually-correct here because this
+  phase's own scope is deliberately narrow: there is no third state (no
+  "paused-while-playing" distinct from "stopped," no per-entity play state,
+  nothing else in this engine reads or branches on simulation state besides
+  this one `stepPhysics()` call site) for an enum to usefully distinguish.
+  This matches `ssaoDisabled_`/`ssaoDebugMode_`'s own established precedent
+  in this exact class -- two-state toggles get a plain `bool`, not a richer
+  type nothing yet needs. If a real third state (e.g. a distinct "paused
+  mid-Play, resume from here" different from "stopped, reset to Edit
+  layout") is ever needed, that's the point to introduce an enum -- not
+  before.
+- **Plumbing: the exact same shape Phase 17c's own SSAO toggles and Phase
+  17d's `TitleBarAction` already establish, not a new one invented for
+  this.** `physicsRunning_` is threaded through
+  `EditorUI::renderDockspaceShell()` as one more trailing `bool&`, passed
+  straight through to `renderViewportToolbar()`/
+  `renderViewportToolbarOverlay()` and mutated by EditorUI directly, in
+  place -- the identical "EditorUI mutates Application's own state through
+  a reference, no getter/setter round-trip, no out-parameter-plus-later-
+  handling pair" shape `ssaoDisabled`/`ssaoDebugMode` already use, and
+  deliberately NOT the two-flag `cameraCaptured`/`cameraCaptureRequested`
+  split `TitleBarAction`'s own sibling camera-capture feature needs --
+  that split exists because entering/exiting capture ALSO has to call
+  `window_.setCursorCaptured()` from Application's own side of the
+  render()/run() boundary (see that pair's own Phase 16 comment); a
+  Play/Pause click has no such second side effect to gate, so EditorUI
+  performing the assignment immediately is already the button's entire
+  effect, and `update()` simply re-reads `physicsRunning_` next frame the
+  same way it already re-reads `ssaoDisabled_`/`ssaoDebugMode_` after this
+  same call.
+- **No extracted pure `decideXyz()` function -- a real judgment call,
+  recorded, not an oversight.** `decideCameraCapture()`/
+  `decideMaximizeRestoreToggle()`/`shouldRequestCameraCaptureFromDoubleClick()`
+  are all small state machines or multi-input decisions with real branches
+  to get right. Each of THIS phase's two button handlers is a single
+  unconditional assignment of a fixed literal (`physicsRunning = true` /
+  `physicsRunning = false`) with no other input to weigh -- exactly the "no
+  decision left to make" shape `ssaoDisabled = !ssaoDisabled`/
+  `ssaoDebugMode = !ssaoDebugMode` (Phase 17c) already established needs no
+  extracted helper either, and neither of those two has one. `stepPhysics()`'s
+  own new gate is a single `if (physicsRunning_)` -- nothing to pull out and
+  unit-test in isolation that isn't already exhaustively covered by "does
+  the flag read back what was written," which the headless proof below
+  covers against the REAL production call site directly, a strictly
+  stronger check than a unit test of an equivalent pure function would be.
+- **Headless verification, via a new `ENGINE_DEBUG_FORCE_PLAY_MODE` env
+  var -- the exact same precedent `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE`
+  (Phase 16) already established.** Xvfb has no real pointer device, so a
+  real Play-button CLICK cannot be reproduced headlessly. `ENGINE_DEBUG_FORCE_PLAY_MODE=1`
+  (`debugForcePlayModeFromEnv()`, `application.cpp`), applied once in the
+  constructor, sets the exact same `physicsRunning_` member a real click
+  would -- the env var only stands in for the click GESTURE, every line of
+  code that runs afterward (the `update()` gate, `stepPhysics()` itself) is
+  the identical, unmodified production path. Combined with the
+  PRE-EXISTING `ENGINE_DEBUG_FORCE_DYNAMIC=<entity name>` (Phase 14e), which
+  both ensures an entity has a live `RigidBody` and records it as
+  `physicsVerifyEntity_` for periodic `Transform::position().y` logging,
+  this gives a fully deterministic, numeric proof with no new logging code
+  needed at all:
+  - `ENGINE_DEBUG_FORCE_DYNAMIC=falling_cube` alone (physics OFF, the
+    default): `assets/scenes/default.json`'s own `falling_cube` entity (
+    `useGravity=true`, starts at `y=2.5`) logs **y = 2.500000 on every one
+    of 18 logged frames from frame 0 through frame 170** -- gravity provably
+    does not integrate at all while `physicsRunning_` is false.
+  - `ENGINE_DEBUG_FORCE_DYNAMIC=falling_cube ENGINE_DEBUG_FORCE_PLAY_MODE=1`
+    (physics ON from frame 0): the SAME entity logs **y descending every
+    frame observed** -- `2.500000 -> 2.350054 -> 1.927607 -> 1.232661 ->
+    0.265215`, then settling at **exactly y = 0.240000** (`kGroundY`
+    `(-0.01)` `+` `Collider::halfExtent` `(0.25)`, physics.hpp's own
+    documented rest-height formula) and staying there through frame 170 --
+    the identical free-fall-then-rest trajectory this engine's gravity has
+    always produced (physics_test.cpp's own hand-computed expectations,
+    unmodified), now provably gated on `physicsRunning_` rather than
+    unconditional. Neither run touched a single line of `physics.hpp`'s own
+    gravity/collision math -- only whether `stepPhysics()` is ever called.
+- **Screenshots, actually looked at, not just logged.** Three
+  `tools/run_headless.sh`-family runs (`ENGINE_MAX_FRAMES=60`-180`), all
+  logging **zero** `[ERROR]` lines:
+  - **Default (no env vars -- true out-of-the-box Edit mode).** The
+    floating toolbar is visibly centered along the Viewport panel's own top
+    edge (not pinned to its top-left corner, and not dropped to the panel's
+    vertical middle -- the Phase 18b centering fix, see the addendum on
+    Phase 18a's own section above), and the Pause button renders in the
+    active/teal highlighted state, Play does not -- the correct default
+    (physics paused) shown correctly, live, not the old hardcoded stub.
+  - **Edit mode + `ENGINE_DEBUG_FORCE_DYNAMIC=falling_cube`, screenshot
+    captured ~6s into a real run (well past the point gravity would have
+    visibly moved the entity if it were running).** `falling_cube` (a
+    checkered cube, distinct from the plain blue "parented_demo_cube" prop
+    already resting on the platform) starts at `y=2.5` -- high enough to sit
+    entirely above the camera's own framed view -- and stays there the
+    whole run: the checkered cube is simply NOT VISIBLE in this screenshot,
+    exactly as its unchanging logged `y=2.5` predicts.
+  - **The same scenario with `ENGINE_DEBUG_FORCE_PLAY_MODE=1` added,
+    screenshot captured at the same ~6s offset.** The checkered
+    `falling_cube` is now clearly VISIBLE, resting on/beside the platform
+    next to the blue prop cube, casting a real shadow -- having fallen from
+    entirely outside the frame down to its rest height, a stark, easy-to-see
+    difference from the Edit-mode screenshot immediately above, not a subtle
+    one. The Play button now renders active/teal, Pause does not -- the
+    live toggle confirmed visually, not just from the log.
+- **Deliberately NOT done this phase** (documented, not an oversight):
+  - **No scene-state snapshot/restore across Play -> Stop.** Unity's own
+    "changes made during Play don't persist after Stop" behavior is real,
+    separate, substantial scope (recording every entity's pre-Play
+    Transform/component state and restoring it on Pause) this phase's own
+    brief explicitly declines to half-build. This phase only gates the
+    physics STEP itself -- any Transform a physics step (or a manual edit
+    made while Play is running) moved stays moved after clicking Pause, the
+    same as every Transform mutation in this engine always has.
+  - **No keyboard shortcut for Play/Pause.** Toolbar-button-only, matching
+    every other toolbar button today (grid/lighting/texture-mode/undo all
+    have no keyboard equivalent either) -- a real shortcut would be
+    separate, later scope, the same judgment call this project already
+    applies elsewhere (e.g. Ctrl+S for Save Scene, Phase 15e, is the one
+    existing exception, and was its own separate, explicitly-scoped
+    addition).
+  - **No friction/damping/simulation-quality changes.** `physics.hpp`'s own
+    gravity integration and ground-collision resolution are untouched
+    byte-for-byte by this phase -- confirmed above by the settled rest
+    height (`0.240000`, matching the pre-existing documented formula
+    exactly) and the unmodified `physics_test.cpp` suite still passing.
+    Improving the simulation itself (restitution, friction, entity-vs-entity
+    collision) is separate, future scope this phase does not touch.
+- **Verify.** A full clean rebuild (`-DCMAKE_BUILD_TYPE=Debug`, matching
+  this project's own real convention -- a prior phase's review caught that
+  a `Release` build silently strips asserts and can produce false-positive
+  test passes, so this phase's own rebuild is Debug, from scratch, not
+  reused from any earlier build directory) produced **zero warnings** from
+  any engine source file, `editor_ui.cpp`/`application.cpp` included.
+  `ctest` reports **14/14 passing** -- unchanged from Phase 18a's own
+  baseline; no new test target was added (see this section's own "No
+  extracted pure `decideXyz()` function" bullet above for why the headless,
+  production-call-site proof above was judged the stronger check here, not
+  a gap). `ENGINE_DEBUG_FORCE_PLAY_MODE=1` and
+  `ENGINE_DEBUG_FORCE_DYNAMIC=<name>` both run the identical production
+  code paths a real Play-button click and a real physics-enabled entity
+  already use, the same honest headless-verification ceiling
+  `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE`'s own Phase 16 section already
+  records: this proves the flag/gate/button-state wiring end-to-end, not a
+  real mouse click landing on the Play button pixel-for-pixel (Xvfb has no
+  real pointer device to click with at all).
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

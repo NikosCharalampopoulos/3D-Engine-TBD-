@@ -984,6 +984,27 @@ bool debugForceCameraCaptureFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 18b: ENGINE_DEBUG_FORCE_PLAY_MODE=1, unset by default -- same
+// getenv-gated-behavior pattern as every plain on/off flag above, and the
+// SAME "debug env var calls the exact same production function a real
+// interaction would" precedent ENGINE_DEBUG_FORCE_CAMERA_CAPTURE's own
+// comment above already names: Xvfb has no real pointer device, so there is
+// no way for a real Play-button CLICK to ever reach
+// editorUI_.renderDockspaceShell()'s own toolbar under headless
+// verification. This closes that gap for physicsRunning_ the same way
+// ENGINE_DEBUG_FORCE_CAMERA_CAPTURE already closes it for cameraCaptured_ --
+// applied once, in the constructor (see that call site's own comment for
+// why the constructor body, not this in-class default, is where it's
+// applied), setting the exact same physicsRunning_ member a real Play click
+// would, so update()'s own `if (physicsRunning_) { stepPhysics(...); }`
+// gate runs the identical production code path either way -- the only thing
+// this env var stands in for is the click gesture itself, not any part of
+// what happens after it.
+bool debugForcePlayModeFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_FORCE_PLAY_MODE");
+    return value != nullptr && *value != '\0' && std::string(value) != "0";
+}
+
 // Phase 16: ENGINE_DEBUG_SIMULATE_ESCAPE=1, unset by default -- same
 // getenv-gated-behavior pattern as every plain on/off flag above. Xvfb has
 // no real keyboard at all (see this project's own established headless-
@@ -1847,10 +1868,11 @@ Application::Application(int width, int height, const std::string& title, std::u
         // Phase 8e: deliberately NOT extended with a second, RigidBody/
         // Collider-carrying entity mirroring assets/scenes/default.json's
         // "falling_cube" -- see legacySceneFromEnv()'s own comment above for
-        // why. stepPhysics() (called unconditionally from update()) still
-        // runs every frame under this path; it just iterates zero RigidBody
-        // entities, exactly as harmlessly as it would for any entity that
-        // simply never opted into that component.
+        // why. stepPhysics() (called from update() whenever physicsRunning_
+        // is true -- see Phase 18b) still runs the same way under this path;
+        // it just iterates zero RigidBody entities, exactly as harmlessly as
+        // it would for any entity that simply never opted into that
+        // component.
         LOG_INFO("ENGINE_LEGACY_SCENE set: building the scene from hardcoded C++ instead of " + kDefaultScenePath);
         const EntityId sceneEntity = registry_.create();
         registry_.addComponent<NameComponent>(sceneEntity, NameComponent{"scene"});
@@ -2215,6 +2237,19 @@ Application::Application(int width, int height, const std::string& title, std::u
         LOG_INFO("ENGINE_DEBUG_FORCE_CAMERA_CAPTURE set: starting already captured");
     }
 
+    // Phase 18b: ENGINE_DEBUG_FORCE_PLAY_MODE -- see
+    // debugForcePlayModeFromEnv()'s own comment above for why this exists.
+    // No setter call needed the way setCameraCaptured() is above --
+    // physicsRunning_ has no side effect of its own to keep in sync (unlike
+    // cameraCaptured_, which also has to flip the OS cursor's own
+    // hidden/visible state via window_), so a direct assignment here is
+    // already the entire effect a real Play-button click has (see this
+    // member's own application.hpp comment).
+    if (debugForcePlayModeFromEnv()) {
+        physicsRunning_ = true;
+        LOG_INFO("ENGINE_DEBUG_FORCE_PLAY_MODE set: starting already in Play mode (physics running)");
+    }
+
     if (clusterDebugMode_) {
         LOG_INFO(
             "ENGINE_CLUSTER_DEBUG set: tinting fragments by their cluster's light count to visualize clustered "
@@ -2293,7 +2328,34 @@ void Application::update(double deltaTime, const InputState& input) {
     // or depend on camera_ at all, and before render() is called (later
     // this same frame, from run()) so the object's Transform is already at
     // its new position by the time this frame actually draws it.
-    stepPhysics(registry_, std::min(static_cast<float>(deltaTime), kMaxPhysicsTimestep), kGroundY);
+    //
+    // Phase 18b: now gated behind physicsRunning_ -- from Phase 8e through
+    // Phase 18a this call ran UNCONDITIONALLY, every single frame, meaning
+    // gravity/collision were always live, even while the user was only
+    // trying to select/inspect an entity in the editor (the project owner's
+    // own explicit complaint: "the selection to have physics enabled seems
+    // extremely bad the way it acts not new user friendly"). Standard
+    // editor convention (Unity/Unreal/Godot) is that simulation only runs in
+    // "Play mode"; the scene stays frozen in "Edit mode" so it can be freely
+    // arranged. physicsRunning_ defaults false (Edit mode) -- see that
+    // member's own application.hpp comment for why false, not true, is the
+    // correct default here -- so stepPhysics() now simply does not run at
+    // all until the user clicks the Viewport toolbar's own Play button
+    // (editor_ui.cpp's renderViewportToolbar()): no gravity integration, no
+    // collision resolution, every entity's Transform stays exactly where it
+    // was left. Deliberately NOT done this phase: any snapshot/restore of
+    // scene state across a Play->Stop transition (Unity's own "changes made
+    // during Play don't persist" behavior) -- this phase only gates the
+    // physics STEP itself; a Transform any physics step (or a manual edit
+    // made while playing) moved stays moved after Pause, the same as it
+    // always has. Also deliberately NOT done: any keyboard shortcut for
+    // Play/Pause (toolbar-button-only, matching every other toolbar button
+    // today) and any friction/damping change to the simulation itself (the
+    // actual gravity/collision math in physics.hpp is untouched byte-for-
+    // byte by this phase -- only WHETHER it runs changes, never HOW).
+    if (physicsRunning_) {
+        stepPhysics(registry_, std::min(static_cast<float>(deltaTime), kMaxPhysicsTimestep), kGroundY);
+    }
 
     // Phase 14e: numeric proof that ENGINE_DEBUG_FORCE_STATIC/_DYNAMIC's
     // setEntityStatic() call actually changed how stepPhysics() (just above)
@@ -3479,6 +3541,13 @@ void Application::render() {
     // straight through rather than routed via an out-parameter-plus-later-
     // handling pair the way saveSceneRequested/textureAssignRequested above
     // are.
+    // Phase 18b: `physicsRunning_` passed by reference the identical way,
+    // right alongside them -- the toolbar's own real Play/Pause buttons
+    // (editor_ui.cpp) mutate this member directly on a click, and
+    // update()'s own `if (physicsRunning_) { stepPhysics(...); }` gate (see
+    // that call site's own comment) re-reads it next frame, the same "no
+    // out-parameter-plus-later-handling needed" reasoning ssaoDisabled_/
+    // ssaoDebugMode_ above already established.
     // Phase 17d: `showCustomTitleBar`/`windowMaximized`/`windowPos` are
     // read-only snapshots of window_'s own live state, queried fresh this
     // same frame -- the identical "EditorUI only ever DISPLAYS state it
@@ -3496,8 +3565,8 @@ void Application::render() {
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr,
         activeDirectionalLight_, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
-        cameraCaptureRequested, ssaoDisabled_, ssaoDebugMode_, !window_.isDecorated(), window_.isMaximized(),
-        window_.getWindowPos(), titleBarAction);
+        cameraCaptureRequested, ssaoDisabled_, ssaoDebugMode_, physicsRunning_, !window_.isDecorated(),
+        window_.isMaximized(), window_.getWindowPos(), titleBarAction);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
     }
