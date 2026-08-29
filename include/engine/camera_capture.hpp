@@ -151,6 +151,49 @@ struct CameraCaptureDecision {
 CameraCaptureDecision decideCameraCapture(bool currentlyCaptured, bool escapeJustPressed,
                                            bool enterCaptureRequested);
 
+// Post-review fix (after Phase 18a): the double-click-to-capture guard in
+// editor_ui.cpp's own renderDockspaceShell() decided `enterCaptureRequested`
+// (the parameter immediately above) via a chain of Dear ImGui hover queries
+// -- `!ImGui::IsAnyItemHovered() && ImGui::IsWindowHovered() &&
+// ImGui::IsMouseDoubleClicked(...)`. A review of Phase 18a's floating
+// overlay found that chain incomplete: `IsAnyItemHovered()` only excludes a
+// double-click landing on one of the toolbar's six `ImGui::Button()` item
+// rects -- it says nothing about `renderViewportToolbarOverlay()`'s own
+// translucent BACKGROUND rectangle (`bgMin`/`bgMax` in that function), which
+// covers the rounded-corner margin around the buttons and the small
+// `ImGui::SameLine()` gaps between them too. A double-click landing in one
+// of those gaps visually lands on toolbar chrome but was, before this fix,
+// falling through and requesting camera capture as if it had landed on the
+// empty 3D viewport -- always latent in Phase 17c's guard shape, but Phase
+// 18a's overlay (the toolbar now sits directly on top of the rendered
+// image, rather than in a row above it) is what makes it reachable.
+//
+// This function is the fix's own decision, pulled out pure and ImGui-free --
+// same "small, standalone decision, unit-tested in isolation" shape this
+// header's own comment above already cites for decideCameraCapture() itself
+// -- so the exact combination that was broken can be exhaustively covered by
+// tests/camera_capture_test.cpp without a live ImGui frame or a real
+// double-click gesture, neither reproducible in this project's headless
+// Xvfb environment.
+//
+// `anyItemHovered` mirrors `ImGui::IsAnyItemHovered()`; `mouseInsideToolbarRect`
+// is the NEW condition this fix adds, mirroring
+// `ImGui::IsMouseHoveringRect(bgMin, bgMax)` tested against the toolbar
+// overlay's own background rectangle; `windowHovered` mirrors
+// `ImGui::IsWindowHovered()`; `mouseDoubleClicked` mirrors
+// `ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)`. All four must hold
+// (item not hovered, background rect not hovered, window hovered, an actual
+// double-click this frame) for a double-click to be treated as a request to
+// enter camera capture; `currentlyCaptured` short-circuits the whole thing,
+// matching the real guard's own leading `!cameraCaptured` check (requesting
+// capture again while already captured is meaningless -- see
+// decideCameraCapture()'s own handling of a redundant `enterCaptureRequested`
+// above for why that case is a defensive no-op rather than assumed
+// unreachable).
+bool shouldRequestCameraCaptureFromDoubleClick(bool currentlyCaptured, bool anyItemHovered,
+                                                bool mouseInsideToolbarRect, bool windowHovered,
+                                                bool mouseDoubleClicked);
+
 }  // namespace engine
 
 #endif  // ENGINE_CAMERA_CAPTURE_HPP

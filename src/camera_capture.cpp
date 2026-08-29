@@ -40,4 +40,17 @@ CameraCaptureDecision decideCameraCapture(bool currentlyCaptured, bool escapeJus
     return CameraCaptureDecision{/*captured=*/false, /*quitRequested=*/false};
 }
 
+// Post-review fix (after Phase 18a) -- see this function's own declaration
+// in camera_capture.hpp for the full bug this closes. A plain conjunction:
+// every one of the four conditions must hold, and being already captured
+// short-circuits it before any of them are even consulted.
+bool shouldRequestCameraCaptureFromDoubleClick(bool currentlyCaptured, bool anyItemHovered,
+                                                bool mouseInsideToolbarRect, bool windowHovered,
+                                                bool mouseDoubleClicked) {
+    if (currentlyCaptured) {
+        return false;
+    }
+    return !anyItemHovered && !mouseInsideToolbarRect && windowHovered && mouseDoubleClicked;
+}
+
 }  // namespace engine

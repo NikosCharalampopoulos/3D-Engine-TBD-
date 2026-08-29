@@ -16,7 +16,7 @@
 // after a real, physically-HELD Escape press exits capture, because that
 // bug lived in what got PASSED to this function across consecutive frames,
 // not in this function itself. The "held key across consecutive polls"
-// block at the bottom of main() closes that gap: it drives this engine's own
+// block that follows them closes that gap: it drives this engine's own
 // REAL edge-detection machinery (engine::InputActionMap, same class
 // Application::run() actually uses every frame via pollInputState(),
 // input.cpp) with a synthetic but otherwise ordinary multi-poll "key held
@@ -24,6 +24,16 @@
 // decideCameraCapture() -- an integration test, not just a second unit test
 // of the same pure function, since the regression was specifically about how
 // the two pieces are wired together across frames.
+//
+// Post-review addition (after Phase 18a): the final block at the bottom of
+// main() tests a second, separate pure function in this same file --
+// engine::shouldRequestCameraCaptureFromDoubleClick() -- covering a
+// different bug entirely (the Viewport toolbar overlay's own background
+// rectangle wasn't excluded from the double-click guard; see that
+// function's own camera_capture.hpp comment). It shares this file rather
+// than getting one of its own because it is thematically the other half of
+// this exact same guard's decision, not because it's related to Escape/quit
+// at all.
 
 #include "engine/camera_capture.hpp"
 #include "engine/input_action_map.hpp"
@@ -197,6 +207,72 @@ int main() {
             assert(!d.captured);
             assert(d.quitRequested);
         }
+    }
+
+    // --- Post-review fix: shouldRequestCameraCaptureFromDoubleClick() -----
+    // (camera_capture.hpp) -- the pure decision extracted from
+    // editor_ui.cpp's own double-click-to-capture guard after a review found
+    // it incomplete for Phase 18a's floating toolbar overlay: the guard's
+    // pre-existing `!ImGui::IsAnyItemHovered()` only excludes a double-click
+    // landing on one of the toolbar's six BUTTON item rects, not
+    // renderViewportToolbarOverlay()'s own translucent BACKGROUND rectangle
+    // (the rounded-corner margin and the small ImGui::SameLine() gaps
+    // between buttons) -- see camera_capture.hpp's own comment on this
+    // function for the full bug. Every one of the five inputs is exercised
+    // independently below, the same "one case per condition, plus the
+    // combinations that matter" shape the first 8 cases above already use
+    // for decideCameraCapture().
+    {
+        using engine::shouldRequestCameraCaptureFromDoubleClick;
+
+        // THE bug this function exists to fix: not on a button
+        // (anyItemHovered=false) but inside the toolbar's own background
+        // rect (mouseInsideToolbarRect=true) -- must NOT request capture.
+        // The old inline condition (`!IsAnyItemHovered() && IsWindowHovered()
+        // && IsMouseDoubleClicked(...)`, with no rect check at all) would
+        // have incorrectly returned true here.
+        assert(!shouldRequestCameraCaptureFromDoubleClick(
+            /*currentlyCaptured=*/false, /*anyItemHovered=*/false, /*mouseInsideToolbarRect=*/true,
+            /*windowHovered=*/true, /*mouseDoubleClicked=*/true));
+
+        // The working case this fix must NOT regress: a double-click
+        // squarely on a button (anyItemHovered=true; also, by construction,
+        // inside the background rect, since every button sits inside it) --
+        // still correctly excluded, same as it always was.
+        assert(!shouldRequestCameraCaptureFromDoubleClick(
+            /*currentlyCaptured=*/false, /*anyItemHovered=*/true, /*mouseInsideToolbarRect=*/true,
+            /*windowHovered=*/true, /*mouseDoubleClicked=*/true));
+
+        // The other working case this fix must NOT regress: a double-click
+        // well outside the toolbar's footprint entirely, on the plain empty
+        // 3D viewport -- still correctly requests capture.
+        assert(shouldRequestCameraCaptureFromDoubleClick(
+            /*currentlyCaptured=*/false, /*anyItemHovered=*/false, /*mouseInsideToolbarRect=*/false,
+            /*windowHovered=*/true, /*mouseDoubleClicked=*/true));
+
+        // Not hovering this window at all (e.g. the double-click actually
+        // landed on a different docked panel that merely overlaps on
+        // screen): never requests capture, regardless of the toolbar rect.
+        assert(!shouldRequestCameraCaptureFromDoubleClick(
+            /*currentlyCaptured=*/false, /*anyItemHovered=*/false, /*mouseInsideToolbarRect=*/false,
+            /*windowHovered=*/false, /*mouseDoubleClicked=*/true));
+
+        // Hovering the empty viewport, but not an actual double-click this
+        // frame (e.g. a single click, or no click at all): never requests
+        // capture.
+        assert(!shouldRequestCameraCaptureFromDoubleClick(
+            /*currentlyCaptured=*/false, /*anyItemHovered=*/false, /*mouseInsideToolbarRect=*/false,
+            /*windowHovered=*/true, /*mouseDoubleClicked=*/false));
+
+        // Already captured short-circuits everything else -- even a
+        // double-click on the plain empty viewport, which would otherwise
+        // satisfy every other condition, must not re-request capture while
+        // already captured (mirrors decideCameraCapture()'s own defensive
+        // handling of a redundant enterCaptureRequested while captured,
+        // exercised above).
+        assert(!shouldRequestCameraCaptureFromDoubleClick(
+            /*currentlyCaptured=*/true, /*anyItemHovered=*/false, /*mouseInsideToolbarRect=*/false,
+            /*windowHovered=*/true, /*mouseDoubleClicked=*/true));
     }
 
     std::cout << "camera_capture_test: all checks passed" << std::endl;

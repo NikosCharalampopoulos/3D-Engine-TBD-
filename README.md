@@ -299,7 +299,11 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        with applyEditorTheme(), extended again Phase 17c with
                        the Viewport toolbar row (renderViewportToolbar()/
                        toolbarIconButton()), extended again Phase 17d with the
-                       custom title bar row (renderTitleBar()),
+                       custom title bar row (renderTitleBar()), extended
+                       again Phase 18a with renderViewportToolbarOverlay()
+                       (draws that same toolbar as a floating overlay on top
+                       of the rendered 3D image instead of a layout row
+                       above it),
                        light.cpp -- Phase 15a, extended Phase 15b with
                        DirectionalLight/resolveActiveDirectionalLight(),
                        scene_hierarchy.cpp -- Phase 14d, asset_browser.cpp --
@@ -7709,6 +7713,247 @@ eventually need -- so the true final word on how well this phase's own
 custom chrome actually works is, more than any other phase in this project's
 history, the project owner's own hands on their own real Windows build, not
 a screenshot this README can point to.
+
+### Phase 18a: floating viewport toolbar
+
+The first item in a new "Phase 18: editor usability + physics polish" arc,
+opened by the project owner's own explicit complaint about Phase 17c's
+toolbar: **"the toolbar is supposed to be on top of the scene not above
+it."** Phase 17c's `renderViewportToolbar()` was called as the very first
+thing inside the Viewport panel's `Begin()`/`End()` block, so its six
+buttons occupied a row of their own ABOVE the rendered 3D image -- correct
+Dear ImGui layout, but the wrong picture: the reference mockup, and every
+real editor it draws from (Blender, Unity), shows this toolbar floating
+OVER the viewport, not eating into it. This phase moves it.
+
+- **What changed, precisely.** `renderViewportToolbar()` itself is
+  untouched except for one line removed (the trailing `ImGui::Separator()`
+  17c's row-shaped version drew after its sixth button -- meaningless, and
+  visually wrong, once nothing is separating a "row" from anything below
+  it). Its six `ImGui::Button()` calls, their `active`/`enabled` wiring,
+  and every tooltip string are byte-for-byte identical to 17c. What's new
+  is `renderViewportToolbarOverlay()` (`editor_ui.cpp`, same anonymous
+  namespace) and where the Viewport panel's own code calls it:
+  `renderDockspaceShell()` now computes `contentRegion`/`panelScreenPos`
+  and submits `ImGui::Image()` FIRST, using the panel's own FULL available
+  content region (no toolbar row has already eaten into it), and only
+  AFTER that calls `renderViewportToolbarOverlay(ssaoDisabled,
+  ssaoDebugMode, panelScreenPos)` -- which re-submits
+  `renderViewportToolbar()`'s same six buttons, positioned near the
+  panel's own top-left corner, with a translucent background painted
+  behind them.
+- **Same window, not a second floating `Begin()` -- researched against
+  this project's own vendored ImGui source, not assumed, before picking.**
+  The project owner's own brief named two standard techniques: drawing the
+  toolbar's items directly into the Viewport window's own draw list at an
+  absolute cursor position (same window, draw-order-after-image), or a
+  second, independent `ImGui::Begin()` window with
+  `ImGuiWindowFlags_NoTitleBar | NoResize | NoMove | NoScrollbar` (likely
+  `NoDocking` too) pinned over the panel via `SetNextWindowPos()`. This
+  phase read `build/_deps/imgui-src/imgui.cpp`/`imgui.h` directly and took
+  the first option. Two concrete reasons, not a coin flip:
+  - **Docking safety.** The Viewport panel is itself a dockable panel
+    inside `DockSpaceOverViewport()` (Phase 14a). A second, undecorated
+    floating window positioned over it would itself be a real `ImGuiWindow`
+    -- without `ImGuiWindowFlags_NoDocking` it becomes a valid drop target
+    a user could accidentally dock something into (turning the toolbar into
+    a docked panel of its own), and even with that flag it is one more
+    independently-tracked window whose position this code would have to
+    keep hand-synchronized with the Viewport panel's own rectangle every
+    frame. Submitting the buttons as ordinary items of the SAME "Viewport"
+    window sidesteps all of that by construction -- there is no second
+    window to desync, dock into, or accidentally raise/lower in z-order
+    relative to its own parent panel.
+  - **The double-click guard.** Phase 17c's own `!ImGui::IsAnyItemHovered()`
+    guard (see below) reads `imgui.cpp`'s
+    `return g.HoveredId != 0 || g.HoveredIdPreviousFrame != 0;` -- genuinely
+    GLOBAL state, not scoped to one window, so it happens to still work
+    correctly even if the buttons lived in a second window. That's exactly
+    the kind of accidental correctness this phase's own research wanted to
+    avoid depending on: the same-window approach makes the guard obviously
+    correct BY CONSTRUCTION (the buttons are this window's own items, the
+    same relationship 17c already established) rather than correct only
+    because one specific query function happens to be implemented globally.
+- **Re-anchoring every frame, not a cached rectangle.** `panelScreenPos` is
+  the exact same `ImGui::GetCursorScreenPos()` value `renderDockspaceShell()`
+  already captured immediately after the Viewport panel's own `Begin()` --
+  fresh every single call, never cached across frames. Passed straight into
+  `renderViewportToolbarOverlay()` as `originScreenPos`, it's what the
+  overlay's own position is computed relative to, so a redock or resize of
+  the Viewport panel (this dockspace's whole point is that the user CAN
+  rearrange it) is reflected correctly on the very next frame with no
+  separate "did the panel move" tracking of its own.
+- **Background-behind-buttons via `ImDrawListSplitter`, not a
+  precomputed-width rectangle.** The overlay's own bounding box isn't known
+  until AFTER the six buttons are actually submitted (their combined width
+  depends on font metrics/padding this function doesn't want to
+  hand-duplicate). `ImDrawListSplitter` -- a public, documented part of
+  `imgui.h` (the same idiom Dear ImGui's own Columns/Tables implementation
+  uses) -- solves exactly this: the buttons are submitted into channel 1
+  first (inside a `BeginGroup()`/`EndGroup()` pair, so
+  `GetItemRectMin()`/`Max()` afterward gives the real, now-known group
+  rect), the translucent background is then painted into channel 0 sized to
+  that rect, and `Merge()` reorders the two channels back into
+  channel-0-before-channel-1 order in the final draw list -- BEHIND, not on
+  top of, the buttons -- despite being the SECOND set of `AddRectFilled()`/
+  `AddRect()` calls made this frame. Both channels are still appended to
+  the Viewport window's draw list strictly after `ImGui::Image()`'s own
+  draw command, so the whole overlay (background and buttons alike)
+  composes on top of the rendered 3D image either way -- the actual "on
+  top of the scene" requirement this phase exists for.
+- **Colors: reused from the Phase 17a theme, not invented.** The overlay's
+  background reads `ImGui::GetStyle().Colors[ImGuiCol_WindowBg]` back LIVE
+  (`applyEditorTheme()`'s own `kBgPanel`) at a reduced alpha (0.72), and its
+  border reads `ImGuiCol_Border` (`kBorderSubtle`) the same way -- the
+  identical "read the live style entry back rather than declare a second
+  hardcoded literal" discipline `toolbarIconButton()`'s own `active` path
+  already established for `ImGuiCol_ButtonActive` (Phase 17c). Rounded with
+  `style.WindowRounding` (8.0f), the same "outer container" radius family
+  applyEditorTheme()'s own comment gives every full panel/popup, since this
+  overlay reads as one too. Translucent, not opaque, precisely so the
+  rendered 3D scene stays visible as the actual viewport backdrop around
+  and faintly through the bar -- confirmed visually against both a bright
+  daylit scene and the grayscale SSAO debug view (see Verify below), not
+  just asserted.
+- **The double-click-to-capture-camera guard needed no logic change, only
+  a position move.** Phase 17c's own `!ImGui::IsAnyItemHovered() &&
+  ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(...)` check is
+  unchanged in every particular except WHERE in this function it now sits:
+  it moved from immediately after `renderViewportToolbar()` (17c's
+  placement, when that was the first thing submitted) to immediately after
+  `renderViewportToolbarOverlay()` (this phase's placement, now the last
+  thing submitted before the selection-outline block). `IsAnyItemHovered()`
+  only correctly excludes a double-click landing on a toolbar BUTTON if
+  those buttons have already been submitted THIS frame by the time the
+  check runs -- true either way, since `renderViewportToolbarOverlay()`
+  still submits the exact same `ImGui::Button()` calls as items of this
+  exact "Viewport" window (see the same-window reasoning above). No new
+  interaction bug, and none of the guard's own three conditions needed to
+  change.
+- **Deliberately NOT done this phase**: any change to what the six buttons
+  DO -- every click handler, `BeginDisabled()` state, and tooltip string is
+  identical to 17c (still four stub buttons with explanatory tooltips, two
+  real `ssaoDisabled_`/`ssaoDebugMode_` toggles); wiring grid/undo/play/
+  pause to real functionality (that's this new arc's own later scope, not
+  this sub-phase's); a draggable/repositionable toolbar (this is one fixed
+  overlay position near the top-left, matching the mockup, the same
+  "no speculative configurability nothing asks for" precedent Phase 17c's
+  own README section already cites for the row it replaces); and any
+  change to the Scene/Assets/Inspector panels, none of which this phase
+  touches.
+- **Verify**: a full clean rebuild (`build_clean_18a/`, configured and
+  built from scratch, `-Wall -Wextra`) produced **zero warnings** from
+  `editor_ui.cpp` or any other engine source file (the handful of
+  pre-existing `-Wunused-but-set-variable` warnings in
+  `tests/material_override_test.cpp`/`camera_capture_test.cpp`/
+  `window_chrome_test.cpp` predate this phase and are untouched by it).
+  `ctest` reports **14/14** passing -- unchanged from Phase 17d's own
+  baseline; as originally shipped, this phase introduced no new pure,
+  standalone decision function (`renderViewportToolbarOverlay()` is Dear
+  ImGui plumbing -- cursor positioning, a draw-list split/merge, reading live
+  style colors back -- not a "given X, produce exactly one Y" contract in the
+  shape `toolbarButtonIconGlyph()`/`decideCameraCapture()` are, so there was
+  nothing new here to extract into an isolated unit test the way those
+  were). A post-review pass found a real gap in that reasoning -- see
+  "Post-review fix" immediately below.
+
+  Three `tools/run_headless.sh` runs (`ENGINE_MAX_FRAMES=60`), all logging
+  **zero** `[ERROR]` lines:
+  - **A before/after comparison, built from the pre-Phase-18a commit and
+    this phase's own working tree side by side.** The "before" screenshot
+    shows exactly the complaint being fixed: an opaque toolbar row sitting
+    above the image, the image itself starting well below it. The "after"
+    screenshot shows the same six buttons now rendered as a translucent
+    bar layered directly over the top of the 3D scene, and the image
+    itself now starting at the panel's own top edge and running the full
+    remaining panel height -- both the overlay placement and the full-
+    height image confirmed by eye, not assumed from the code alone.
+  - **`ENGINE_SSAO_DISABLE=1`** -- same as Phase 17c's own precedent (a new
+    debug var simulating a button CLICK would only prove "this code path,
+    driven by an env var, flips the same bool," strictly weaker than what
+    already exists): sets the exact `Application::ssaoDisabled_` the
+    "lighting" button reads, and the screenshot confirms that button still
+    renders in the active/teal state now that it's drawn inside the
+    overlay's `BeginGroup()` rather than inline in the panel's own layout --
+    the `active` styling survived the move unchanged.
+  - **`ENGINE_SSAO_DEBUG=1`** -- confirms the "texture-mode" button
+    likewise still renders active/teal, AND that the Viewport panel
+    genuinely shows the raw grayscale SSAO occlusion buffer filling the
+    full panel underneath the overlay -- direct visual proof the overlay
+    still reads the identical live `Application`-owned state Phase 17c's
+    wiring already established, and that the translucent background stays
+    legible against a very different (grayscale, not warm-lit) backdrop
+    too.
+  - **`ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1`** -- the same Phase 16/17c
+    precedent for proving the double-click-to-capture PRODUCTION path
+    (`setCameraCaptured()`, cursor-mode GLFW call, `LOG_INFO`) still runs
+    end-to-end after this phase's changes: the log line "Camera capture
+    entered: cursor hidden, WASD + mouse-look now drive the camera" is
+    present, and the resulting screenshot shows the same overlay toolbar
+    rendered correctly on top of the scene while captured. This still
+    cannot reproduce an actual double-click GESTURE landing precisely on a
+    toolbar button versus empty viewport space -- Xvfb has no real pointer
+    device, the same honest limitation Phase 16/17c's own Verify sections
+    already recorded -- so the `!ImGui::IsAnyItemHovered()` guard's
+    continued correctness after the move rests on the code-level argument
+    above (the buttons are still this window's own items, submitted before
+    the check runs, exactly as 17c already established), not a headless
+    screenshot of the gesture itself.
+
+- **Post-review fix: the double-click guard didn't cover the toolbar's own
+  background rect.** An independent review of this phase found that
+  `!ImGui::IsAnyItemHovered()` -- the guard's own bullet above -- only
+  excludes a double-click landing on one of the toolbar's six `ImGui::
+  Button()` item rects. It does NOT exclude
+  `renderViewportToolbarOverlay()`'s own translucent BACKGROUND rectangle
+  (`bgMin`/`bgMax`): the rounded-corner margin around the buttons, and the
+  small `ImGui::SameLine()` gaps between them, are covered by no button's
+  hover ID at all. A double-click landing in one of those gaps visually
+  lands on toolbar chrome -- now sitting directly on top of the 3D image,
+  which is exactly what makes this phase's overlay surface the bug -- but
+  was falling through this guard as "empty viewport space" and incorrectly
+  requesting camera capture. This was always latent in Phase 17c's guard
+  shape (a row-shaped toolbar had no background rect to miss), not something
+  this phase's own move of the check introduced.
+  - **The fix.** `renderViewportToolbarOverlay()` now writes its own
+    `bgMin`/`bgMax` back to the caller through two new out-params
+    (`outBgMin`/`outBgMax`), and the guard adds a fourth condition,
+    `!ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax)`, alongside the
+    pre-existing three -- so the toolbar's entire visible footprint is now
+    excluded, not just its individual buttons.
+  - **Pulled out pure and unit-tested, not just reasoned about.** The
+    combined four-condition decision is now `engine::
+    shouldRequestCameraCaptureFromDoubleClick()` (`camera_capture.hpp`/
+    `.cpp`), the identical "small, standalone decision, unit-tested in
+    isolation" shape `decideCameraCapture()` itself already established in
+    Phase 16 -- pure booleans in, one bool out, no ImGui/GL/window dependency
+    at all. `tests/camera_capture_test.cpp` gained cases covering all five
+    inputs independently, including the exact scenario this bug was about:
+    `anyItemHovered=false` (not on a button) but `mouseInsideToolbarRect=
+    true` (inside the background rect) now correctly returns `false`
+    (no capture request) where the old inline condition would have returned
+    `true`. This is real regression coverage, not just a code-level argument
+    -- the same gap Xvfb's own missing pointer device otherwise leaves this
+    feature's double-click gesture unable to prove headlessly (see the
+    `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1` bullet above).
+  - **Verify.** A second full clean rebuild (`-Wall -Wextra`) still produced
+    **zero new warnings**. `ctest` still reports **14/14** passing --
+    `camera_capture_test` gained cases, but no new test *target* was added
+    (the new function lives in that test's existing pure-logic file), so the
+    suite's own count is unchanged. `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1`
+    still runs the production capture path end-to-end exactly as before,
+    confirming the fix didn't disturb the working "double-click squarely on
+    a button" or "double-click well outside the toolbar" cases.
+  - **Also corrected in this pass:** three places in this README and
+    `editor_ui.cpp` (this section's own "double-click guard" bullet above,
+    `editor_ui.cpp`'s matching same-window-vs-second-window comment, and the
+    double-click guard's own comment further down `editor_ui.cpp`) quoted
+    `IsAnyItemHovered()`'s vendored implementation as `g.HoveredId != 0`.
+    The real function (`build/_deps/imgui-src/imgui.cpp`) is `return
+    g.HoveredId != 0 || g.HoveredIdPreviousFrame != 0;` -- still global, not
+    per-window, so every conclusion drawn from the misquote happened to
+    still hold, but the quote itself didn't match the source it claimed to
+    be transcribed from. All three now quote the real line verbatim.
 
 ## Libraries used and why
 
