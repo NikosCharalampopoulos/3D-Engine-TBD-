@@ -533,8 +533,17 @@ public:
     // own Phase 14a comment) -- default false, an ordinary resizable window
     // at (width, height) the user can maximize themselves. See main.cpp's
     // ENGINE_WINDOW_MAXIMIZED handling for how a real run opts in.
-    Application(int width, int height, const std::string& title, std::uint64_t maxFrames = 0,
-                bool maximized = false);
+    //
+    // Phase 17d: `decorated` is passed straight through to Window too (see
+    // its own Phase 17d comment) -- default true, an ordinary OS-decorated
+    // window, the identical "class defaults to the old/native behavior,
+    // main.cpp's own call site opts into the new one" shape `maximized`
+    // already has. See main.cpp's ENGINE_WINDOW_DECORATED handling for how a
+    // real run opts INTO the OS's native title bar/border instead of this
+    // project's new default custom-drawn one (README.md's own Phase 17d
+    // section).
+    Application(int width, int height, const std::string& title, std::uint64_t maxFrames = 0, bool maximized = false,
+                bool decorated = true);
 
     void run();
 

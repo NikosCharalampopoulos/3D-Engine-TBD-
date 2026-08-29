@@ -298,7 +298,8 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        "Browse..." texture picker, extended again Phase 17a
                        with applyEditorTheme(), extended again Phase 17c with
                        the Viewport toolbar row (renderViewportToolbar()/
-                       toolbarIconButton()),
+                       toolbarIconButton()), extended again Phase 17d with the
+                       custom title bar row (renderTitleBar()),
                        light.cpp -- Phase 15a, extended Phase 15b with
                        DirectionalLight/resolveActiveDirectionalLight(),
                        scene_hierarchy.cpp -- Phase 14d, asset_browser.cpp --
@@ -311,7 +312,14 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        -- Phase 17b's new sceneNodeIconGlyph()/
                        assetNodeIconGlyph(), the pure GL/ImGui-free half of
                        icon-font glyph selection, extended Phase 17c with
-                       toolbarButtonIconGlyph())
+                       toolbarButtonIconGlyph(), window_chrome.cpp -- Phase
+                       17d's new applyDragDelta()/decideMaximizeRestoreToggle(),
+                       the pure GLFW/GL/ImGui-free half of the new custom
+                       title bar's drag-to-move/maximize-restore logic,
+                       window.cpp -- extended Phase 17d with the
+                       GLFW_DECORATED hint plus new getWindowPos()/
+                       setWindowPos()/isMaximized()/iconifyWindow()/
+                       toggleMaximizeRestore()/requestClose() wrappers)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -346,7 +354,17 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        phase; editor_icons.hpp extended Phase 17c with four
                        more codepoint constants (kIconGrid/kIconUndo/
                        kIconPlay/kIconPause) plus ToolbarButton/
-                       toolbarButtonIconGlyph())
+                       toolbarButtonIconGlyph(), window_chrome -- Phase 17d's
+                       new WindowPosition/applyDragDelta()/
+                       decideMaximizeRestoreToggle(), same "own header,
+                       genuinely different kind of thing" precedent once
+                       more; window.hpp extended Phase 17d with the new
+                       `decorated` constructor parameter/isDecorated()/
+                       getWindowPos()/setWindowPos()/isMaximized()/
+                       iconifyWindow()/toggleMaximizeRestore()/requestClose(),
+                       editor_ui.hpp extended Phase 17d with the new
+                       TitleBarAction struct and renderDockspaceShell()
+                       parameters)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -389,7 +407,8 @@ tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
                        asset_drop_test.cpp (Phase 15g),
                        camera_capture_test.cpp (Phase 16),
                        editor_icons_test.cpp (Phase 17b, extended Phase 17c
-                       with ToolbarButton/toolbarButtonIconGlyph() coverage)
+                       with ToolbarButton/toolbarButtonIconGlyph() coverage),
+                       window_chrome_test.cpp (Phase 17d)
                        + its own CMakeLists.txt (no longer just the Phase 0
                        placeholder)
 ```
@@ -7280,6 +7299,416 @@ row.
   genuinely prevents `ImGui::Button()` from ever reporting a click (Dear
   ImGui's own documented `BeginDisabled()` contract, not a second guard
   this phase's own code adds on top).
+
+### Phase 17d: window chrome
+
+The fourth and last item in the "Phase 17: visual design" arc. The project
+owner supplied a reference mockup showing a borderless window with rounded
+outer corners and a custom-drawn top bar -- the "Engine Studio" app icon/name
+on the left, and (implicitly, standard for this kind of app, matching every
+other real editor's own chrome even though the mockup's own crop doesn't show
+it explicitly) minimize/maximize/close controls on the right -- replacing the
+OS's own native window title bar entirely. Every earlier item in this arc
+named this as explicitly out of its own scope: Phase 17a's own section called
+it "real platform-level borderless-window work, much bigger scope"; Phase 17c
+repeated the identical line almost verbatim. This is that phase.
+
+**Read this section's own "Honest verification ceiling" subsection below
+before treating anything here as more thoroughly proven than it is** -- this
+is the one phase in the whole Phase 15-17 body of work that genuinely cannot
+get the same kind of headless-screenshot-based proof every other phase in
+this project has had, and this section says so plainly rather than
+overclaiming.
+
+- **The real constraint this phase's own brief set, and why it shaped every
+  design choice below.** This project's own dev/CI environment is a headless
+  Linux container (Xvfb, no real window manager -- confirmed directly: `ps`
+  inside this container shows no window manager process of any kind running
+  alongside Xvfb, only the X server itself and whatever client app connects
+  to it). The project owner's actual target is a real Windows desktop this
+  environment cannot reach at all. Two consequences follow directly:
+  1. **Nothing about "does dragging/resizing/minimizing/maximizing/closing
+     actually FEEL right on a real desktop" can be verified here**, at any
+     level beyond code-reading and logical soundness -- there is no real
+     mouse, no real window manager compositing real window decorations, and
+     no real user's hand on a trackpad. Every claim in this section's own
+     Verify subsection is scoped accordingly.
+  2. **No Windows-specific platform code was written that this environment
+     cannot compile-check.** Making a GLFW window borderless
+     (`GLFW_DECORATED = GLFW_FALSE`) is well known to also remove the OS's
+     own native edge-drag resize handles on at least some platforms/window
+     managers -- restoring that properly on Windows normally needs custom
+     `WM_NCHITTEST` handling via the native Win32 window handle
+     (`glfwGetWin32Window()`), which needs `_WIN32`/Windows headers this
+     Linux container has none of -- not even a way to build-check a
+     `#ifdef _WIN32` branch here, since the preprocessor would simply never
+     enter it. Rather than ship an untested, possibly-broken `#ifdef _WIN32`
+     block behind a compile flag nothing in this environment ever exercises,
+     **this phase implements only the portable, cross-platform-buildable
+     pieces** (a custom-drawn title bar; window dragging via
+     `glfwSetWindowPos()`-delta-tracking each frame, which compiles and is
+     logically testable on any platform GLFW supports) and **documents native
+     edge-drag-to-resize as a known, accepted, real gap** a future
+     Windows-specific phase would need to close with proper hit-testing --
+     not papered over, not silently dropped.
+
+- **Borderless by default now, with a real escape hatch back to the OS's own
+  native decorations.** `window.hpp`'s `Window` constructor gains a
+  `decorated` parameter (default `true`, GLFW's own out-of-the-box behavior --
+  the identical "class defaults to the old/native behavior, main.cpp's own
+  call site decides what a real interactive run actually wants" shape
+  Phase 14a's own `maximized` parameter already established), setting the
+  `GLFW_DECORATED` window hint before creation (must happen before
+  `glfwCreateWindow()`, confirmed against the actual vendored
+  `build/_deps/glfw-src/include/GLFW/glfw3.h`, not assumed from general
+  knowledge -- same discipline every earlier phase's own GLFW-hint research
+  already followed). `main.cpp` is what actually flips the real interactive
+  default to borderless (`kDefaultWindowDecorated = false`), with a new
+  `ENGINE_WINDOW_DECORATED` env var as the documented, real escape hatch back
+  to native decorations -- unlike `ENGINE_WINDOW_WIDTH`/`HEIGHT`'s own
+  headless-only motivation, this one exists for a real user on a real
+  desktop: if the native-edge-resize gap above (or anything else about this
+  new chrome) turns out to be a problem on someone's actual Windows box, they
+  can get the OS's own title bar/border/resize handles back with one env var,
+  no source change, no rebuild.
+
+- **Headless capture: confirmed unaffected, not just assumed.** Xvfb runs no
+  window manager at all in this environment, so `GLFW_DECORATED` has no
+  window manager to hand decoration-drawing instructions to in the first
+  place -- there was every reason to expect this to be a non-issue, and it
+  was verified directly rather than left as an assumption: `tools/
+  run_headless.sh` (unmodified) was run both with the new borderless default
+  and with `ENGINE_WINDOW_DECORATED=1` forcing native decorations back on;
+  both produced identical, successful `xwd`-based screenshot captures with
+  **zero** `[ERROR]` lines (see Verify below). No escape hatch was needed for
+  the headless harness itself -- `ENGINE_WINDOW_DECORATED` exists purely for
+  a real desktop user, per the point above, not because headless capture
+  needed one.
+
+- **The custom title bar row: `renderTitleBar()`, a new private `EditorUI`
+  member function (`editor_ui.cpp`), not a free function in that file's
+  existing anonymous namespace.** Every other per-frame render helper in that
+  file (`renderViewportToolbar()`, `toolbarIconButton()`) is a free function
+  taking all the state it needs as parameters; this one needs access to this
+  class's OWN persistent cross-frame state (`titleBarDragging_`, a new
+  private `bool`) to know whether a drag is still in progress on a frame
+  where the cursor may not even be hovering the title bar's own window rect
+  any more (a fast drag can easily out-run the window being repositioned
+  under it for a frame or two) -- the identical reason `buildInitialLayout()`
+  is already a member function rather than a free one (it needs
+  `layoutBuilt_`).
+  - **Stacks correctly above the Phase 15e File menu bar, confirmed by
+    reading Dear ImGui's own source, not merely assumed.** The title bar
+    reserves its own strip of screen space at the top of the main viewport
+    via `ImGui::BeginViewportSideBar("##TitleBar", viewport, ImGuiDir_Up,
+    height, flags)` -- the EXACT SAME internal mechanism
+    `ImGui::BeginMainMenuBar()` itself already uses (confirmed directly
+    against this project's own vendored `build/_deps/imgui-src/
+    imgui_widgets.cpp`: `BeginMainMenuBar()`'s own implementation is just
+    `BeginViewportSideBar("##MainMenuBar", viewport, ImGuiDir_Up, height,
+    window_flags)`). `BeginViewportSideBar()`'s own implementation
+    accumulates each call's height into the viewport's shared
+    `BuildWorkInsetMin` (an ADD, not an overwrite), so calling it once for
+    the new title bar and then letting `renderDockspaceShell()`'s own
+    pre-existing `ImGui::BeginMainMenuBar()` call run right after correctly
+    stacks the two: the File menu bar ends up docked directly beneath the
+    title bar, and `DockSpaceOverViewport()` (called after both) sizes the
+    four docked panels into whatever work-rect space remains under both --
+    exactly the same "reserve space first, dockspace reads the shrunk work
+    rect second" relationship the File menu bar already had with the
+    dockspace before this phase, just with one more reservation stacked on
+    top. Confirmed visually too, not just by source inspection -- see Verify
+    below.
+  - **App icon/name on the left**: a small filled, rounded square (colored
+    via the SAME live-read accent teal `toolbarIconButton()` already reads,
+    `ImGuiCol_ButtonActive` -- reusing the one established accent rather than
+    a second hardcoded literal, matching `applyEditorTheme()`'s own "one
+    accent teal, reused everywhere" discipline from Phase 17a) standing in
+    for a dedicated app-icon image asset, which this project has never
+    vendored -- simpler than sourcing/vendoring one for a single small
+    swatch, the same "geometry, not a vendored asset" choice this phase makes
+    for the window-control glyphs below, for the identical reason. The name
+    itself is **"Engine Studio"** -- this project's reference mockup's own
+    name for itself, which Phase 17a's own README section already used
+    descriptively ("a target 'Engine Studio' editor look") without ever
+    actually rendering it anywhere in the UI; this phase is the first to put
+    that string on screen. Deliberately left DIFFERENT from the native OS
+    window title (`main.cpp`'s own `"3D Engine"`, passed to
+    `glfwCreateWindow()` and still what a taskbar/Alt-Tab switcher shows,
+    since hiding the native TITLE BAR via `GLFW_DECORATED=false` does not
+    stop the OS from tracking the window's title string for those other
+    surfaces) -- a real, honest, minor inconsistency left as-is rather than
+    silently renaming `main.cpp`'s own long-standing window title to match a
+    string that, before this phase, only ever existed as a label inside a
+    mockup image: out of scope for what this phase's own brief actually
+    asked for (custom in-window chrome, not a rebrand of this whole
+    project's own external-facing window title).
+  - **Minimize/maximize-restore/close: plain `ImDrawList`-drawn geometry (a
+    line, a rectangle outline, an X), not three more codepoints merged into
+    this project's vendored icon font.** A deliberate departure from Phase
+    17b/17c's own established "add codepoints, re-subset the font" precedent
+    for new icons, and the mockup's own brief explicitly left this call open
+    ("your call, justify it"). The justification: a window-control glyph is
+    one of the smallest, most universally recognized pieces of UI iconography
+    that exists -- real Windows/macOS/GNOME/KDE title bars, and most
+    cross-platform apps that draw their own (VS Code, Windows Terminal,
+    JetBrains IDEs...), all draw these three shapes procedurally rather than
+    shipping them as font glyphs, because three straight lines/a rectangle
+    outline are simpler to draw directly than to hand-subset, vendor, and
+    keep a THIRD generation of `assets/fonts/editor-icons.ttf` synchronized
+    with (re-running Phase 17b's own `pyftsubset` step a third time,
+    regenerating that file again, three more `editor_icons.hpp` constants/
+    `kIconGlyphRanges` entries) for shapes this simple. The maximize/restore
+    button draws whichever of its two glyphs matches `Window::isMaximized()`
+    (a live `glfwGetWindowAttrib(..., GLFW_MAXIMIZED)` read, not a
+    separately-tracked app-side bool that could drift from what the OS
+    actually did) -- a single rectangle outline for "maximize," two
+    overlapping rectangle outlines for "restore," the standard cross-platform
+    convention for that state.
+  - **No red hover on the close button, deliberately.** Many real OS title
+    bars hover their close button red; this phase's three window-control
+    buttons all use Dear ImGui's own plain, un-pushed `Button`/`ButtonHovered`
+    colors instead, close button included. Checked directly, not assumed:
+    this codebase has no "danger"/destructive-action color defined ANYWHERE
+    today -- `renderInspectorPanel()`'s own "Delete Object" button, the one
+    other genuinely destructive action in this whole UI, is a plain,
+    unstyled `ImGui::Button()` too. Inventing a new red accent here, for one
+    button, would be exactly the kind of unscoped one-off visual choice
+    Phase 17a's own "one accent teal, reused everywhere, not an unsystematic
+    pass inventing a slightly different color per widget" discipline already
+    rejected elsewhere in this file -- and this phase's own brief was
+    explicit about reusing the established teal, not inventing new colors.
+  - **Drawn ONLY when the OS's native decorations are OFF -- a real
+    correctness fix, not a hypothetical.** The first working version of this
+    phase drew the custom title bar unconditionally, regardless of the
+    `decorated` flag -- caught during this phase's own review, not by any
+    headless screenshot (Xvfb's own lack of a window manager means
+    `GLFW_DECORATED=true` looks IDENTICAL to `GLFW_DECORATED=false` in every
+    screenshot this environment can produce, since neither ever gets a real
+    native title bar drawn around it here either way -- confirmed directly:
+    the two screenshots described below are pixel-for-pixel indistinguishable
+    from each other in their own chrome). On a REAL desktop with a real
+    window manager, that first version would have drawn this project's custom
+    title bar directly below/alongside a REAL native OS title bar the instant
+    someone used the `ENGINE_WINDOW_DECORATED=1` escape hatch -- a redundant,
+    broken-looking double title bar, defeating the entire point of an escape
+    hatch meant to be a clean revert. Fixed by giving `Window` a new
+    `isDecorated()` accessor (the constructor's own `decorated` argument,
+    remembered verbatim) and threading `!window_.isDecorated()` into
+    `renderDockspaceShell()`'s new `showCustomTitleBar` parameter:
+    `renderTitleBar()` now reserves zero screen space and draws nothing at
+    all when the OS's native decorations are on, so the File menu bar goes
+    back to being the very top row exactly as it was before this phase --
+    confirmed visually (see Verify below), not just by reading the fixed
+    code.
+
+- **Dragging: `glfwSetWindowPos()`-delta-tracking, the portable technique
+  this phase's own brief prescribed.** Clicking and holding on the title
+  bar's own empty area (not on any of the three buttons -- detected via
+  `ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered()`, the IDENTICAL
+  guard Phase 17c's own Viewport double-click fix already established for
+  distinguishing "the empty backdrop" from "an interactive item sitting on
+  top of it") and moving the mouse moves the whole OS window. The actual
+  per-frame math is pulled into a new, pure, GL/GLFW/ImGui-free function --
+  `window_chrome.hpp`'s `applyDragDelta(currentWindowX, currentWindowY,
+  mouseDeltaX, mouseDeltaY)` -- the same "small, standalone decision,
+  unit-tested in isolation" shape `light.hpp`/`asset_drop.hpp`/
+  `camera_capture.hpp`/`editor_icons.hpp` already establish, and the ONE
+  piece of this whole feature that genuinely IS pure input-in/output-out
+  logic with nothing GLFW-specific about it. Takes this frame's raw mouse
+  MOVEMENT DELTA (Dear ImGui's own `io.MouseDelta`), not an absolute
+  screen-space cursor position anchored to when the drag started: GLFW's own
+  `glfwGetCursorPos()` (and Dear ImGui's `io.MousePos`, fed by the identical
+  callback) is window-relative, not global-desktop-relative, so an
+  anchor-based design would need extra queries and extra opportunities for
+  them to observe the window having moved a partial frame apart from each
+  other; a per-frame delta added onto the window's own CURRENT position
+  (re-queried fresh via `glfwGetWindowPos()` every frame, never cached) needs
+  no drag-start anchor to remember at all and self-corrects for anything the
+  OS/window manager does to the window's position on its own between frames
+  (edge-snapping, a multi-monitor drag crossing a DPI boundary) that a
+  once-computed anchor could otherwise silently drift out of sync with. See
+  `window_chrome.hpp`'s own header comment for the full "why not an anchor"
+  reasoning and `window_chrome.cpp`'s own comment on `std::lround()` (not
+  truncation) for why small sub-pixel deltas round symmetrically in both
+  directions rather than silently biasing drags toward "stuck" on their
+  negative-delta frames.
+- **Double-clicking the empty title-bar area toggles maximize/restore** --
+  the standard OS convention, sharing the identical `overEmptyArea` guard
+  drag detection above already computes. `window_chrome.hpp`'s
+  `decideMaximizeRestoreToggle(currentlyMaximized)` (a one-line `!` under the
+  hood, but pulled into its own named, tested function for the same
+  documentation/contract-pinning reason `decideCameraCapture()`'s own
+  simpler branches are each individually asserted in `camera_capture_test`
+  rather than trusted by inspection -- a future edit that accidentally
+  inverted this one line fails a test immediately instead of silently
+  maximizing on a double-click that was supposed to restore) decides which
+  direction; `Window::toggleMaximizeRestore()` is what actually calls
+  `glfwMaximizeWindow()`/`glfwRestoreWindow()`. The maximize/restore BUTTON
+  and the empty-area double-click both funnel into the identical
+  `TitleBarAction::maximizeToggleRequested` flag and the identical
+  `Window::toggleMaximizeRestore()` call on the Application side -- one
+  gesture, one outcome, decided by one function, the same discipline
+  `decideCameraCapture()` (Phase 16) already established for Escape's own
+  two meanings.
+- **Close and Escape-while-uncaptured quit both end `run()`'s main loop, but
+  via two genuinely different mechanisms -- not one shared shutdown path.**
+  `Window::requestClose()` is a one-line wrapper around
+  `glfwSetWindowShouldClose(window_, GLFW_TRUE)` -- the exact same internal
+  GLFW flag `Window::shouldClose()` already reads at the top of
+  `Application::run()`'s own `while (!window_.shouldClose())` loop, and the
+  exact flag GLFW itself has always set automatically the instant a user
+  clicked a NATIVE title-bar close button, back when this window still had
+  one. The custom title bar's own close button is this project's first-ever
+  CODE-driven call to this method. `decideCameraCapture()`'s own
+  Escape-while-uncaptured quit (Phase 16) does NOT go through this same flag
+  at all, though -- checked directly against `run()`'s own source, not
+  assumed: its `quitRequested` result is consumed by a direct `break` out of
+  the loop body, never a call to `requestClose()` or
+  `glfwSetWindowShouldClose()`. So the close button and Escape are two
+  different mechanisms that both happen to exit the same loop -- the close
+  button sets GLFW's should-close flag (the same flag a native close button
+  always set), Escape breaks out of the loop directly -- not one mechanism
+  the new close button merely adds a second caller to.
+- **Rounded outer OS-level window corners: researched, not implemented, and
+  documented as a known gap rather than faked.** This phase's own brief was
+  explicit that genuinely-rounded OS-level corners on a borderless window can
+  be compositor-dependent and, on Windows specifically, may need either
+  nothing at all (Windows 11's DWM auto-rounds a borderless top-level window
+  in a number of configurations with zero app-side work) or an explicit,
+  Windows-specific corner-preference API call (`DwmSetWindowAttribute` with
+  `DWMWA_WINDOW_CORNER_PREFERENCE`) -- genuinely uncompilable/unverifiable
+  code in this Linux-only environment, the identical `_WIN32`-gated situation
+  the native-edge-resize gap above already describes. Rather than guess which
+  of those two stories applies on the project owner's own real Windows build,
+  or write an unverifiable `#ifdef _WIN32` block for it, this phase does
+  neither: no corner-radius call of any kind is made anywhere in this
+  codebase. This is an honest, explicitly-named gap, not an oversight --
+  matching this phase's own README section's very first "real constraint"
+  paragraph above, and this project's own established instinct (Phase 17a's
+  own "no rounding artifact" claims, Phase 16/17a/17c's own popup/tooltip
+  caveats) for saying plainly what was NOT verified/attempted rather than
+  quietly omitting it.
+- **Deliberately NOT done this phase**: native Win32 `WM_NCHITTEST`
+  edge-drag-resize handling and rounded-corner API calls (both covered above
+  -- genuinely uncompilable/unverifiable in this environment, not a corner
+  cut); a settings/preferences UI for window chrome (this is one fixed
+  title-bar design, matching this project's own repeated "no speculative
+  configurability nothing asks for" precedent -- Phase 17a's own theme-picker
+  call, Phase 17c's own configurable-toolbar call, made the identical
+  judgment for the identical reason); renaming `main.cpp`'s own native window
+  title to match the title bar's new "Engine Studio" branding (a real,
+  honest, minor inconsistency, named above, left for a future phase or the
+  project owner's own call, not this phase's own scope).
+
+- **Verify -- adjusted for this phase's real, honest limits, not forced to a
+  rigor level this phase cannot actually support:**
+  1. **`cmake --build build -j"$(nproc)"`, including a forced recompile of
+     every touched file** (`window.cpp`/`window.hpp`, `editor_ui.cpp`/
+     `editor_ui.hpp`, `application.cpp`/`application.hpp`, `main.cpp`,
+     `window_chrome.cpp`/`.hpp`, `window_chrome_test.cpp`, to rule out a
+     stale cached object hiding a warning) produced **zero new warnings**
+     under `-Wall -Wextra`. This is real, fully mechanical, and fully
+     verifiable in this environment -- no caveat needed.
+  2. **A real, genuinely-testable pure function was extracted and
+     exhaustively covered**: `tests/window_chrome_test.cpp` (new) exercises
+     `applyDragDelta()` across whole-pixel deltas (both signs), the exact
+     sub-pixel-rounding regression this function's own comment describes
+     (`std::lround()`, not truncation -- `0.6` rounds to `1`, `-0.6` rounds to
+     `-1`, not `0` either way), the `0.5` halfway-rounding boundary, and a
+     realistic multi-frame drag sequence composing several calls together;
+     plus `decideMaximizeRestoreToggle()` in both directions. `ctest` reports
+     **14/14** (13 pre-existing plus this new target) -- unchanged pass rate,
+     one more real target than before. **Nothing else in this phase's own
+     new code was extractable as pure logic** -- `renderTitleBar()`'s own
+     drag-state machine, button-click detection, and `BeginViewportSideBar()`
+     stacking are all genuinely ImGui-frame-dependent (they read
+     `IsWindowHovered()`/`IsAnyItemHovered()`/`io.MouseDelta`/the current
+     frame's own item rects, none of which exist outside a live ImGui frame),
+     and every new `Window` method (`getWindowPos()`/`setWindowPos()`/
+     `isMaximized()`/`iconifyWindow()`/`toggleMaximizeRestore()`/
+     `requestClose()`) is a thin, one-line GLFW wrapper with no decision of
+     its own to test -- said honestly here, matching Phase 17a's own honest
+     "no meaningful GL-free unit test of its own" admission for
+     `applyEditorTheme()`, rather than inventing a test that would add file
+     count without adding real coverage.
+  3. **`tools/run_headless.sh` (`ENGINE_MAX_FRAMES=60` and, separately,
+     `ENGINE_MAX_FRAMES=5` for quicker screenshot-only runs) confirms the app
+     still launches and renders without crashing, in BOTH configurations this
+     phase adds**: the new borderless default, and
+     `ENGINE_WINDOW_DECORATED=1`. Both logged `Window created (800x600,
+     borderless)` / `Window created (800x600)` respectively (confirming the
+     new hint is actually reaching `Window`'s own constructor, not just
+     assumed from the source), and both logged **zero** `[ERROR]` lines, with
+     the successful `xwd`-based screenshot capture this project's own
+     headless harness has relied on since Phase 0 working unmodified in
+     both. This proves "the app doesn't crash with the new borderless-window
+     code active, in either configuration this phase adds" -- **nothing
+     more**. The two screenshots' own title-bar chrome is, expectedly,
+     pixel-for-pixel indistinguishable in terms of whether a NATIVE OS title
+     bar is present, because Xvfb runs no window manager at all to draw one
+     either way (see this section's own "Headless capture" bullet above) --
+     what the borderless screenshot DOES show, and the decorated one
+     correctly does NOT, is this phase's own custom-drawn title bar row
+     itself (app icon, "Engine Studio" text, minimize/maximize/close glyphs,
+     all rendered legibly, correctly stacked above an intact File menu bar
+     with no overlap), and the decorated screenshot correctly shows the File
+     menu bar restored to the very top row with NO title bar above it at
+     all -- confirming `showCustomTitleBar`'s own gating (see above) actually
+     works, not just that the flag compiles.
+  4. **What this environment CANNOT verify, stated explicitly rather than
+     glossed over**: this headless harness has no real mouse and no real
+     window manager, so NONE of the following were exercised by an actual
+     interactive run, only by code-reading and logical soundness --
+     - Whether clicking and holding the title bar's empty area and moving
+       the mouse actually drags the window smoothly on a real desktop.
+     - Whether double-clicking the empty area actually toggles maximize/
+       restore correctly on a real window manager.
+     - Whether the minimize/maximize/close buttons actually respond to a
+       real mouse click and produce the correct real-world effect
+       (iconified, maximized/restored, window closed) -- this project's own
+       headless harness has never been able to simulate a real ImGui widget
+       click, the identical limitation Phase 17a's own Create-menu/Material
+       "Browse..." popup caveat and Phase 17c's own toolbar-button caveat
+       already recorded for a completely different UI surface; this phase
+       inherits the identical ceiling for a third.
+     - Whether the OS's native edge-drag resize still works at all on a
+       borderless window on the project owner's real Windows target (the
+       known, accepted, explicitly-documented gap above).
+     - Whether the outer window corners actually render rounded on a real
+       desktop (the known, accepted, explicitly-documented gap above; no
+       corner-radius code was written at all, so there is nothing here for a
+       screenshot to even show either way).
+     
+     Final judgment on all five of these genuinely needs the project owner's
+     own hands on a real Windows build -- this section does not claim
+     otherwise anywhere above, and the Verify items that ARE real (1-3) are
+     each scoped precisely to what they actually prove, not stretched to
+     imply more.
+
+With Phase 17d, the full Phase 17 arc (17a-17d) is now complete: the base
+dark/teal theme (17a), the Scene/Assets tree icon font (17b) later extended
+with the Viewport toolbar's own icons (17c), the toolbar row itself (17c),
+and now the borderless window with its own custom title bar (17d) together
+give this engine's editor the complete visual identity the project owner's
+original reference mockup called for -- matching how Phase 15g's own README
+section closed out the Phase 15 arc, each sub-phase closed exactly the gap
+in front of it (17a: palette/rounding only, no chrome; 17b: an icon font
+with no toolbar to spend it on yet; 17c: a toolbar reusing 17a's colors and
+17b's font infrastructure, two of six buttons wired to real state, four
+honestly `BeginDisabled()`'d; 17d: the window chrome every earlier section
+in this arc explicitly deferred to it by name) rather than any one phase
+guessing ahead at scope the engine, or this environment's own ability to
+verify it, wasn't ready for. Unlike every phase before it in this arc (and
+nearly every phase in the entire Phase 15-17 body of work), this one carries
+a real, permanent, honestly-documented verification ceiling -- headless
+Xvfb has no window manager to drag/resize/minimize/maximize a window
+through, and this project's own Linux environment cannot compile a single
+line of the Windows-specific code a complete version of this feature would
+eventually need -- so the true final word on how well this phase's own
+custom chrome actually works is, more than any other phase in this project's
+history, the project owner's own hands on their own real Windows build, not
+a screenshot this README can point to.
 
 ## Libraries used and why
 

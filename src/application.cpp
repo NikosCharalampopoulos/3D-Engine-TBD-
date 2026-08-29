@@ -1591,8 +1591,9 @@ constexpr std::uint64_t kDebugSimulateEscapeHoldFrames = 5;
 
 }  // namespace
 
-Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames, bool maximized)
-    : window_(width, height, title, maximized),
+Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames, bool maximized,
+                          bool decorated)
+    : window_(width, height, title, maximized, decorated),
       shader_(resources_.getShader(kVertexShaderPath, kFragmentShaderPath)),
       shadowShader_(resources_.getShader(kShadowVertexShaderPath, kShadowFragmentShaderPath)),
       skyboxShader_(resources_.getShader(kSkyboxVertexShaderPath, kSkyboxFragmentShaderPath)),
@@ -3478,12 +3479,57 @@ void Application::render() {
     // straight through rather than routed via an out-parameter-plus-later-
     // handling pair the way saveSceneRequested/textureAssignRequested above
     // are.
+    // Phase 17d: `showCustomTitleBar`/`windowMaximized`/`windowPos` are
+    // read-only snapshots of window_'s own live state, queried fresh this
+    // same frame -- the identical "EditorUI only ever DISPLAYS state it
+    // doesn't own" shape `cameraCaptured`/`activeDirectionalLight` above
+    // already use. `showCustomTitleBar` is `!window_.isDecorated()` -- see
+    // that accessor's own window.hpp comment for why the custom title bar
+    // must NOT draw at all when the OS's own native one is already on (the
+    // ENGINE_WINDOW_DECORATED=1 escape hatch), rather than drawing a
+    // redundant second one alongside it. `titleBarAction` is EditorUI's own
+    // new out-parameter for the custom title bar (see TitleBarAction's own
+    // editor_ui.hpp comment); handled just below, the same "call
+    // renderDockspaceShell(), then act on whatever it reported" shape
+    // createRequest/saveSceneRequested/etc. already establish.
+    TitleBarAction titleBarAction;
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr,
         activeDirectionalLight_, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
-        cameraCaptureRequested, ssaoDisabled_, ssaoDebugMode_);
+        cameraCaptureRequested, ssaoDisabled_, ssaoDebugMode_, !window_.isDecorated(), window_.isMaximized(),
+        window_.getWindowPos(), titleBarAction);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
+    }
+    // Phase 17d: the custom title bar's own four real effects -- see
+    // TitleBarAction's own editor_ui.hpp comment for exactly when each field
+    // is set. `closeRequested` reuses window_.requestClose(), which sets
+    // GLFW's own should-close flag (glfwSetWindowShouldClose(), read back by
+    // run()'s own `while (!window_.shouldClose())` loop condition) -- the
+    // SAME flag the OS's own native close button, before this phase, already
+    // set automatically. This is a DIFFERENT mechanism from this engine's
+    // pre-existing Escape-while-uncaptured quit (decideCameraCapture(), Phase
+    // 16): Escape never touches this flag at all -- it does a direct `break`
+    // out of run()'s own loop body instead (see that call site's own
+    // comment). Close and Escape both end up exiting the same loop, just via
+    // two different routes, not one shared path. `requestedWindowPos` is
+    // applied unconditionally when
+    // present (no further validation needed here -- window_chrome.hpp's own
+    // applyDragDelta() already guarantees a well-formed {x, y} pair, and
+    // glfwSetWindowPos() itself has no failure mode this engine needs to
+    // check for, the same "thin wrapper, no decision-making" contract
+    // Window's own setCursorCaptured() already documents).
+    if (titleBarAction.minimizeRequested) {
+        window_.iconifyWindow();
+    }
+    if (titleBarAction.maximizeToggleRequested) {
+        window_.toggleMaximizeRestore();
+    }
+    if (titleBarAction.closeRequested) {
+        window_.requestClose();
+    }
+    if (titleBarAction.requestedWindowPos.has_value()) {
+        window_.setWindowPos(titleBarAction.requestedWindowPos->first, titleBarAction.requestedWindowPos->second);
     }
     // Phase 16: see cameraCaptureRequestPending_'s own application.hpp
     // comment for why this is stored, not acted on immediately -- a plain

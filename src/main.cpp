@@ -139,13 +139,54 @@ bool windowMaximizedFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 17d: this project's new default is a BORDERLESS window with a
+// custom-drawn title bar (editor_ui.cpp's own renderTitleBar(), README.md's
+// own Phase 17d section) replacing the OS's native one entirely, matching
+// the project owner's reference mockup -- unlike every other
+// ENGINE_WINDOW_* flag above/below, whose ABSENCE means "use the old/
+// pre-existing behavior," ENGINE_WINDOW_DECORATED's absence means "use the
+// new default" (borderless), and setting it is the escape hatch BACK to the
+// old, OS-decorated behavior. This asymmetry is deliberate, not an
+// inconsistency: this class-level default lives in Window itself (see
+// window.hpp's own Phase 17d comment, `decorated = true`, the class's
+// opinion-free/native-GLFW-behavior default) precisely so nothing about
+// Window's OWN default silently changes; only THIS call site's own chosen
+// value -- kDefaultWindowDecorated below -- actually flips the real
+// interactive-run default to borderless, mirroring exactly how
+// kDefaultWindowWidth/Height above already override Window's own unrelated
+// Phase-1-era default width/height without Window itself ever needing to
+// know this project settled on 1600x900.
+//
+// A real escape hatch, not just a headless-verification convenience (unlike
+// e.g. ENGINE_WINDOW_WIDTH/HEIGHT's own headless-only motivation, see that
+// pair's own comment above): this phase's own brief is explicit that native
+// OS edge-drag-to-resize is a known, real limitation of a borderless GLFW
+// window on at least some platforms/window managers (see window.hpp's own
+// Phase 17d comment and README.md's own Phase 17d section for the full
+// accounting) -- a real user who hits exactly that on their own desktop can
+// set this env var to get the OS's native title bar/border (and its native
+// resize handles) back without needing a source change or a rebuild.
+constexpr bool kDefaultWindowDecorated = false;
+
+bool windowDecoratedFromEnv() {
+    const char* value = std::getenv("ENGINE_WINDOW_DECORATED");
+    if (!value || *value == '\0') {
+        return kDefaultWindowDecorated;
+    }
+    // Same "present but not \"0\"" truthiness convention windowMaximizedFromEnv()
+    // above already uses -- ENGINE_WINDOW_DECORATED=1 (or any other non-"0"
+    // value) forces the OS's native decorations back on.
+    return std::string(value) != "0";
+}
+
 }  // namespace
 
 int main() {
     try {
         const int width = windowDimensionFromEnv("ENGINE_WINDOW_WIDTH", kDefaultWindowWidth);
         const int height = windowDimensionFromEnv("ENGINE_WINDOW_HEIGHT", kDefaultWindowHeight);
-        engine::Application app(width, height, "3D Engine", maxFramesFromEnv(), windowMaximizedFromEnv());
+        engine::Application app(width, height, "3D Engine", maxFramesFromEnv(), windowMaximizedFromEnv(),
+                                  windowDecoratedFromEnv());
         app.run();
     } catch (const std::exception& e) {
         LOG_ERROR(std::string("Fatal: ") + e.what());

@@ -263,3 +263,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME editor_icons_test COMMAND editor_icons_test)
+
+# Phase 17d adds window_chrome_test, testing engine::applyDragDelta()/
+# decideMaximizeRestoreToggle() (src/window_chrome.cpp) in isolation -- same
+# "plain executable, links only the pure logic file it's testing" shape as
+# camera_capture_test/editor_icons_test above. window_chrome.cpp depends on
+# nothing beyond <cmath> (no ecs.hpp, no GLM, no GLFW/GL/ImGui at all), so
+# this needs no live GL context/GPU/Dear ImGui frame/real GLFW window
+# whatsoever.
+add_executable(window_chrome_test
+    window_chrome_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/window_chrome.cpp
+)
+target_include_directories(window_chrome_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(window_chrome_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME window_chrome_test COMMAND window_chrome_test)

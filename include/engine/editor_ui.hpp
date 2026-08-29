@@ -265,9 +265,37 @@
 // rather than the whole window, given ImGui's own dockspace layout, is to
 // let ImGui itself answer "is the mouse over which panel," which only a
 // call made from inside that panel's own Begin/End block can do.
+//
+// Phase 17d: the fourth and last item in the "Phase 17: visual design" arc
+// (17a base theme, 17b icon font, 17c toolbar -- each named this class's own
+// custom window chrome as explicitly out of scope; see e.g. 17a's own
+// README section: "any custom window chrome/borderless rounded OUTER window
+// border (Phase 17d -- real platform-level borderless-window work, much
+// bigger scope...)"). This class gains a fourth always-drawn row -- a
+// custom-drawn title bar (renderTitleBar(), private, editor_ui.cpp) stacked
+// ABOVE the Phase 15e File menu bar via the identical
+// ImGui::BeginViewportSideBar()-based reservation mechanism
+// ImGui::BeginMainMenuBar() itself already uses internally (imgui_widgets.cpp)
+// -- app icon/name on the left, minimize/maximize-restore/close buttons on
+// the right, replacing the OS's own native title bar the Window class now
+// optionally omits entirely (window.hpp's own Phase 17d `decorated`
+// parameter). EditorUI itself still performs no window-level GLFW call of
+// its own here (window.hpp's Window class owns every real
+// glfwSetWindowPos()/glfwIconifyWindow()/etc. call) -- the identical "EditorUI
+// reports intent via an out-parameter, Application acts on it" shape this
+// whole class already follows for createRequest/saveSceneRequested/
+// cameraCaptureRequested/etc. above, just applied to window-chrome intent
+// instead of scene/asset intent. See TitleBarAction's own comment below for
+// exactly what gets reported, and README.md's own Phase 17d section for the
+// full design plus this phase's own real, honest verification ceiling (no
+// real window manager runs in this project's own headless Xvfb dev/CI
+// target, so dragging/minimizing/maximizing/closing via this new UI could
+// only be verified by code-reading/logical-soundness, not by an actual
+// interactive headless run -- see that section for the full accounting).
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "engine/asset_browser.hpp"
@@ -338,6 +366,39 @@ struct SelectionOutline {
     float ndcMinY = 0.0f;
     float ndcMaxX = 0.0f;
     float ndcMaxY = 0.0f;
+};
+
+// Phase 17d: this frame's outcome from the custom title bar (renderTitleBar(),
+// editor_ui.cpp) -- unconditionally reset to its all-false/nullopt default at
+// the top of every renderDockspaceShell() call, the identical "false/empty
+// every frame except the one where the real thing actually happened" shape
+// saveSceneRequested/textureAssignRequested/assetDropRequested/
+// cameraCaptureRequested already establish (see this class's own Phase 15e/
+// 15f/15g/16 header comments above). Application::render() is what actually
+// calls Window's own setWindowPos()/iconifyWindow()/toggleMaximizeRestore()/
+// requestClose() when the corresponding field comes back true/non-nullopt,
+// immediately after renderDockspaceShell() returns -- EditorUI performs no
+// window-level GLFW call of its own (see this file's own Phase 17d header
+// comment above).
+struct TitleBarAction {
+    // Set true the one frame the minimize button was clicked.
+    bool minimizeRequested = false;
+    // Set true the one frame the maximize/restore button was clicked OR the
+    // empty (non-button) title-bar area was double-clicked -- both gestures
+    // mean the identical thing (window_chrome.hpp's own
+    // decideMaximizeRestoreToggle()), so both funnel into this one flag
+    // rather than two separately-named ones Application would otherwise have
+    // to treat identically anyway.
+    bool maximizeToggleRequested = false;
+    // Set true the one frame the close button was clicked.
+    bool closeRequested = false;
+    // Set (to the new {x, y} screen position window_chrome.hpp's own
+    // applyDragDelta() computed) on every frame a title-bar drag is actively
+    // in progress AND this frame's raw mouse-movement delta (Dear ImGui's own
+    // io.MouseDelta) is nonzero -- std::nullopt otherwise (no drag in
+    // progress, or a drag in progress with the mouse perfectly still this
+    // particular frame).
+    std::optional<std::pair<int, int>> requestedWindowPos;
 };
 
 class EditorUI {
@@ -532,12 +593,38 @@ public:
     // toolbar's six buttons have a real flag to bind to at all; the other
     // four (grid/undo/play/pause) are shown but BeginDisabled()'d, needing
     // no Application state to read/write in the first place.
+    // Phase 17d: four more trailing parameters, for the new custom title bar
+    // (renderTitleBar(), private, editor_ui.cpp). `showCustomTitleBar`:
+    // Window::isDecorated() negated -- false when the OS's own native
+    // decorations are on (the ENGINE_WINDOW_DECORATED=1 escape hatch,
+    // main.cpp), in which case renderTitleBar() draws nothing at all rather
+    // than a redundant second title bar on top of the OS's real one (see
+    // that method's own comment above). `windowMaximized`: a read-only
+    // snapshot of Window::isMaximized(), the identical shape
+    // `cameraCaptured`/`activeDirectionalLight` above already use for state
+    // EditorUI only ever DISPLAYS, never assigns -- lets the title bar's
+    // maximize/restore button draw the correct one of its two glyphs.
+    // `windowPos`: a read-only snapshot of Window::getWindowPos() (the
+    // window's own on-screen position AS OF THE START of this call), the one
+    // piece of Window's own live state a title-bar drag this frame needs as
+    // its "current position" input to window_chrome.hpp's own
+    // applyDragDelta() -- EditorUI still owns no GLFWwindow* of its own to
+    // query this from directly (see this file's own Phase 17d header
+    // comment), so, like `windowMaximized`, Application passes in what it
+    // already read from window_ this same frame. `titleBarAction`: the one
+    // out-parameter carrying every real effect a click/drag/double-click on
+    // the new title bar can have this frame -- see TitleBarAction's own
+    // comment above for exactly what each field means and why they're
+    // bundled into one struct rather than four more separate parameters
+    // appended to an already-long signature.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
                                            std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
                                            std::optional<std::string>& textureAssignRequested,
                                            std::optional<std::string>& assetDropRequested, bool cameraCaptured,
-                                           bool& cameraCaptureRequested, bool& ssaoDisabled, bool& ssaoDebugMode);
+                                           bool& cameraCaptureRequested, bool& ssaoDisabled, bool& ssaoDebugMode,
+                                           bool showCustomTitleBar, bool windowMaximized,
+                                           std::pair<int, int> windowPos, TitleBarAction& titleBarAction);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()
@@ -572,7 +659,41 @@ public:
 private:
     void buildInitialLayout(ImGuiID dockspaceId);
 
+    // Phase 17d: the custom title bar row -- see this file's own Phase 17d
+    // header comment and TitleBarAction's own comment for the full design.
+    // A private member function (like buildInitialLayout() above), not a
+    // free function in editor_ui.cpp's own anonymous namespace the way
+    // renderViewportToolbar()/toolbarIconButton() are: unlike that toolbar
+    // row, this one needs access to this class's OWN persistent
+    // frame-to-frame state (titleBarDragging_ below) to know whether a drag
+    // is still in progress, the same reason buildInitialLayout() itself is a
+    // member function rather than a free one (it needs layoutBuilt_).
+    //
+    // `showCustomTitleBar` (Window::isDecorated() negated, read by
+    // Application::render() -- see that accessor's own window.hpp comment):
+    // when false (the OS's native decorations are ON, the
+    // ENGINE_WINDOW_DECORATED=1 escape hatch, main.cpp), this method reserves
+    // NO screen space and draws nothing at all -- the OS already has its own
+    // real title bar/min/max/close in that case, so drawing this project's
+    // custom one on top would be a redundant, broken-looking second one, not
+    // a graceful fallback. The File menu bar becomes the very top row again
+    // in that case, exactly this project's pre-Phase-17d layout.
+    void renderTitleBar(bool showCustomTitleBar, bool windowMaximized, std::pair<int, int> windowPos,
+                         TitleBarAction& action);
+
     bool layoutBuilt_ = false;
+    // Phase 17d: true from the frame a title-bar drag starts (a left-click on
+    // the title bar's own empty, non-button area -- see renderTitleBar()'s
+    // own .cpp comment) until the frame the mouse button is released. Has to
+    // be persistent, cross-frame state (not re-derived fresh every call the
+    // way `overEmptyArea`/`clicked` are) because a real drag routinely
+    // continues for many frames after its own starting one, during which the
+    // cursor is not guaranteed to stay hovering the title bar's own
+    // Begin()/End() window rect at all (a fast drag can easily out-run the
+    // window being repositioned under it for a frame or two) -- so "is a drag
+    // currently active" cannot be re-derived from this frame's own hover
+    // state alone the way toolbarIconButton()'s click detection can.
+    bool titleBarDragging_ = false;
     // Phase 14c: see viewportWidth()/viewportHeight() above. 0 until
     // renderDockspaceShell() has run at least once -- Application's own
     // constructor seeds its mirror of these (viewportWidth_/viewportHeight_,

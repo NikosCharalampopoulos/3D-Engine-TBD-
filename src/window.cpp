@@ -9,6 +9,7 @@
 
 #include "engine/gl_debug.hpp"
 #include "engine/log.hpp"
+#include "engine/window_chrome.hpp"
 
 namespace {
 
@@ -56,8 +57,8 @@ void framebufferSizeCallback(GLFWwindow*, int width, int height) {
 
 namespace engine {
 
-Window::Window(int width, int height, const std::string& title, bool maximized)
-    : width_(width), height_(height) {
+Window::Window(int width, int height, const std::string& title, bool maximized, bool decorated)
+    : width_(width), height_(height), decorated_(decorated) {
     glfwSetErrorCallback(glfwErrorCallback);
 
     if (!glfwInit()) {
@@ -121,6 +122,15 @@ Window::Window(int width, int height, const std::string& title, bool maximized)
     // false) is GLFW's own out-of-the-box behavior, so this hint is a no-op
     // for every pre-Phase-14a caller.
     glfwWindowHint(GLFW_MAXIMIZED, maximized ? GLFW_TRUE : GLFW_FALSE);
+    // Phase 17d: see this class's own Phase 17d header comment on the
+    // `decorated` parameter for the full "why" (a custom-drawn title bar
+    // replacing the OS's native one, and the real, accepted native-resize
+    // tradeoff that comes with it). GLFW_TRUE (the default when `decorated`
+    // is true) is GLFW's own out-of-the-box behavior, so this hint is a no-op
+    // for every pre-Phase-17d caller -- the identical "new hint defaults to
+    // the old behavior" shape the GLFW_MAXIMIZED hint immediately above
+    // already has.
+    glfwWindowHint(GLFW_DECORATED, decorated ? GLFW_TRUE : GLFW_FALSE);
 #if defined(__linux__)
     // On this project's Linux/X11 target, request EGL for context creation
     // instead of GLFW's GLX default. This was verified necessary, not
@@ -197,7 +207,7 @@ Window::Window(int width, int height, const std::string& title, bool maximized)
     glfwSetFramebufferSizeCallback(window_, framebufferSizeCallback);
 
     LOG_INFO("Window created (" + std::to_string(width_) + "x" + std::to_string(height_) +
-              (maximized ? ", maximized" : "") + ")");
+              (maximized ? ", maximized" : "") + (decorated ? "" : ", borderless") + ")");
 }
 
 Window::~Window() {
@@ -255,6 +265,44 @@ void Window::setCursorCaptured(bool captured) {
     // ENGINE_DEBUG_FORCE_CAMERA_CAPTURE run that exercises this exact call
     // path with no real pointer device attached at all.
     glfwSetInputMode(window_, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+}
+
+std::pair<int, int> Window::getWindowPos() const {
+    int x = 0;
+    int y = 0;
+    glfwGetWindowPos(window_, &x, &y);
+    return {x, y};
+}
+
+void Window::setWindowPos(int x, int y) {
+    glfwSetWindowPos(window_, x, y);
+}
+
+bool Window::isMaximized() const {
+    return glfwGetWindowAttrib(window_, GLFW_MAXIMIZED) != 0;
+}
+
+void Window::iconifyWindow() {
+    glfwIconifyWindow(window_);
+}
+
+void Window::toggleMaximizeRestore() {
+    // Fed this call's own fresh isMaximized() read (see this method's own
+    // window.hpp comment for why that -- not a cached copy -- is the correct
+    // input) into window_chrome.hpp's pure decideMaximizeRestoreToggle(),
+    // which just answers "should the window end up maximized, or restored" --
+    // the GLFW calls that actually make it so are this method's own job, not
+    // that pure function's (see window_chrome.hpp's own header comment for
+    // why the two are split this way).
+    if (decideMaximizeRestoreToggle(isMaximized())) {
+        glfwMaximizeWindow(window_);
+    } else {
+        glfwRestoreWindow(window_);
+    }
+}
+
+void Window::requestClose() {
+    glfwSetWindowShouldClose(window_, GLFW_TRUE);
 }
 
 }  // namespace engine

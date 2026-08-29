@@ -37,6 +37,7 @@
 #include "engine/texture.hpp"
 #include "engine/transform.hpp"
 #include "engine/transform_hierarchy.hpp"
+#include "engine/window_chrome.hpp"
 
 namespace engine {
 
@@ -1343,6 +1344,90 @@ void renderViewportToolbar(bool& ssaoDisabled, bool& ssaoDebugMode) {
     ImGui::Separator();
 }
 
+// Phase 17d: the custom title bar's own three window-control buttons
+// (minimize/maximize-or-restore/close) draw plain geometric glyphs -- a
+// line, a rectangle outline (or two overlapping ones for "restore"), and an
+// X -- via ImDrawList primitives, rather than merging three more codepoints
+// into this project's vendored icon font the way Phase 17b/17c's own tree-
+// row/toolbar icons do. Deliberately NOT following that precedent this one
+// time: a window-control glyph is one of the smallest, most universally
+// recognized pieces of UI iconography that exists -- real Windows/macOS/
+// GNOME/KDE title bars, and most cross-platform apps that draw their own
+// (VS Code, Windows Terminal, JetBrains IDEs...), all draw these three
+// shapes procedurally rather than shipping them as font glyphs, because
+// three straight lines/a rectangle outline are simpler to draw directly than
+// to hand-subset, vendor, and keep a THIRD generation of this project's own
+// icon-font atlas synchronized with (re-running Phase 17b's own pyftsubset
+// step a third time, regenerating assets/fonts/editor-icons.ttf again, three
+// more editor_icons.hpp constants/kIconGlyphRanges entries) for shapes this
+// simple. Sized/positioned relative to each button's own item rect
+// (GetItemRectMin()/Max(), below) rather than a fixed pixel size, so they
+// scale correctly if this project's UI font size ever changes -- the same
+// "no hardcoded pixel literal that could drift out of sync with the rest of
+// the UI" instinct editor_icons.hpp's own SizePixels=0.0f comment (Phase
+// 17b) already established for the font-based icons.
+void drawMinimizeGlyph(ImDrawList* drawList, ImVec2 rectMin, ImVec2 rectMax, ImU32 color) {
+    const float centerY = (rectMin.y + rectMax.y) * 0.5f;
+    const float pad = (rectMax.x - rectMin.x) * 0.28f;
+    drawList->AddLine(ImVec2(rectMin.x + pad, centerY), ImVec2(rectMax.x - pad, centerY), color, 1.5f);
+}
+
+void drawMaximizeGlyph(ImDrawList* drawList, ImVec2 rectMin, ImVec2 rectMax, ImU32 color) {
+    const float pad = (rectMax.x - rectMin.x) * 0.28f;
+    drawList->AddRect(ImVec2(rectMin.x + pad, rectMin.y + pad), ImVec2(rectMax.x - pad, rectMax.y - pad), color, 0.0f,
+                       0, 1.5f);
+}
+
+// Two overlapping rectangle outlines -- the standard cross-platform
+// "restore" convention (a smaller square offset toward one corner of a
+// larger one). Deliberately just two plain outlines, not an attempt to
+// "punch a hole" where they overlap the way a real vector icon would --
+// that would need filling the overlap with whatever this button's own
+// current background color happens to be (which changes with hover/press
+// state), a fragile thing to keep in sync versus two outlines that read
+// clearly as "restore" on their own regardless of what's underneath.
+void drawRestoreGlyph(ImDrawList* drawList, ImVec2 rectMin, ImVec2 rectMax, ImU32 color) {
+    const float pad = (rectMax.x - rectMin.x) * 0.32f;
+    const float offset = (rectMax.x - rectMin.x) * 0.16f;
+    drawList->AddRect(ImVec2(rectMin.x + pad + offset, rectMin.y + pad),
+                       ImVec2(rectMax.x - pad + offset, rectMax.y - pad - offset), color, 0.0f, 0, 1.3f);
+    drawList->AddRect(ImVec2(rectMin.x + pad - offset, rectMin.y + pad + offset),
+                       ImVec2(rectMax.x - pad - offset, rectMax.y - pad), color, 0.0f, 0, 1.3f);
+}
+
+void drawCloseGlyph(ImDrawList* drawList, ImVec2 rectMin, ImVec2 rectMax, ImU32 color) {
+    const float pad = (rectMax.x - rectMin.x) * 0.30f;
+    drawList->AddLine(ImVec2(rectMin.x + pad, rectMin.y + pad), ImVec2(rectMax.x - pad, rectMax.y - pad), color,
+                       1.5f);
+    drawList->AddLine(ImVec2(rectMin.x + pad, rectMax.y - pad), ImVec2(rectMax.x - pad, rectMin.y + pad), color,
+                       1.5f);
+}
+
+// A square, otherwise-unlabeled ImGui::Button() -- the real interactive item
+// each window-control button is built from (a real ImGui item with an ID, so
+// IsAnyItemHovered() correctly excludes it from the title bar's own "empty
+// area" drag/double-click detection below -- the identical guard Phase 17c's
+// own Viewport double-click fix already established for the toolbar row's
+// buttons, see this file's own Phase 17c comment on renderDockspaceShell()).
+// Left un-styled (no PushStyleColor()) deliberately -- Dear ImGui's own stock
+// Button/ButtonHovered/ButtonActive colors already give ordinary hover/press
+// feedback for free; unlike toolbarIconButton()'s teal "this toggle is ON"
+// state, a title-bar window-control button has no such persistent on/off
+// state to indicate, so there is nothing here that calls for reusing (or,
+// worse, inventing a new) accent color the way that helper does. In
+// particular, the close button deliberately does NOT hover-highlight red the
+// way many real OS title bars do -- this codebase has no "danger" color
+// defined anywhere (confirmed: renderInspectorPanel()'s own "Delete Object"
+// button, the one other genuinely destructive action in this whole UI, is a
+// plain, unstyled ImGui::Button() too -- see that function's own comment),
+// so inventing one here, for one button, would be exactly the kind of
+// unscoped one-off visual choice Phase 17a's own "one accent teal, reused
+// everywhere, not an unsystematic pass inventing a slightly different color
+// per widget" discipline already rejected elsewhere in this file.
+bool titleBarControlButton(const char* strId, float size) {
+    return ImGui::Button(strId, ImVec2(size, size));
+}
+
 }  // namespace
 
 EditorUI::EditorUI(GLFWwindow* window) {
@@ -1555,6 +1640,199 @@ void EditorUI::buildInitialLayout(ImGuiID dockspaceId) {
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
+// Phase 17d: the custom title bar row -- see this class's own header-comment
+// Phase 17d paragraph and TitleBarAction's own comment (editor_ui.hpp) for
+// the full design. Reserves its own strip of screen space at the TOP of the
+// main viewport via ImGui::BeginViewportSideBar(ImGuiDir_Up, ...) -- the
+// exact same internal mechanism ImGui::BeginMainMenuBar() itself uses
+// (imgui_widgets.cpp: `BeginViewportSideBar("##MainMenuBar", viewport,
+// ImGuiDir_Up, height, window_flags)`) -- called from renderDockspaceShell()
+// BEFORE that method's own ImGui::BeginMainMenuBar() call, so the two
+// reservations correctly ADD rather than overlap (BeginViewportSideBar()'s
+// own implementation accumulates each call's height into the viewport's
+// shared BuildWorkInsetMin, imgui_widgets.cpp) -- the File menu bar ends up
+// docked directly beneath this new title bar, and DockSpaceOverViewport()
+// (called after both) sizes the four docked panels into whatever work-rect
+// space remains under both, exactly the same "reserve space first, dockspace
+// reads the shrunk work rect second" relationship the File menu bar already
+// had with the dockspace before this phase -- confirmed by inspection of
+// BeginViewportSideBar()'s own source (this project's vendored
+// build/_deps/imgui-src/imgui_widgets.cpp), not merely assumed, since this
+// headless environment cannot itself distinguish "two bars stacked
+// correctly" from "one bar drawn over the other" in a screenshot as
+// unambiguously as a human eye could (see README.md's own Phase 17d section
+// for the full verification-ceiling accounting).
+void EditorUI::renderTitleBar(bool showCustomTitleBar, bool windowMaximized, std::pair<int, int> windowPos,
+                               TitleBarAction& action) {
+    // See this method's own editor_ui.hpp comment for why NOT drawing
+    // anything at all (not even reserving screen space) is correct here,
+    // rather than e.g. drawing the row but disabling its buttons the way
+    // Phase 17c's own grid/undo/play/pause buttons stay visible-but-inert:
+    // those four are genuinely missing FEATURES this engine could still grow
+    // into later; a native-decorated window is not "missing" a custom title
+    // bar, it already has a real, working one the OS itself drew -- there is
+    // nothing this method could show here that wouldn't just be a confusing,
+    // redundant duplicate sitting directly below/inside the real one.
+    if (!showCustomTitleBar) {
+        return;
+    }
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    // Taller than the plain File-menu-bar row below it (GetFrameHeight()
+    // alone, what BeginMainMenuBar() itself uses) -- this row needs to fit
+    // the app icon/name comfortably, matching the reference mockup's own
+    // visibly taller top strip. A multiplier of GetFrameHeight(), not a fixed
+    // pixel literal, so it scales in lockstep with the base UI font size the
+    // same way drawMinimizeGlyph()/etc.'s own relative sizing above already
+    // does.
+    const float height = ImGui::GetFrameHeight() * 1.6f;
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;
+    if (!ImGui::BeginViewportSideBar("##TitleBar", viewport, ImGuiDir_Up, height, flags)) {
+        ImGui::End();
+        return;
+    }
+
+    // --- Left: app icon + name --------------------------------------------
+    // This project ships no dedicated app-icon image asset anywhere (no
+    // .ico/.png app icon exists in assets/ today) -- a small filled, rounded
+    // square standing in for one, the same "geometry, not a vendored image/
+    // font glyph" choice this file's own drawMinimizeGlyph()/etc. above
+    // already make for the window-control buttons, for the identical reason
+    // (simpler than sourcing/vendoring a real icon asset for one small
+    // swatch). Colored via the SAME live-read accent teal
+    // toolbarIconButton() already reads (ImGuiCol_ButtonActive) -- reusing
+    // the one established accent rather than a second hardcoded literal,
+    // matching applyEditorTheme()'s own "one accent teal, reused everywhere"
+    // discipline (Phase 17a).
+    const float iconSize = 18.0f;
+    const ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();
+    const ImVec2 iconMin(cursorScreenPos.x + 12.0f, cursorScreenPos.y + (height - iconSize) * 0.5f);
+    const ImVec2 iconMax(iconMin.x + iconSize, iconMin.y + iconSize);
+    ImGui::GetWindowDrawList()->AddRectFilled(iconMin, iconMax, ImGui::GetColorU32(ImGuiCol_ButtonActive), 4.0f);
+    ImGui::SetCursorPosX(12.0f + iconSize + 8.0f);
+    ImGui::SetCursorPosY((height - ImGui::GetFontSize()) * 0.5f);
+    // "Engine Studio" -- this project's reference mockup's own name for
+    // itself (README.md's own Phase 17a section already refers to it by this
+    // name descriptively: "a target 'Engine Studio' editor look"), reused
+    // verbatim here as the one place this project actually RENDERS that name
+    // in its own UI. Deliberately NOT the same string as the native OS
+    // window title (main.cpp's own "3D Engine", passed to glfwCreateWindow()
+    // -- still what a taskbar/Alt-Tab switcher shows, since hiding the
+    // native TITLE BAR via GLFW_DECORATED=false does not stop the OS from
+    // tracking the window's title string for those other surfaces) -- a
+    // real, honest, minor inconsistency this phase leaves as-is rather than
+    // silently renaming main.cpp's own long-standing window title to match a
+    // string that only ever existed as a mockup's own on-image label before
+    // this phase, out of scope for what this phase's own brief actually
+    // asked for (custom in-window chrome, not a rebrand of this whole
+    // project's own external-facing window title).
+    ImGui::TextUnformatted("Engine Studio");
+
+    // --- Right: minimize / maximize-restore / close ------------------------
+    const float buttonSize = height;
+    const float buttonsWidth = buttonSize * 3.0f;
+    ImGui::SameLine(ImGui::GetWindowWidth() - buttonsWidth);
+    ImGui::SetCursorPosY(0.0f);
+
+    const ImU32 glyphColor = ImGui::GetColorU32(ImGuiCol_Text);
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+    if (titleBarControlButton("##titlebar_minimize", buttonSize)) {
+        action.minimizeRequested = true;
+    }
+    drawMinimizeGlyph(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), glyphColor);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Minimize");
+    }
+
+    ImGui::SameLine();
+    if (titleBarControlButton("##titlebar_maximize_restore", buttonSize)) {
+        action.maximizeToggleRequested = true;
+    }
+    if (windowMaximized) {
+        drawRestoreGlyph(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), glyphColor);
+    } else {
+        drawMaximizeGlyph(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), glyphColor);
+    }
+    if (ImGui::IsItemHovered()) {
+        // "%s", not the ternary's raw `const char*` passed directly as
+        // `fmt` -- the same non-literal-format-string guard
+        // toolbarIconButton()'s own SetTooltip() call above already follows,
+        // for the identical reason (a computed, not compile-time-constant,
+        // format string).
+        ImGui::SetTooltip("%s", windowMaximized ? "Restore" : "Maximize");
+    }
+
+    ImGui::SameLine();
+    if (titleBarControlButton("##titlebar_close", buttonSize)) {
+        action.closeRequested = true;
+    }
+    drawCloseGlyph(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), glyphColor);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Close");
+    }
+
+    // --- Drag-to-move + double-click-to-maximize on the empty backdrop ----
+    // `overEmptyArea`: hovering this title-bar window but NOT hovering any
+    // of the three buttons above -- the identical
+    // `ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered()` guard Phase
+    // 17c's own Viewport double-click fix already established for
+    // distinguishing "the empty backdrop" from "an interactive item sitting
+    // on top of it" (see this file's own Phase 17c comment on
+    // renderDockspaceShell(), at the Viewport panel's double-click check).
+    const bool overEmptyArea = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered();
+
+    if (titleBarDragging_) {
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            titleBarDragging_ = false;
+        } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            // See window_chrome.hpp's own header comment for exactly why
+            // this frame's raw io.MouseDelta (not a remembered drag-start
+            // anchor) is the correct input here, and why `windowPos` is
+            // re-queried by Application fresh every frame rather than
+            // tracked locally. Only actually requests a move when the mouse
+            // moved at all this frame -- an idle held-down click reports
+            // std::nullopt, so Application never issues a redundant
+            // glfwSetWindowPos() call to the position the window is already
+            // at.
+            const ImVec2 delta = ImGui::GetIO().MouseDelta;
+            if (delta.x != 0.0f || delta.y != 0.0f) {
+                const WindowPosition newPos = applyDragDelta(windowPos.first, windowPos.second, delta.x, delta.y);
+                action.requestedWindowPos = std::make_pair(newPos.x, newPos.y);
+            }
+        } else {
+            // Defensive: the button is no longer down but no
+            // IsMouseReleased() edge was observed this frame either (e.g.
+            // this window lost input focus mid-drag). Ends the drag rather
+            // than leaving titleBarDragging_ stuck true forever, the same
+            // "don't trust an edge you might have missed, fall back to the
+            // level-triggered truth" instinct this codebase's own Phase 16
+            // Escape/capture bug-fix comment already established for a
+            // different missed-edge hazard.
+            titleBarDragging_ = false;
+        }
+    } else if (overEmptyArea && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        titleBarDragging_ = true;
+    }
+
+    // A double-click's first press also satisfies the IsMouseClicked() check
+    // just above (Dear ImGui's own documented behavior: "note that a
+    // double-click will also report IsMouseClicked() == true" --
+    // imgui.h) -- so a double-click on the empty area briefly starts (and,
+    // one frame later, on the release between the two clicks, immediately
+    // ends) a drag alongside setting maximizeToggleRequested below. Harmless:
+    // the two clicks of a real double-click land within a few pixels of each
+    // other, so the drag this briefly starts moves the window by at most a
+    // few pixels of human hand-jitter before ending on its own -- the same
+    // negligible jitter a real OS's own title bar exhibits on a double-click
+    // in practice, not a bug introduced here.
+    if (overEmptyArea && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        action.maximizeToggleRequested = true;
+    }
+
+    ImGui::End();
+}
+
 CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                                  std::optional<EntityId>& selectedEntity,
                                                  const SelectionOutline* outline,
@@ -1563,7 +1841,23 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  std::optional<std::string>& textureAssignRequested,
                                                  std::optional<std::string>& assetDropRequested,
                                                  bool cameraCaptured, bool& cameraCaptureRequested,
-                                                 bool& ssaoDisabled, bool& ssaoDebugMode) {
+                                                 bool& ssaoDisabled, bool& ssaoDebugMode, bool showCustomTitleBar,
+                                                 bool windowMaximized, std::pair<int, int> windowPos,
+                                                 TitleBarAction& titleBarAction) {
+    // Phase 17d: the identical "false/empty every frame except the one where
+    // the real thing actually happened" reset every other out-parameter in
+    // this function already follows (see e.g. cameraCaptureRequested just
+    // below). renderTitleBar() (private, above) is called FIRST, before
+    // BeginMainMenuBar() -- see that method's own top comment for exactly why
+    // that ordering is what makes the title bar's own screen-space
+    // reservation stack correctly ABOVE the File menu bar's, rather than
+    // overlapping it.
+    titleBarAction.minimizeRequested = false;
+    titleBarAction.maximizeToggleRequested = false;
+    titleBarAction.closeRequested = false;
+    titleBarAction.requestedWindowPos.reset();
+    renderTitleBar(showCustomTitleBar, windowMaximized, windowPos, titleBarAction);
+
     // Phase 16: the identical "false every frame except the one where the
     // real thing actually happened" reset saveSceneRequested/
     // textureAssignRequested/assetDropRequested below already follow.
@@ -1585,18 +1879,26 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     // implemented via BeginViewportSideBar() -- NOT a menu bar on the
     // dockspace host window DockSpaceOverViewport() builds just below, which
     // takes no window_flags parameter to request one through at all) is
-    // called FIRST, before DockSpaceOverViewport(), so its own reservation
-    // of screen space (shrinking ImGui::GetMainViewport()->WorkPos/WorkSize
-    // by the menu bar's height) is already in effect by the time
-    // DockSpaceOverViewport() reads that same viewport's work rect to size
-    // its own host window -- confirmed visually, not just assumed (see this
-    // phase's own README section): the four docked panels start just below
-    // the menu bar rather than underneath/overlapping it. Deliberately
-    // outside the `if (!layoutBuilt_)` guard below -- unlike the dockspace's
-    // own one-time DockBuilder split, a menu bar is ordinary immediate-mode
-    // content that must be resubmitted every single frame like any other
-    // ImGui:: call, the same way every panel's own Begin()/End() pair below
-    // already is.
+    // called before DockSpaceOverViewport(), so its own reservation of screen
+    // space (shrinking ImGui::GetMainViewport()->WorkPos/WorkSize by the menu
+    // bar's height) is already in effect by the time DockSpaceOverViewport()
+    // reads that same viewport's work rect to size its own host window --
+    // confirmed visually, not just assumed (see this phase's own README
+    // section): the four docked panels start just below the menu bar rather
+    // than underneath/overlapping it. Deliberately outside the
+    // `if (!layoutBuilt_)` guard below -- unlike the dockspace's own one-time
+    // DockBuilder split, a menu bar is ordinary immediate-mode content that
+    // must be resubmitted every single frame like any other ImGui:: call, the
+    // same way every panel's own Begin()/End() pair below already is.
+    //
+    // Phase 17d update: no longer literally the first thing this method
+    // does -- renderTitleBar() above now runs before it -- but the ordering
+    // relationship THIS comment is actually about (menu bar reserved before
+    // DockSpaceOverViewport() reads the work rect) is unchanged; the title
+    // bar's own reservation simply stacks on top of both, via the identical
+    // BeginViewportSideBar() mechanism (see renderTitleBar()'s own top
+    // comment above for the full three-way stacking order: title bar, then
+    // File menu bar, then whatever's left for the dockspace).
     saveSceneRequested = false;
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {

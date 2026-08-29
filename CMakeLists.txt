@@ -251,6 +251,7 @@ add_executable(engine_app
     src/asset_drop.cpp
     src/camera_capture.cpp
     src/editor_icons.cpp
+    src/window_chrome.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

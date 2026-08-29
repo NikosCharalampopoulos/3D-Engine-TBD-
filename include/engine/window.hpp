@@ -128,7 +128,32 @@ public:
     // (Xvfb included, verified empirically -- see this phase's own README
     // section) rather than failing, so passing true is always safe to try,
     // never a hard requirement.
-    Window(int width, int height, const std::string& title, bool maximized = false);
+    //
+    // Phase 17d: `decorated` (default true, GLFW's own out-of-the-box
+    // behavior -- the identical "class defaults to GLFW's stock behavior,
+    // main.cpp's own call site decides what a real interactive run actually
+    // wants" shape `maximized` above already establishes) sets the
+    // GLFW_DECORATED window hint before creation. False removes the OS's own
+    // native title bar/borders entirely -- this project's reference mockup
+    // shows a borderless window with a custom-drawn title bar replacing it
+    // (editor_ui.cpp's own renderTitleBar(), README.md's own Phase 17d
+    // section) -- and, on at least some platforms/window managers, the OS's
+    // own native edge-drag resize handles along with it: an undecorated
+    // window is well known to also lose the OS's own resize-by-dragging-the-
+    // border affordance, which normally needs custom native hit-testing
+    // (Win32's WM_NCHITTEST via glfwGetWin32Window()) to restore --
+    // genuinely Windows-specific code this project's own Linux dev/CI
+    // environment cannot compile or verify AT ALL (no _WIN32, no Windows
+    // headers, not even a way to build-check a `#ifdef _WIN32` branch here --
+    // see README.md's own Phase 17d section for the full honest accounting
+    // of this gap, a real, accepted tradeoff, not an oversight). This class
+    // does not attempt that native resize story this phase; only window
+    // DRAGGING (via glfwSetWindowPos()-delta-tracking each frame,
+    // window_chrome.hpp's own applyDragDelta(), a portable technique that
+    // compiles and is logically testable on any platform GLFW supports) is
+    // implemented as this OS-native-title-bar replacement's own move
+    // affordance -- see setWindowPos()/getWindowPos() below.
+    Window(int width, int height, const std::string& title, bool maximized = false, bool decorated = true);
     ~Window();
 
     Window(const Window&) = delete;
@@ -171,12 +196,99 @@ public:
     // on either transition doesn't also snap the camera's view.
     void setCursorCaptured(bool captured);
 
+    // Phase 17d: the window's own current on-screen position (glfwGetWindowPos(),
+    // screen coordinates -- the same units glfwSetWindowPos() below expects),
+    // re-queried fresh from GLFW every call rather than cached -- see
+    // window_chrome.hpp's own header comment for why a freshly re-queried
+    // current position, not a value remembered from when a title-bar drag
+    // started, is the correct input to that header's own applyDragDelta().
+    std::pair<int, int> getWindowPos() const;
+
+    // Moves the window so its upper-left corner sits at (x, y) in screen
+    // coordinates. The one real mutation editor_ui.cpp's own title-bar-drag
+    // handling drives every frame a drag is in progress -- EditorUI itself
+    // never calls glfwSetWindowPos() directly (it owns no GLFWwindow* of its
+    // own beyond what its constructor borrowed to init the ImGui backends --
+    // see editor_ui.hpp's own class comment), it only ever reports the
+    // already-computed target position back through renderDockspaceShell()'s
+    // own TitleBarAction out-parameter for Application::render() to apply
+    // through this method, the identical "EditorUI reports intent, Application
+    // acts on it" shape this whole class already follows for every other
+    // out-parameter (createRequest, saveSceneRequested, etc.).
+    void setWindowPos(int x, int y);
+
+    // Phase 17d: the `decorated` constructor argument, remembered verbatim
+    // (never re-queried from GLFW -- this project never calls
+    // glfwSetWindowAttrib(GLFW_DECORATED, ...) at runtime anywhere, so the
+    // constructor-time value can never go stale). Application::render() reads
+    // this once per frame to decide whether to draw the custom title bar
+    // (editor_ui.cpp's own renderTitleBar()) at all: when the window IS
+    // OS-decorated (the ENGINE_WINDOW_DECORATED=1 escape hatch, main.cpp),
+    // the OS already draws its own real title bar/min/max/close -- drawing
+    // this project's custom ImGui one ON TOP of/underneath that native one
+    // would be a redundant, broken-looking SECOND title bar, not a graceful
+    // fallback. Skipping the custom title bar entirely when decorated is
+    // true is what makes that escape hatch a genuine, clean revert to this
+    // project's pre-Phase-17d look, not a half-reverted hybrid.
+    bool isDecorated() const { return decorated_; }
+
+    // True while the window is currently OS-maximized (glfwGetWindowAttrib(...,
+    // GLFW_MAXIMIZED) -- the live, authoritative source of truth GLFW itself
+    // tracks, not a second app-side bool this class would otherwise need to
+    // keep in sync with whatever the OS/window manager actually did). Read
+    // once per frame by Application::render() and passed into
+    // renderDockspaceShell() so the custom title bar's maximize/restore
+    // button can draw the correct one of its two glyphs (a square for
+    // "maximize," two overlapping squares for "restore" -- see
+    // editor_ui.cpp's own renderTitleBar()).
+    bool isMaximized() const;
+
+    // Minimizes (iconifies) the window -- glfwIconifyWindow(). The custom
+    // title bar's own minimize button's entire effect; see editor_icons.hpp's
+    // own sibling comment style for why this class stays a thin, policy-free
+    // GLFW wrapper (matching setCursorCaptured() above) rather than deciding
+    // anything about WHEN to minimize itself.
+    void iconifyWindow();
+
+    // Toggles between maximized and restored, using window_chrome.hpp's own
+    // decideMaximizeRestoreToggle() (fed this call's own fresh isMaximized()
+    // read, never a stale cached copy) to decide which of glfwMaximizeWindow()/
+    // glfwRestoreWindow() to actually call. The custom title bar's own
+    // maximize/restore button AND its empty-title-bar-area double-click both
+    // funnel into this one method -- see editor_ui.cpp's own renderTitleBar()
+    // for both trigger paths, and this project's own established "one
+    // gesture, one outcome, decided by one function" precedent
+    // (decideCameraCapture(), Phase 16) for why a shared method rather than
+    // two independently-maintained call sites is correct here too.
+    void toggleMaximizeRestore();
+
+    // Requests that this window close -- glfwSetWindowShouldClose(window_,
+    // GLFW_TRUE). Does NOT close anything itself; it only sets the exact same
+    // internal GLFW flag shouldClose() already reads at the top of
+    // Application::run()'s own `while (!window_.shouldClose())` loop --
+    // historically set automatically by GLFW itself the instant a user
+    // clicked the OS's own native title-bar close button (X), back when this
+    // window still had one. The custom title bar's own close button (Phase
+    // 17d, editor_ui.cpp's own renderTitleBar()) is this project's first-ever
+    // CODE-driven call to this method. This is NOT the same path this
+    // engine's own pre-existing Escape-while-uncaptured quit
+    // (decideCameraCapture(), Phase 16) uses -- that one never calls this
+    // method or sets GLFW's should-close flag at all; it does a direct
+    // `break` out of run()'s own loop body instead (see that call site's own
+    // comment). Close and Escape are two DIFFERENT mechanisms that both
+    // happen to end the same loop, not one shared path -- the close button
+    // simply reuses the SAME should-close flag GLFW itself has always set
+    // automatically when a user clicked a native title-bar close button.
+    void requestClose();
+
     GLFWwindow* handle() const { return window_; }
 
 private:
     GLFWwindow* window_ = nullptr;
     int width_;
     int height_;
+    // Phase 17d: see isDecorated() above.
+    bool decorated_ = true;
 };
 
 }  // namespace engine
