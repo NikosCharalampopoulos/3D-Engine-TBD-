@@ -67,6 +67,8 @@ char32_t toolbarButtonIconGlyph(ToolbarButton button) {
             return kIconTexture;
         case ToolbarButton::kUndo:
             return kIconUndo;
+        case ToolbarButton::kRedo:
+            return kIconRedo;
         case ToolbarButton::kPlay:
             return kIconPlay;
         case ToolbarButton::kPause:

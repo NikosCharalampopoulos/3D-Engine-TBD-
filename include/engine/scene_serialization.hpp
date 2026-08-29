@@ -586,6 +586,54 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
 // this phase doesn't otherwise need to change.
 void saveScene(EntityRegistry& registry, const std::string& path, EntityId activeDirectionalLight);
 
+// Phase 18h: the per-entity halves of loadScene()/saveScene() above,
+// factored out so Application's own undo/redo entity-deletion/-creation
+// commands (undo_stack.hpp, application.cpp) can snapshot/restore ONE
+// entity the identical, already-exercised way saveScene()/loadScene()
+// snapshot/restore EVERY entity, instead of a second, parallel
+// per-component copy mechanism -- see undo_stack.hpp's own header comment
+// for the full "why reuse, not duplicate" reasoning.
+//
+// captureEntityRecord() is exactly saveScene()'s own per-entity record-
+// building logic (Transform, ModelComponent, RigidBody, Collider,
+// PointLight, DirectionalLight, CameraComponent, MaterialOverride, and the
+// Parent-to-name lookup), now shared by both saveScene()'s own
+// registry.each<Transform>() loop and Application::deleteEntity()/
+// spawnEntityFromCreateMenu() (application.cpp). `activeDirectionalLight`
+// mirrors saveScene()'s own same-named parameter exactly -- pass the
+// caller's current "which entity is active" EntityId (or a
+// default-constructed invalid one if none) so a captured DirectionalLight
+// record's own "active" field comes out correct.
+SceneEntityRecord captureEntityRecord(EntityRegistry& registry, EntityId id, EntityId activeDirectionalLight);
+
+// restoreEntityFromRecord() is exactly loadScene()'s own per-record entity-
+// building logic (the first-pass loop body: NameComponent, Transform,
+// RigidBody, Collider, PointLight, DirectionalLight, CameraComponent,
+// MaterialOverride), now shared by both loadScene()'s own per-record loop
+// and Application's own undo/redo recreation path. Returns the freshly
+// created EntityId.
+//
+// Deliberately does NOT add a Parent component even when record.parentName
+// is non-empty, and does NOT report back whether this record's
+// DirectionalLight should become "the" active one -- both of those need a
+// caller-specific name/id resolution loadScene() and Application's own
+// undo/redo path each do differently (loadScene()'s own idByName, built
+// across a WHOLE file's worth of records in file order, so a child can
+// legally be restored before its parent -- see this header's own "Parent
+// references" comment; Application's own findEntityByName() against
+// whatever the CURRENT live registry already contains, since it is only
+// ever restoring ONE already-independently-existing entity, never a whole
+// file's interdependent set). Both callers add a Parent component
+// themselves, immediately after this call returns, once THEY have resolved
+// record.parentName the way each needs to -- the same two-pass shape
+// loadScene() below already uses for its own bulk case.
+//
+// Propagates the identical model/materialOverride-load exceptions
+// loadScene()'s own per-record loop already could throw (see that
+// function's own comment) -- unchanged behavior, just now shared code.
+EntityId restoreEntityFromRecord(EntityRegistry& registry, const SceneEntityRecord& record, ResourceManager& resources,
+                                  Shader& shader);
+
 }  // namespace engine
 
 #endif  // ENGINE_SCENE_SERIALIZATION_HPP

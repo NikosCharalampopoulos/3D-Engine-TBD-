@@ -304,6 +304,7 @@
 #include "engine/ecs.hpp"
 #include "engine/gizmo.hpp"
 #include "engine/shading_mode.hpp"
+#include "engine/undo_stack.hpp"
 
 struct GLFWwindow;
 typedef unsigned int ImGuiID;
@@ -682,6 +683,54 @@ public:
     // position, unconverted through any parent) and updateGizmo()'s own
     // comment below for exactly how the interaction itself is scoped/gated
     // against the toolbar and Phase 16 camera capture.
+    // Phase 18h: seven more trailing parameters, closing out the Viewport
+    // toolbar's own "undo" stub (BeginDisabled()'d since Phase 17c,
+    // explicitly waiting for this) and the Inspector's "Delete Object"
+    // button's own registry mutation, both of which now report intent
+    // instead of acting directly -- the exact same "EditorUI reports, only
+    // Application acts" shape createRequest/saveSceneRequested/
+    // textureAssignRequested/assetDropRequested above already establish,
+    // now extended to cover deletion and completed transform edits too
+    // (undo_stack.hpp's own header comment has the full "why" for both).
+    //
+    // `deleteEntityRequested`: unconditionally reset to std::nullopt at the
+    // top of every call, then set to `selectedEntity`'s own id the one
+    // frame the Inspector's "Delete Object" button is clicked (see
+    // editor_ui.cpp's own renderInspectorPanel() comment). EditorUI no
+    // longer calls destroyEntityOrphaningChildren() itself here -- deleting
+    // an entity now has to run through Application::deleteEntity()
+    // (application.cpp) so a SceneEntityRecord can be captured and pushed
+    // onto the undo stack BEFORE the entity is actually destroyed, which
+    // only Application (registry_'s owner, with access to
+    // captureEntityRecord()/undoStack_) can do.
+    //
+    // `transformEditCommitted`: unconditionally reset to std::nullopt at
+    // the top of every call, then set to a real kTransformEdit Command the
+    // one frame a COMPLETED transform edit is detected -- either an
+    // Inspector Transform DragFloat3/DragFloat field's own
+    // IsItemDeactivatedAfterEdit() (renderInspectorPanel()), or a gizmo
+    // drag's own mouse-release transition (updateGizmo(), private, below).
+    // Both report through this SAME out-parameter (only one can plausibly
+    // fire in a single ImGui frame -- a user cannot simultaneously drag the
+    // gizmo and type into an Inspector field) rather than two separate
+    // parameters. Application::render() pushes this straight onto
+    // undoStack_ when present -- EditorUI itself never touches an
+    // UndoStack, matching its own "just a Dear ImGui wrapper over data
+    // Application owns" role.
+    //
+    // `canUndo`/`canRedo`: read-only snapshots of Application's own
+    // undoStack_.canUndo()/canRedo() this frame (the identical by-value
+    // shape `cameraCaptured`/`activeDirectionalLight` above already use for
+    // state EditorUI only ever displays) -- gate the toolbar's own
+    // undo/redo buttons' enabled state, so they read exactly like a real
+    // editor's (grayed out at either end of the history) rather than the
+    // permanently-disabled stubs they were through Phase 18g.
+    // `undoRequested`/`redoRequested`: unconditionally reset to false at
+    // the top of every call, set true the one frame the toolbar's own
+    // undo/redo button is clicked -- Application::render() calls
+    // undo()/redo() when either comes back true, immediately after this
+    // call returns, the same "report intent, act right after" shape every
+    // other out-parameter here already follows.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity,
                                            std::optional<EntityId> activeDirectionalLight, bool hasActiveCamera,
@@ -692,7 +741,10 @@ public:
                                            bool& physicsRunning, bool showCustomTitleBar, bool windowMaximized,
                                            std::pair<int, int> windowPos, TitleBarAction& titleBarAction,
                                            const glm::vec3& cameraPosition, const glm::mat4& cameraView,
-                                           const glm::mat4& cameraProjection);
+                                           const glm::mat4& cameraProjection,
+                                           std::optional<EntityId>& deleteEntityRequested,
+                                           std::optional<Command>& transformEditCommitted, bool canUndo, bool canRedo,
+                                           bool& undoRequested, bool& redoRequested);
 
     // Phase 18e: the headless verification hook behind ENGINE_DEBUG_GIZMO_DRAG
     // (see that env var's own application.cpp comment for the full design).
@@ -803,9 +855,22 @@ private:
     // `toolbarBgMax` are renderViewportToolbarOverlay()'s own just-measured
     // background rect, the identical rect the camera-capture guard already
     // excludes mouse interaction over.
+    // Phase 18h: `transformEditCommitted` -- set to a real kTransformEdit
+    // Command the one frame this call detects a drag's mouse-release
+    // transition (gizmoDragState_ going from a real axis back to kNone),
+    // using gizmoDragStartLocalPosition_ as `before` and the entity's own
+    // live Transform (already updated by this SAME frame's drag logic, or
+    // left exactly where the previous frame's last update step put it) as
+    // `after` -- see renderDockspaceShell()'s own updated header comment
+    // for what Application does with this. Left untouched (not reset to
+    // std::nullopt) on every OTHER frame -- the caller (renderDockspaceShell())
+    // is what resets it once, before either this function or
+    // renderInspectorPanel() runs, since either one (never both in the same
+    // frame) may be the one to set it.
     bool updateGizmo(EntityRegistry& registry, std::optional<EntityId> selectedEntity, const glm::vec3& cameraPosition,
                       const glm::mat4& cameraView, const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
-                      const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax);
+                      const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
+                      std::optional<Command>& transformEditCommitted);
 
     bool layoutBuilt_ = false;
     // Phase 17d: true from the frame a title-bar drag starts (a left-click on
@@ -900,6 +965,23 @@ private:
     // above for why this lives here instead of being threaded through
     // renderDockspaceShell() the way selectedEntity is.
     std::optional<std::string> selectedAssetPath_;
+
+    // Phase 18h: the Inspector's own Transform DragFloat3/DragFloat fields'
+    // (Position/Rot Y/Scale, renderInspectorPanel()) cross-frame "an edit
+    // session is in progress" state -- the Transform snapshot captured the
+    // instant ImGui::IsItemActivated() first fires for whichever field the
+    // user just started interacting with, held here until that SAME field's
+    // own ImGui::IsItemDeactivatedAfterEdit() fires (possibly many frames
+    // later, for a real click-drag), at which point renderInspectorPanel()
+    // builds a Command from this cached `before` plus the entity's own
+    // then-current `after` and clears this back to std::nullopt. Has to be
+    // persistent, cross-frame state for the identical reason
+    // gizmoDragState_/titleBarDragging_ above are: a real drag interaction
+    // routinely spans many frames between its own start and end. Only one
+    // Inspector field can be under active ImGui interaction at a time (Dear
+    // ImGui's own single-active-item model), so one shared member -- not one
+    // per field -- is enough to cover all three.
+    std::optional<TransformSnapshot> pendingInspectorTransformEditBefore_;
 };
 
 }  // namespace engine

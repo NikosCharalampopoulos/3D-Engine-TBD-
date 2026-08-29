@@ -89,6 +89,9 @@ int main() {
     assert(toolbarButtonIconGlyph(ToolbarButton::kUndo) == engine::kIconUndo);
     assert(toolbarButtonIconGlyph(ToolbarButton::kPlay) == engine::kIconPlay);
     assert(toolbarButtonIconGlyph(ToolbarButton::kPause) == engine::kIconPause);
+    // Phase 18h: kRedo -- its own distinct glyph, not a reuse of kIconUndo.
+    assert(toolbarButtonIconGlyph(ToolbarButton::kRedo) == engine::kIconRedo);
+    assert(toolbarButtonIconGlyph(ToolbarButton::kRedo) != engine::kIconUndo);
 
     // kLighting/kTextureMode deliberately reuse the SAME constants a Scene
     // row with a DirectionalLight / an Assets row under assets/textures/

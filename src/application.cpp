@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -1330,6 +1331,37 @@ std::string debugGizmoDragEntityNameFromEnv() {
     return value != nullptr ? std::string(value) : std::string();
 }
 
+// Phase 18h: ENGINE_DEBUG_UNDO=<count>/ENGINE_DEBUG_REDO=<count>, unset (0)
+// by default -- undo/redo's own headless verification hook, same
+// getenv-gated-value shape as every other ENGINE_DEBUG_* env var above, just
+// parsing a small positive integer instead of a name/kind. update() (see its
+// own Phase 18h comment) consumes whichever of debugUndoCount_/
+// debugRedoCount_ this resolves to at a fixed scripted frame, calling
+// Application::undo()/redo() -- the exact same production methods the
+// toolbar's own real undo/redo buttons and Ctrl+Z/Ctrl+Y call -- that many
+// times in a row, logging registry_'s resulting state after each call. A
+// missing, non-numeric, or non-positive value is logged as a warning and
+// treated as 0 (no scripted undo/redo at all), the same "don't silently
+// misbehave on a typo'd env var" treatment every other value-carrying
+// ENGINE_DEBUG_* var in this file already gets.
+int debugUndoOrRedoCountFromEnv(const char* envVarName) {
+    const char* value = std::getenv(envVarName);
+    if (value == nullptr) {
+        return 0;
+    }
+    try {
+        const int count = std::stoi(value);
+        if (count <= 0) {
+            LOG_WARN(std::string(envVarName) + "=\"" + value + "\" must be a positive integer; ignored");
+            return 0;
+        }
+        return count;
+    } catch (const std::exception&) {
+        LOG_WARN(std::string(envVarName) + "=\"" + value + "\" is not a valid integer; ignored");
+        return 0;
+    }
+}
+
 // Phase 14f: ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty|pointlight|
 // directionallight|camera> (case-insensitive; "pointlight" added Phase 15a,
 // "directionallight" added Phase 15b, "camera" added Phase 15c), unset by
@@ -1754,6 +1786,19 @@ constexpr std::size_t kDebugGizmoDragStepCount = sizeof(kDebugGizmoDragOffsets) 
 // exercises all three), so this is a scope choice for the DEBUG SCRIPT only,
 // not a limitation this phase is smuggling into the real feature.
 constexpr GizmoAxis kDebugGizmoDragAxis = GizmoAxis::kX;
+
+// Phase 18h: ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO's own scripted frames --
+// see debugUndoOrRedoCountFromEnv()'s own comment for the full design. Both
+// well after kDebugGizmoDragStartFrame's own scripted drag has fully
+// finished (frame kDebugGizmoDragStartFrame + kDebugGizmoDragStepCount + 1 =
+// 21, see that constant's own comment) and spaced five frames apart from
+// each other, so a headless run combining ENGINE_DEBUG_CREATE/_DELETE/
+// _GIZMO_DRAG/_UNDO/_REDO in one process produces a clean, easy-to-read log
+// timeline: every debug action settles before the next one's own frame
+// arrives, and a screenshot taken right before/after either frame has
+// something meaningful, unambiguous to diff against.
+constexpr std::uint64_t kDebugUndoFrame = 25;
+constexpr std::uint64_t kDebugRedoFrame = 30;
 
 }  // namespace
 
@@ -2251,24 +2296,23 @@ Application::Application(int width, int height, const std::string& title, std::u
     // those earlier steps just named/created/selected/force-toggled within
     // the SAME verification run if needed, and so it reads as "the last
     // word" -- whatever this names is gone by the time the first frame
-    // renders. Calls the exact same destroyEntityOrphaningChildren()
-    // (transform_hierarchy.hpp) the Inspector's real "Delete Object" button
-    // calls; if the deleted entity happened to be `selectedEntity_` (e.g.
-    // ENGINE_DEBUG_SELECT and ENGINE_DEBUG_DELETE both naming the same
-    // entity), selectedEntity_ is cleared too -- the exact same "clear the
-    // selection on delete" behavior the real button's own click handler
-    // has (see editor_ui.cpp's own renderInspectorPanel() Phase 14f
-    // comment), so this debug path can't leave selectedEntity_ dangling
-    // where the real UI path never would.
+    // renders.
+    //
+    // Phase 18h: now calls deleteEntity() (this class's own new method)
+    // instead of destroyEntityOrphaningChildren() directly -- the exact
+    // same production code path the Inspector's real "Delete Object" button
+    // now goes through too (via render()'s own deleteEntityRequested
+    // handling), so this debug hook also exercises (and this phase's own
+    // headless verification can prove) that the deletion got captured onto
+    // undoStack_, not just that the entity is gone. deleteEntity() itself
+    // still clears selectedEntity_ if it named the same entity, the
+    // identical behavior this block used to implement inline.
     {
         const std::string debugDeleteName = debugDeleteEntityNameFromEnv();
         if (!debugDeleteName.empty()) {
             const EntityId found = findEntityByName(registry_, debugDeleteName);
             if (found.valid()) {
-                destroyEntityOrphaningChildren(registry_, found);
-                if (selectedEntity_.has_value() && *selectedEntity_ == found) {
-                    selectedEntity_.reset();
-                }
+                deleteEntity(found);
                 LOG_INFO("ENGINE_DEBUG_DELETE=\"" + debugDeleteName + "\": destroyed entity " +
                           std::to_string(found.index()) + " (children, if any, orphaned to root)");
             } else {
@@ -2276,6 +2320,15 @@ Application::Application(int width, int height, const std::string& title, std::u
             }
         }
     }
+
+    // Phase 18h: ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO -- see
+    // debugUndoOrRedoCountFromEnv()'s own comment above for the full design.
+    // Resolved once, here (after every other constructor-time debug hook
+    // above has had a chance to push something onto undoStack_), so
+    // update()'s own scripted frames (kDebugUndoFrame/kDebugRedoFrame) know
+    // how many times to call undo()/redo().
+    debugUndoCount_ = debugUndoOrRedoCountFromEnv("ENGINE_DEBUG_UNDO");
+    debugRedoCount_ = debugUndoOrRedoCountFromEnv("ENGINE_DEBUG_REDO");
 
     // Phase 15f: ENGINE_DEBUG_ASSIGN_TEXTURE -- see
     // debugAssignTextureFromEnv()'s own comment above for why this exists.
@@ -2708,6 +2761,56 @@ void Application::update(double deltaTime, const InputState& input) {
         }
         // else: defensive only -- every entity this env var can resolve to
         // (findEntityByName(), constructor) has a Transform by construction.
+    }
+
+    // Phase 18h: ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO's own scripted frames --
+    // see debugUndoOrRedoCountFromEnv()'s own comment for the full design.
+    // Fires exactly once each (frameCount_ is monotonically increasing, so
+    // `== kDebugUndoFrame` can never match twice), calling the exact same
+    // undo()/redo() a real Ctrl+Z/Ctrl+Y press or toolbar button click
+    // would, `debugUndoCount_`/`debugRedoCount_` times in a row, logging
+    // registry_'s resulting entity count + every named entity's own
+    // position after EACH individual call -- not just the final state --
+    // so a headless run's own log is a step-by-step proof the command stack
+    // is unwinding/rewinding correctly, not just a single before/after
+    // snapshot.
+    if (frameCount_ == kDebugUndoFrame && debugUndoCount_ > 0) {
+        LOG_INFO("ENGINE_DEBUG_UNDO=" + std::to_string(debugUndoCount_) + ": calling undo() " +
+                  std::to_string(debugUndoCount_) + " time(s) at frame " + std::to_string(frameCount_));
+        for (int step = 1; step <= debugUndoCount_; ++step) {
+            undo();
+            std::size_t entityCount = 0;
+            std::string positions;
+            registry_.each<NameComponent>([&](EntityId id, NameComponent& nameComponent) {
+                ++entityCount;
+                const Transform* t = registry_.getComponent<Transform>(id);
+                if (t != nullptr) {
+                    positions += "; " + nameComponent.name + "=(" + std::to_string(t->position().x) + ", " +
+                                 std::to_string(t->position().y) + ", " + std::to_string(t->position().z) + ")";
+                }
+            });
+            LOG_INFO("  after undo() #" + std::to_string(step) + ": " + std::to_string(entityCount) +
+                      " named entities" + positions);
+        }
+    }
+    if (frameCount_ == kDebugRedoFrame && debugRedoCount_ > 0) {
+        LOG_INFO("ENGINE_DEBUG_REDO=" + std::to_string(debugRedoCount_) + ": calling redo() " +
+                  std::to_string(debugRedoCount_) + " time(s) at frame " + std::to_string(frameCount_));
+        for (int step = 1; step <= debugRedoCount_; ++step) {
+            redo();
+            std::size_t entityCount = 0;
+            std::string positions;
+            registry_.each<NameComponent>([&](EntityId id, NameComponent& nameComponent) {
+                ++entityCount;
+                const Transform* t = registry_.getComponent<Transform>(id);
+                if (t != nullptr) {
+                    positions += "; " + nameComponent.name + "=(" + std::to_string(t->position().x) + ", " +
+                                 std::to_string(t->position().y) + ", " + std::to_string(t->position().z) + ")";
+                }
+            });
+            LOG_INFO("  after redo() #" + std::to_string(step) + ": " + std::to_string(entityCount) +
+                      " named entities" + positions);
+        }
     }
 
     if (frustumCullDemoMode_) {
@@ -4354,13 +4457,54 @@ void Application::render() {
     // real, still owned by the F1 debug overlay's own checkboxes; this call
     // simply stops being a second way to reach them, see editor_ui.hpp's own
     // updated renderDockspaceShell() comment for the full story).
+    // Phase 18h: five more locals -- `deleteEntityRequested`/
+    // `transformEditCommitted` mirror saveSceneRequested/
+    // textureAssignRequested's own "out-parameter, handled right below"
+    // shape; `undoStack_.canUndo()`/`canRedo()` are read-only snapshots
+    // (the identical by-value shape `cameraCaptured_`/`hasActiveCamera`
+    // above already use); `undoRequested`/`redoRequested` mirror
+    // `cameraCaptureRequested`'s own "false unless clicked this frame"
+    // shape. See renderDockspaceShell()'s own updated editor_ui.hpp comment
+    // for what each means.
+    std::optional<EntityId> deleteEntityRequested;
+    std::optional<Command> transformEditCommitted;
+    bool undoRequested = false;
+    bool redoRequested = false;
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, activeDirectionalLight_,
         hasActiveCamera, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
         cameraCaptureRequested, editShadingMode_, physicsRunning_, !window_.isDecorated(), window_.isMaximized(),
-        window_.getWindowPos(), titleBarAction, renderCamera.position(), view, projection);
+        window_.getWindowPos(), titleBarAction, renderCamera.position(), view, projection, deleteEntityRequested,
+        transformEditCommitted, undoStack_.canUndo(), undoStack_.canRedo(), undoRequested, redoRequested);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
+    }
+    // Phase 18h: the Inspector's "Delete Object" button's own real trigger
+    // path -- see editor_ui.hpp's own updated comment for why EditorUI only
+    // ever reports which entity was clicked rather than destroying it
+    // itself. deleteEntity() (this class's own new method) is what actually
+    // captures the undo record and destroys it.
+    if (deleteEntityRequested.has_value()) {
+        deleteEntity(*deleteEntityRequested);
+    }
+    // Phase 18h: a completed Inspector Transform-field edit OR a completed
+    // gizmo drag -- both report through this one out-parameter (see that
+    // parameter's own editor_ui.hpp comment for why). The registry mutation
+    // itself already happened live, inside renderDockspaceShell() (the same
+    // "EditorUI mutates registry_'s Transform directly" pattern this whole
+    // feature predates -- see gizmo.hpp's own header comment); this is only
+    // ever the UNDO-HISTORY bookkeeping for an edit that already took
+    // effect.
+    if (transformEditCommitted.has_value()) {
+        undoStack_.push(*transformEditCommitted);
+    }
+    // Phase 18h: the toolbar's own real undo/redo buttons -- the exact same
+    // undo()/redo() methods Ctrl+Z/Ctrl+Y-or-Ctrl+Shift+Z (run()) call.
+    if (undoRequested) {
+        undo();
+    }
+    if (redoRequested) {
+        redo();
     }
     // Phase 17d: the custom title bar's own four real effects -- see
     // TitleBarAction's own editor_ui.hpp comment for exactly when each field
@@ -4583,6 +4727,22 @@ void Application::spawnEntityFromCreateMenu(CreateEntityKind kind) {
     if (kind == CreateEntityKind::kCamera) {
         registry_.addComponent<CameraComponent>(entity, CameraComponent{});
     }
+
+    // Phase 18h: pushes a real kCreateEntity Command onto undoStack_,
+    // captured AFTER every one of the kind-specific component blocks above
+    // has run -- so the record undo/redo actually recreates from already
+    // includes the PointLight/DirectionalLight/CameraComponent this
+    // entity's own kind adds, not just its bare Transform/NameComponent/
+    // ModelComponent. See undo_stack.hpp's own header comment for why this
+    // captures a full record rather than storing `kind` + a spawn position
+    // to re-run this same function on redo (the camera may have moved by
+    // then, which would silently redo to the WRONG position). Deliberately
+    // the only creation path that pushes one -- see application.hpp's own
+    // spawnEntityFromDroppedModel() comment for why a drag-and-drop model
+    // drop is a separate, un-mentioned creation path this phase's own
+    // confirmed scope does not extend undo/redo coverage to.
+    undoStack_.push(
+        makeCreateEntityCommand(entity, captureEntityRecord(registry_, entity, activeDirectionalLight_.value_or(EntityId()))));
 }
 
 // Phase 15g: see this method's own application.hpp comment for the full
@@ -4731,6 +4891,117 @@ void Application::handleViewportAssetDrop(const std::string& assetRelativePath) 
 void Application::saveCurrentScene() {
     saveScene(registry_, kDefaultScenePath, activeDirectionalLight_.value_or(EntityId()));
     LOG_INFO("Saved scene to \"" + kDefaultScenePath + "\"");
+}
+
+// Phase 18h: see this method's own application.hpp comment for the full
+// design. Captures BEFORE destroying anything -- captureEntityRecord()
+// reads `id`'s own still-live components, so this order is load-bearing,
+// not incidental.
+void Application::deleteEntity(EntityId id) {
+    const SceneEntityRecord record = captureEntityRecord(registry_, id, activeDirectionalLight_.value_or(EntityId()));
+    undoStack_.push(makeDeleteEntityCommand(id, record));
+    destroyEntityOrphaningChildren(registry_, id);
+    if (selectedEntity_.has_value() && *selectedEntity_ == id) {
+        selectedEntity_.reset();
+    }
+}
+
+void Application::setTransformFromSnapshot(EntityId id, const TransformSnapshot& snapshot) {
+    Transform* transform = registry_.getComponent<Transform>(id);
+    if (transform == nullptr) {
+        // Defensive only -- see this method's own application.hpp comment.
+        return;
+    }
+    transform->setPosition(snapshot.position);
+    transform->setRotation(snapshot.rotation);
+    transform->setScale(snapshot.scale);
+}
+
+void Application::destroyCommandEntity(Command& cmd) {
+    destroyEntityOrphaningChildren(registry_, cmd.entity);
+    if (selectedEntity_.has_value() && *selectedEntity_ == cmd.entity) {
+        selectedEntity_.reset();
+    }
+}
+
+void Application::recreateCommandEntity(Command& cmd) {
+    EntityId newId;
+    try {
+        newId = restoreEntityFromRecord(registry_, cmd.record, resources_, *shader_);
+    } catch (const std::exception& e) {
+        // See this method's own application.hpp comment -- shouldn't happen
+        // for a record captured from a real, previously-loaded live entity,
+        // but not assumed impossible.
+        LOG_ERROR("Application::recreateCommandEntity: failed to restore entity \"" + cmd.record.name +
+                   "\": " + std::string(e.what()));
+        return;
+    }
+
+    // restoreEntityFromRecord() deliberately does not resolve `parentName`
+    // (it needs a caller-specific name -> EntityId lookup -- see that
+    // function's own scene_serialization.hpp comment) -- findEntityByName()
+    // against the CURRENT live registry_ is this caller's own choice of how
+    // to resolve it, the identical free function ENGINE_DEBUG_SELECT/
+    // ENGINE_DEBUG_DELETE above already use. A parent that no longer exists
+    // (e.g. it was itself deleted in the meantime) simply leaves the
+    // recreated entity as a root -- the same "dangling Parent reference"
+    // tolerance resolveWorldMatrix() already has, just resolved at
+    // recreation time instead of read time.
+    if (!cmd.record.parentName.empty()) {
+        const EntityId parentId = findEntityByName(registry_, cmd.record.parentName);
+        if (parentId.valid()) {
+            registry_.addComponent<Parent>(newId, Parent{parentId});
+        }
+    }
+
+    // Mirrors loadScene()'s own "last record with directionalLightActive
+    // wins" rule (scene_serialization.hpp's own "Active directional light"
+    // comment) -- a recreated DirectionalLight entity that WAS the active
+    // one at deletion/undo time becomes activeDirectionalLight_ again,
+    // pointing at its own brand-new id (the old id this member might still
+    // hold is, by now, permanently stale either way -- see that member's
+    // own "never reset on delete" application.hpp comment).
+    if (cmd.record.hasDirectionalLight && cmd.record.directionalLightActive) {
+        activeDirectionalLight_ = newId;
+    }
+
+    cmd.entity = newId;
+}
+
+void Application::undo() {
+    undoStack_.undo([this](Command& cmd) {
+        switch (cmd.kind) {
+            case CommandKind::kTransformEdit:
+                setTransformFromSnapshot(cmd.entity, cmd.before);
+                break;
+            case CommandKind::kCreateEntity:
+                // Undoing a creation removes it.
+                destroyCommandEntity(cmd);
+                break;
+            case CommandKind::kDeleteEntity:
+                // Undoing a deletion restores it.
+                recreateCommandEntity(cmd);
+                break;
+        }
+    });
+}
+
+void Application::redo() {
+    undoStack_.redo([this](Command& cmd) {
+        switch (cmd.kind) {
+            case CommandKind::kTransformEdit:
+                setTransformFromSnapshot(cmd.entity, cmd.after);
+                break;
+            case CommandKind::kCreateEntity:
+                // Redoing a creation recreates it.
+                recreateCommandEntity(cmd);
+                break;
+            case CommandKind::kDeleteEntity:
+                // Redoing a deletion removes it again.
+                destroyCommandEntity(cmd);
+                break;
+        }
+    });
 }
 
 // Phase 8c: builds and draws the debug overlay -- see this class's own
@@ -5013,6 +5284,47 @@ void Application::run() {
             saveCurrentScene();
         }
         ctrlSWasDown_ = ctrlSDown;
+
+        // Phase 18h: Ctrl+Z (undo) and Ctrl+Y-or-Ctrl+Shift+Z (redo) -- the
+        // identical edge-triggered two/three-key chord read ctrlSDown just
+        // above already establishes, for the identical two reasons given
+        // there (a chord needs an AND of simultaneous keys, which
+        // InputActionMap's own single-key-OR-bindings shape doesn't support;
+        // and this is editor-chrome behavior, not one of the camera/window-
+        // lifecycle actions that class actually exists to bind), gated on
+        // the same !ImGui::GetIO().WantCaptureKeyboard so typing Ctrl+Z into
+        // an Inspector text field (this engine has none today, but a future
+        // one could) doesn't fire this shortcut mid-edit.
+        //
+        // Redo supports BOTH Ctrl+Y (the Windows/most-apps convention) and
+        // Ctrl+Shift+Z (the Mac/many-creative-apps convention) -- trivial to
+        // support both (one more `||` term) rather than forcing a single
+        // choice, so this project's brief's own "or support both if
+        // trivial" is taken literally. `redoChordDown`'s own Shift check is
+        // OR'd against GLFW_KEY_Y specifically (not required alongside it)
+        // -- Ctrl+Y alone is already a complete redo chord on its own.
+        // ctrlZDown itself explicitly EXCLUDES Shift being held (`!(...)`)
+        // so a Ctrl+Shift+Z press registers as redo only, never also as an
+        // undo -- without that exclusion both edge-triggered checks would
+        // fire on the exact same physical press.
+        const bool shiftDown =
+            window_.isKeyPressed(GLFW_KEY_LEFT_SHIFT) || window_.isKeyPressed(GLFW_KEY_RIGHT_SHIFT);
+        const bool ctrlDownForUndoRedo = window_.isKeyPressed(GLFW_KEY_LEFT_CONTROL) ||
+                                          window_.isKeyPressed(GLFW_KEY_RIGHT_CONTROL);
+        const bool ctrlZDown =
+            !ImGui::GetIO().WantCaptureKeyboard && ctrlDownForUndoRedo && window_.isKeyPressed(GLFW_KEY_Z) && !shiftDown;
+        if (ctrlZDown && !ctrlZWasDown_) {
+            undo();
+        }
+        ctrlZWasDown_ = ctrlZDown;
+
+        const bool redoChordDown = !ImGui::GetIO().WantCaptureKeyboard && ctrlDownForUndoRedo &&
+                                    (window_.isKeyPressed(GLFW_KEY_Y) ||
+                                     (window_.isKeyPressed(GLFW_KEY_Z) && shiftDown));
+        if (redoChordDown && !redoChordWasDown_) {
+            redo();
+        }
+        redoChordWasDown_ = redoChordDown;
 
         update(deltaTime, input);
         render();

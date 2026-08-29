@@ -509,16 +509,30 @@ CreateEntityKind renderCreateEntityMenuItems(bool hasActiveCamera) {
 // Application::render() turns that into a real resources_.getTexture() call
 // and a MaterialOverride component (material_override.hpp) on the selected
 // entity, right after this whole call returns.
+// Phase 18h: three more trailing parameters -- `pendingTransformEditBefore`
+// is EditorUI's own pendingInspectorTransformEditBefore_ member, threaded
+// through by reference (see that member's own editor_ui.hpp comment);
+// `transformEditCommitted`/`deleteEntityRequested` mirror
+// renderDockspaceShell()'s own same-named out-parameters exactly (this
+// function is what actually sets either, on the frame a Transform field
+// edit completes / "Delete Object" is clicked).
 void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& selectedEntity,
                            std::optional<EntityId> activeDirectionalLight,
                            const std::vector<AssetTreeNode>& assetTree,
-                           std::optional<std::string>& textureAssignRequested) {
+                           std::optional<std::string>& textureAssignRequested,
+                           std::optional<TransformSnapshot>& pendingTransformEditBefore,
+                           std::optional<Command>& transformEditCommitted,
+                           std::optional<EntityId>& deleteEntityRequested) {
     if (!selectedEntity.has_value()) {
         // Matches this panel's pre-14e placeholder tone (see the removed
         // "Inspector -- coming in Phase 14e" line) rather than an empty/
         // blank-looking panel -- this phase's own brief explicitly calls
         // for that.
         ImGui::TextWrapped("Inspector -- select an entity in the Scene panel to view/edit it.");
+        // Phase 18h: drop any in-progress edit-session snapshot -- the same
+        // "nothing selected, nothing to interact with" reset updateGizmo()'s
+        // own equivalent early-return already applies to gizmoDragState_.
+        pendingTransformEditBefore.reset();
         return;
     }
 
@@ -534,6 +548,7 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
         // (14f+) can't turn a stale selectedEntity_ into a null dereference
         // here.
         ImGui::TextWrapped("Selected entity no longer has a Transform.");
+        pendingTransformEditBefore.reset();
         return;
     }
 
@@ -553,10 +568,49 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
     // caveat at all, since (unlike ModelComponent's Model) Transform is a
     // genuinely per-entity ComponentPool<Transform> entry (ecs.hpp).
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Phase 18h: `noteActivation`/`commitIfDeactivated` bracket each of
+        // the three widgets below, turning a COMPLETED drag/type-in
+        // interaction (not a per-frame value change -- a multi-frame drag
+        // must become exactly one undo step) into a real transformEditCommitted
+        // Command. `beforeCandidate` is read fresh right before EACH widget
+        // call, i.e. from THIS Transform's state as of before that widget's
+        // own possible mutation this same frame -- necessary because the
+        // very first frame of a drag can both activate AND already report a
+        // changed value in the same ImGui call, so "before" has to be
+        // captured pre-emptively, not decided only after learning activation
+        // happened (see pendingInspectorTransformEditBefore_'s own
+        // editor_ui.hpp comment for the fuller version of this reasoning).
+        // noteActivation() only actually commits that candidate into
+        // `pendingTransformEditBefore` if THIS widget is the one that just
+        // activated -- IsItemActivated()/IsItemDeactivatedAfterEdit() both
+        // refer to "the most recently submitted item," so both must be
+        // called immediately after their own widget, never batched.
+        const auto noteActivation = [&](const TransformSnapshot& beforeCandidate) {
+            if (ImGui::IsItemActivated()) {
+                pendingTransformEditBefore = beforeCandidate;
+            }
+        };
+        const auto commitIfDeactivated = [&]() {
+            if (ImGui::IsItemDeactivatedAfterEdit() && pendingTransformEditBefore.has_value()) {
+                const TransformSnapshot after{transform->position(), transform->rotation(), transform->scale()};
+                // Guards against pushing a no-op step -- e.g. a click on the
+                // field that activates and immediately deactivates without
+                // ever actually moving the value (see
+                // transformSnapshotsEqual()'s own undo_stack.hpp comment).
+                if (!transformSnapshotsEqual(*pendingTransformEditBefore, after)) {
+                    transformEditCommitted = makeTransformEditCommand(id, *pendingTransformEditBefore, after);
+                }
+                pendingTransformEditBefore.reset();
+            }
+        };
+
+        const TransformSnapshot beforePosition{transform->position(), transform->rotation(), transform->scale()};
         glm::vec3 position = transform->position();
         if (ImGui::DragFloat3("Position", &position.x, 0.01f)) {
             transform->setPosition(position);
         }
+        noteActivation(beforePosition);
+        commitIfDeactivated();
 
         // Rot Y only, matching the approved mockup's own single "Rot Y"
         // field -- not full XYZ Euler like DebugUI's pre-existing "Scene
@@ -579,15 +633,21 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
         // might otherwise be present). A future phase that needs to author
         // non-Y rotations from the Inspector should grow this into a full
         // DragFloat3, the same way DebugUI's own panel already does it.
+        const TransformSnapshot beforeRotation{transform->position(), transform->rotation(), transform->scale()};
         float rotationYDeg = glm::degrees(glm::eulerAngles(transform->rotation()).y);
         if (ImGui::DragFloat("Rot Y", &rotationYDeg, 0.5f)) {
             transform->setRotation(glm::angleAxis(glm::radians(rotationYDeg), glm::vec3(0.0f, 1.0f, 0.0f)));
         }
+        noteActivation(beforeRotation);
+        commitIfDeactivated();
 
+        const TransformSnapshot beforeScale{transform->position(), transform->rotation(), transform->scale()};
         glm::vec3 scale = transform->scale();
         if (ImGui::DragFloat3("Scale", &scale.x, 0.01f, 0.01f, 100.0f)) {
             transform->setScale(scale);
         }
+        noteActivation(beforeScale);
+        commitIfDeactivated();
     }
 
     // --- Material --------------------------------------------------------
@@ -892,35 +952,23 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
     }
 
     ImGui::Separator();
-    // Phase 14f: real deletion. destroyEntityOrphaningChildren()
-    // (transform_hierarchy.hpp) removes `id` from EVERY component pool that
-    // currently exists (ecs.hpp's own generic EntityRegistry::
-    // destroyEntity()) after first orphaning any direct children to their
-    // own current world transform -- see that function's own header comment
-    // for the full orphan-vs-cascade design this phase settled on (and
-    // README.md's own Phase 14f section for the short version).
-    //
-    // `selectedEntity` is cleared in the SAME click, immediately after --
-    // not left for next frame's defensive "Selected entity no longer has a
-    // Transform" branch (this function's own early-return above, added
-    // Phase 14e specifically anticipating this) to catch. That branch stays
-    // exactly as it was regardless (a real, still-useful safety net for any
-    // OTHER way selectedEntity could ever end up stale), but relying on it
-    // here instead of clearing eagerly would leave the Inspector showing a
-    // "no longer has a Transform" message for one full frame after a delete
-    // rather than immediately falling back to its normal "nothing selected"
-    // placeholder -- a needless, avoidable flash of the wrong message when
-    // the right one is one line away.
-    //
-    // This is the LAST thing renderInspectorPanel() does: nothing below (in
-    // fact, nothing else in this function at all, after this) reads `id`/
-    // `transform`/`modelComponent`/`nameComponent`/etc. again this call, so
-    // clicking Delete here can safely mutate `registry` out from under those
-    // now-stale local pointers without any further use-after-free risk
-    // within this same invocation.
+    // Phase 14f: real deletion. Phase 18h: no longer calls
+    // destroyEntityOrphaningChildren() (transform_hierarchy.hpp) directly --
+    // this click only REPORTS the request now (`deleteEntityRequested`),
+    // the same "EditorUI reports intent, Application acts" shape
+    // createRequest/saveSceneRequested/textureAssignRequested already
+    // establish. Actually destroying the entity has to happen on
+    // Application's own side of that call now, so it can capture a
+    // SceneEntityRecord (captureEntityRecord(), scene_serialization.hpp)
+    // and push it onto undoStack_ BEFORE the entity's components are gone --
+    // see Application::deleteEntity() (application.cpp) for the real
+    // implementation, which still ends by calling
+    // destroyEntityOrphaningChildren() exactly as this click used to
+    // directly, and still clears selectedEntity_ the identical "immediately,
+    // not left for next frame's defensive fallback" way this comment used to
+    // describe happening right here.
     if (ImGui::Button("Delete Object")) {
-        destroyEntityOrphaningChildren(registry, id);
-        selectedEntity.reset();
+        deleteEntityRequested = id;
     }
 }
 
@@ -1291,7 +1339,19 @@ bool toolbarIconButton(const char* strId, char32_t glyph, bool active, bool enab
 // the "no decision left to make, just an assignment" shape `ssaoDisabled =
 // !ssaoDisabled`/`ssaoDebugMode = !ssaoDebugMode` above already established
 // needs no extracted helper either.
-void renderViewportToolbar(ShadingMode& editShadingMode, bool& physicsRunning) {
+// Phase 18h: four more trailing parameters, replacing the old permanently-
+// disabled "undo" stub with a real, wired-up undo/redo pair. `canUndo`/
+// `canRedo` are read-only snapshots of Application's own
+// undoStack_.canUndo()/canRedo() this frame -- gate each button's own
+// `enabled` the same way `physicsRunning` already gates Play/Pause's
+// `active` highlight, so they gray out at either end of the history exactly
+// like a real editor's undo/redo buttons do. `undoRequested`/
+// `redoRequested` are set true the frame the corresponding button is
+// clicked -- Application::render() is what actually calls undo()/redo()
+// when either comes back true, immediately after renderDockspaceShell()
+// returns (see that method's own editor_ui.hpp comment).
+void renderViewportToolbar(ShadingMode& editShadingMode, bool& physicsRunning, bool canUndo, bool canRedo,
+                            bool& undoRequested, bool& redoRequested) {
     toolbarIconButton("grid", kIconGrid, /*active=*/false, /*enabled=*/false,
                        "Viewport grid overlay -- not implemented yet. This engine has no ground-plane "
                        "grid-drawing code anywhere today; a real one is separate, later scope.");
@@ -1339,9 +1399,27 @@ void renderViewportToolbar(ShadingMode& editShadingMode, bool& physicsRunning) {
     }
 
     ImGui::SameLine();
-    toolbarIconButton("undo", kIconUndo, /*active=*/false, /*enabled=*/false,
-                       "Undo -- not implemented yet. This engine has no edit-history/undo-stack concept "
-                       "anywhere today; a real one is separate, later scope.");
+    // Phase 18h: real -- click undoes the most recent transform edit, entity
+    // creation, or deletion. `enabled=canUndo` grays this out the same way
+    // BeginDisabled() already grays out the grid button above, exactly at
+    // the bottom of the undo history (a fresh scene, or every undoable
+    // action already undone) rather than being permanently disabled the way
+    // this button was through Phase 18g.
+    if (toolbarIconButton("undo", kIconUndo, /*active=*/false, /*enabled=*/canUndo,
+                           canUndo ? "Undo -- click to undo the last transform edit, entity creation, or deletion."
+                                   : "Undo -- nothing to undo yet.")) {
+        undoRequested = true;
+    }
+
+    ImGui::SameLine();
+    // Phase 18h: redo -- the mirror-image counterpart, real from the moment
+    // it exists (unlike undo, there is no prior "shown but disabled" era for
+    // this button to have had).
+    if (toolbarIconButton("redo", kIconRedo, /*active=*/false, /*enabled=*/canRedo,
+                           canRedo ? "Redo -- click to redo the last undone action."
+                                   : "Redo -- nothing to redo yet.")) {
+        redoRequested = true;
+    }
 
     ImGui::SameLine();
     // Phase 18b: real -- click enters Play mode (physics simulation running).
@@ -1466,7 +1544,8 @@ void renderViewportToolbar(ShadingMode& editShadingMode, bool& physicsRunning) {
 // rather than a bug -- this function still updates it with this frame's OWN
 // now-known width before returning, same as `outBgMin`/`outBgMax` above are
 // only knowable this late.
-void renderViewportToolbarOverlay(ShadingMode& editShadingMode, bool& physicsRunning, ImVec2 originScreenPos,
+void renderViewportToolbarOverlay(ShadingMode& editShadingMode, bool& physicsRunning, bool canUndo, bool canRedo,
+                                   bool& undoRequested, bool& redoRequested, ImVec2 originScreenPos,
                                    float viewportContentWidth, float& groupWidth, ImVec2& outBgMin,
                                    ImVec2& outBgMax) {
     // Matches applyEditorTheme()'s own WindowPadding (10,10) as the margin
@@ -1497,7 +1576,7 @@ void renderViewportToolbarOverlay(ShadingMode& editShadingMode, bool& physicsRun
     splitter.SetCurrentChannel(drawList, 1);
     ImGui::SetCursorScreenPos(ImVec2(startX, originScreenPos.y + margin));
     ImGui::BeginGroup();
-    renderViewportToolbar(editShadingMode, physicsRunning);
+    renderViewportToolbar(editShadingMode, physicsRunning, canUndo, canRedo, undoRequested, redoRequested);
     ImGui::EndGroup();
     const ImVec2 groupMin = ImGui::GetItemRectMin();
     const ImVec2 groupMax = ImGui::GetItemRectMax();
@@ -1718,6 +1797,9 @@ EditorUI::EditorUI(GLFWwindow* window) {
     // "lighting"/"texture-mode" buttons -- they reuse kIconDirectionalLight/
     // kIconTexture verbatim (see ToolbarButton/toolbarButtonIconGlyph()'s
     // own editor_icons.hpp comment), both already listed below.
+    //
+    // Phase 18h: one more pair, kIconRedo -- see that constant's own
+    // editor_icons.hpp comment.
     static constexpr ImWchar kIconGlyphRanges[] = {
         static_cast<ImWchar>(kIconCamera),            static_cast<ImWchar>(kIconCamera),
         static_cast<ImWchar>(kIconTexture),           static_cast<ImWchar>(kIconTexture),
@@ -1727,6 +1809,7 @@ EditorUI::EditorUI(GLFWwindow* window) {
         static_cast<ImWchar>(kIconMesh),              static_cast<ImWchar>(kIconMesh),
         static_cast<ImWchar>(kIconGrid),              static_cast<ImWchar>(kIconGrid),
         static_cast<ImWchar>(kIconUndo),              static_cast<ImWchar>(kIconUndo),
+        static_cast<ImWchar>(kIconRedo),              static_cast<ImWchar>(kIconRedo),
         static_cast<ImWchar>(kIconPlay),              static_cast<ImWchar>(kIconPlay),
         static_cast<ImWchar>(kIconPause),             static_cast<ImWchar>(kIconPause),
         0,
@@ -2038,7 +2121,17 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  bool showCustomTitleBar, bool windowMaximized,
                                                  std::pair<int, int> windowPos, TitleBarAction& titleBarAction,
                                                  const glm::vec3& cameraPosition, const glm::mat4& cameraView,
-                                                 const glm::mat4& cameraProjection) {
+                                                 const glm::mat4& cameraProjection,
+                                                 std::optional<EntityId>& deleteEntityRequested,
+                                                 std::optional<Command>& transformEditCommitted, bool canUndo,
+                                                 bool canRedo, bool& undoRequested, bool& redoRequested) {
+    // Phase 18h: the identical "false/empty every frame except the one
+    // where the real thing actually happened" reset every other
+    // out-parameter here already follows.
+    deleteEntityRequested.reset();
+    transformEditCommitted.reset();
+    undoRequested = false;
+    redoRequested = false;
     // Phase 17d: the identical "false/empty every frame except the one where
     // the real thing actually happened" reset every other out-parameter in
     // this function already follows (see e.g. cameraCaptureRequested just
@@ -2339,8 +2432,9 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // occupied this frame.
         ImVec2 toolbarBgMin;
         ImVec2 toolbarBgMax;
-        renderViewportToolbarOverlay(editShadingMode, physicsRunning, panelScreenPos, contentRegion.x,
-                                      toolbarGroupWidthLastFrame_, toolbarBgMin, toolbarBgMax);
+        renderViewportToolbarOverlay(editShadingMode, physicsRunning, canUndo, canRedo, undoRequested, redoRequested,
+                                      panelScreenPos, contentRegion.x, toolbarGroupWidthLastFrame_, toolbarBgMin,
+                                      toolbarBgMax);
 
         // Phase 18e: the translate gizmo's own hit-test/drag handling --
         // called here, after the toolbar overlay (so toolbarBgMin/toolbarBgMax
@@ -2350,7 +2444,7 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // updateGizmo()'s own header comment above for the full design.
         const bool gizmoActiveThisFrame =
             updateGizmo(registry, selectedEntity, cameraPosition, cameraView, cameraProjection, panelScreenPos,
-                        contentRegion, toolbarBgMin, toolbarBgMax);
+                        contentRegion, toolbarBgMin, toolbarBgMax, transformEditCommitted);
 
         // Phase 16: the camera-capture trigger -- a double-click anywhere in
         // this panel's own content region, gated to only fire while NOT
@@ -2461,7 +2555,8 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     ImGui::End();
 
     ImGui::Begin("Inspector");
-    renderInspectorPanel(registry, selectedEntity, activeDirectionalLight, assetTree_, textureAssignRequested);
+    renderInspectorPanel(registry, selectedEntity, activeDirectionalLight, assetTree_, textureAssignRequested,
+                          pendingInspectorTransformEditBefore_, transformEditCommitted, deleteEntityRequested);
     ImGui::End();
 
     return createRequest;
@@ -2476,7 +2571,8 @@ void EditorUI::setDebugMouseOverride(std::optional<glm::vec2> screenPos, bool mo
 bool EditorUI::updateGizmo(EntityRegistry& registry, std::optional<EntityId> selectedEntity,
                            const glm::vec3& cameraPosition, const glm::mat4& cameraView,
                            const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
-                           const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax) {
+                           const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
+                           std::optional<Command>& transformEditCommitted) {
     if (!selectedEntity.has_value()) {
         // Nothing selected -- no gizmo, no interaction. Also drops any
         // stale in-progress drag rather than leaving gizmoDragState_
@@ -2563,6 +2659,33 @@ bool EditorUI::updateGizmo(EntityRegistry& registry, std::optional<EntityId> sel
     if (result.newPosition.has_value()) {
         const glm::vec3 worldDelta = *result.newPosition - result.state.startEntityPosition;
         transform->setPosition(gizmoDragStartLocalPosition_ + worldDelta);
+    }
+
+    // Phase 18h: the drag's own RELEASE transition -- wasDragging (a real
+    // axis last frame) but result.state.axis is now kNone (this frame's
+    // updateGizmoDrag() call above just returned to the idle state, per its
+    // own "!mouseDown" release branch, gizmo.hpp) -- is exactly the "a
+    // COMPLETED transform edit just happened" moment this whole feature
+    // needs: a multi-frame drag only ever produces ONE Command, right here,
+    // never one per frame while `result.newPosition` was being applied
+    // above. `before` reuses gizmoDragStartLocalPosition_ (the entity's own
+    // local position as of the grab frame, still valid here -- it's only
+    // ever overwritten by a NEW grab, never mid-drag) paired with the
+    // rotation/scale transform still holds now (neither changes during a
+    // translate-only gizmo drag, so reading them now is exactly as correct
+    // as caching them at grab time would have been); `after` is the
+    // entity's own live Transform, already fully updated by either this
+    // same frame's `result.newPosition` branch above or the previous
+    // frame's last one. Guarded by transformSnapshotsEqual() the same way
+    // renderInspectorPanel()'s own commitIfDeactivated() is, so a grab that
+    // never actually moved the mouse (hoverAxis grabbed, then released with
+    // zero net delta) doesn't push a no-op undo step.
+    if (wasDragging && result.state.axis == GizmoAxis::kNone) {
+        const TransformSnapshot before{gizmoDragStartLocalPosition_, transform->rotation(), transform->scale()};
+        const TransformSnapshot after{transform->position(), transform->rotation(), transform->scale()};
+        if (!transformSnapshotsEqual(before, after)) {
+            transformEditCommitted = makeTransformEditCommand(*selectedEntity, before, after);
+        }
     }
 
     gizmoDragState_ = result.state;

@@ -35,6 +35,149 @@
 
 namespace engine {
 
+EntityId restoreEntityFromRecord(EntityRegistry& registry, const SceneEntityRecord& record, ResourceManager& resources,
+                                  Shader& shader) {
+    const EntityId id = registry.create();
+    registry.addComponent<NameComponent>(id, NameComponent{record.name});
+
+    Transform& transform = registry.addComponent<Transform>(id);
+    transform.setPosition(record.position);
+    transform.setRotation(record.rotation);
+    transform.setScale(record.scale);
+
+    if (record.hasRigidBody) {
+        registry.addComponent<RigidBody>(id, RigidBody{record.rigidBodyVelocity, record.rigidBodyGravity});
+    }
+    if (record.hasCollider) {
+        registry.addComponent<Collider>(id, Collider{record.colliderHalfExtent});
+    }
+
+    if (record.hasPointLight) {
+        registry.addComponent<PointLight>(
+            id, PointLight{record.pointLightColor, record.pointLightConstant, record.pointLightLinear,
+                            record.pointLightQuadratic});
+    }
+    if (record.hasDirectionalLight) {
+        registry.addComponent<DirectionalLight>(
+            id, DirectionalLight{record.directionalLightDirection, record.directionalLightColor});
+    }
+    if (record.hasCameraComponent) {
+        registry.addComponent<CameraComponent>(
+            id, CameraComponent{record.cameraFovYDeg, record.cameraNearPlane, record.cameraFarPlane});
+    }
+
+    if (record.hasMaterialOverride) {
+        const std::string resolvedTexturePath = resolveAssetPath(record.materialOverrideDiffuseTexturePath);
+        try {
+            MaterialOverride& materialOverride = registry.addComponent<MaterialOverride>(id, MaterialOverride{});
+            materialOverride.diffuseTexture = resources.getTexture(resolvedTexturePath);
+            materialOverride.diffuseTexturePath = record.materialOverrideDiffuseTexturePath;
+        } catch (const std::exception& e) {
+            LOG_ERROR("restoreEntityFromRecord: entity \"" + record.name +
+                       "\" failed to load materialOverride texture \"" + record.materialOverrideDiffuseTexturePath +
+                       "\": " + e.what());
+            throw std::runtime_error("restoreEntityFromRecord: entity \"" + record.name +
+                                      "\" failed to load materialOverride texture \"" +
+                                      record.materialOverrideDiffuseTexturePath + "\": " + e.what());
+        }
+    }
+
+    if (record.modelPath.empty()) {
+        return id;
+    }
+
+    // modelPath is stored/authored relative -- see loadScene()'s own comment
+    // below for the full reasoning, identical here.
+    const std::string resolvedPath = resolveAssetPath(record.modelPath);
+    if (!std::filesystem::exists(resolvedPath)) {
+        LOG_ERROR("restoreEntityFromRecord: entity \"" + record.name +
+                   "\" references a model asset that doesn't exist: \"" + record.modelPath + "\" (resolved to \"" +
+                   resolvedPath + "\")");
+        throw std::runtime_error("restoreEntityFromRecord: entity \"" + record.name +
+                                  "\" references a missing model asset \"" + record.modelPath + "\"");
+    }
+
+    try {
+        std::shared_ptr<Model> model = resources.getModel(resolvedPath, shader);
+        registry.addComponent<ModelComponent>(id, ModelComponent{std::move(model), record.modelPath});
+    } catch (const std::exception& e) {
+        LOG_ERROR("restoreEntityFromRecord: entity \"" + record.name + "\" failed to load model \"" +
+                   record.modelPath + "\": " + e.what());
+        throw std::runtime_error("restoreEntityFromRecord: entity \"" + record.name + "\" failed to load model \"" +
+                                  record.modelPath + "\": " + e.what());
+    }
+
+    return id;
+}
+
+SceneEntityRecord captureEntityRecord(EntityRegistry& registry, EntityId id, EntityId activeDirectionalLight) {
+    SceneEntityRecord record;
+
+    const NameComponent* nameComponent = registry.getComponent<NameComponent>(id);
+    record.name = nameComponent != nullptr ? nameComponent->name : ("entity_" + std::to_string(id.index()));
+
+    const Transform* transform = registry.getComponent<Transform>(id);
+    if (transform != nullptr) {
+        record.position = transform->position();
+        record.rotation = transform->rotation();
+        record.scale = transform->scale();
+    }
+
+    const ModelComponent* modelComponent = registry.getComponent<ModelComponent>(id);
+    if (modelComponent != nullptr) {
+        record.modelPath = modelComponent->path;
+    }
+
+    const RigidBody* rigidBody = registry.getComponent<RigidBody>(id);
+    if (rigidBody != nullptr) {
+        record.hasRigidBody = true;
+        record.rigidBodyGravity = rigidBody->useGravity;
+        record.rigidBodyVelocity = rigidBody->velocity;
+    }
+    const Collider* collider = registry.getComponent<Collider>(id);
+    if (collider != nullptr) {
+        record.hasCollider = true;
+        record.colliderHalfExtent = collider->halfExtent;
+    }
+
+    const PointLight* pointLight = registry.getComponent<PointLight>(id);
+    if (pointLight != nullptr) {
+        record.hasPointLight = true;
+        record.pointLightColor = pointLight->color;
+        record.pointLightConstant = pointLight->constant;
+        record.pointLightLinear = pointLight->linear;
+        record.pointLightQuadratic = pointLight->quadratic;
+    }
+    const DirectionalLight* directionalLight = registry.getComponent<DirectionalLight>(id);
+    if (directionalLight != nullptr) {
+        record.hasDirectionalLight = true;
+        record.directionalLightDirection = directionalLight->direction;
+        record.directionalLightColor = directionalLight->color;
+        record.directionalLightActive = (id == activeDirectionalLight);
+    }
+    const CameraComponent* cameraComponent = registry.getComponent<CameraComponent>(id);
+    if (cameraComponent != nullptr) {
+        record.hasCameraComponent = true;
+        record.cameraFovYDeg = cameraComponent->fovYDeg;
+        record.cameraNearPlane = cameraComponent->nearPlane;
+        record.cameraFarPlane = cameraComponent->farPlane;
+    }
+
+    const MaterialOverride* materialOverride = registry.getComponent<MaterialOverride>(id);
+    if (materialOverride != nullptr && materialOverride->diffuseTexture != nullptr) {
+        record.hasMaterialOverride = true;
+        record.materialOverrideDiffuseTexturePath = materialOverride->diffuseTexturePath;
+    }
+
+    const Parent* parent = registry.getComponent<Parent>(id);
+    if (parent != nullptr && parent->id.valid() && registry.getComponent<Transform>(parent->id) != nullptr) {
+        const NameComponent* parentName = registry.getComponent<NameComponent>(parent->id);
+        record.parentName = parentName != nullptr ? parentName->name : ("entity_" + std::to_string(parent->id.index()));
+    }
+
+    return record;
+}
+
 void loadScene(EntityRegistry& registry, const std::string& path, ResourceManager& resources, Shader& shader,
                 EntityId* activeDirectionalLightOut) {
     // Phase 15e: reset up front, unconditionally, before parseSceneRecords()
@@ -72,117 +215,27 @@ void loadScene(EntityRegistry& registry, const std::string& path, ResourceManage
     std::unordered_map<std::string, EntityId> idByName;
     idByName.reserve(records.size());
 
+    // Phase 18h: the actual per-record entity-building work now lives in
+    // restoreEntityFromRecord() (scene_serialization.hpp), shared with
+    // Application's own undo/redo recreation path -- see that function's
+    // own header comment. Everything below this call is what's left that's
+    // specific to a WHOLE-FILE load: idByName bookkeeping (for the
+    // second-pass Parent resolution further down) and the
+    // "last-record-wins" active-directional-light tracking, neither of
+    // which restoreEntityFromRecord() itself can do for a single record in
+    // isolation.
     for (const SceneEntityRecord& record : records) {
-        const EntityId id = registry.create();
-        registry.addComponent<NameComponent>(id, NameComponent{record.name});
+        const EntityId id = restoreEntityFromRecord(registry, record, resources, shader);
         idByName[record.name] = id;
 
-        Transform& transform = registry.addComponent<Transform>(id);
-        transform.setPosition(record.position);
-        transform.setRotation(record.rotation);
-        transform.setScale(record.scale);
-
-        // Phase 8e: RigidBody/Collider are added independently of each
-        // other and of the modelPath check below -- an entity can have
-        // either, both, or neither, matching every other component here
-        // being opt-in per entity (see scene_serialization.hpp's own
-        // "Schema" comment).
-        if (record.hasRigidBody) {
-            registry.addComponent<RigidBody>(id, RigidBody{record.rigidBodyVelocity, record.rigidBodyGravity});
-        }
-        if (record.hasCollider) {
-            registry.addComponent<Collider>(id, Collider{record.colliderHalfExtent});
-        }
-
-        // Phase 15e: PointLight/DirectionalLight/CameraComponent are added
-        // independently of RigidBody/Collider/each other and of the
-        // modelPath check below -- same opt-in-per-entity treatment (see
-        // scene_serialization.hpp's own "Schema" comment).
-        if (record.hasPointLight) {
-            registry.addComponent<PointLight>(
-                id, PointLight{record.pointLightColor, record.pointLightConstant, record.pointLightLinear,
-                                record.pointLightQuadratic});
-        }
-        if (record.hasDirectionalLight) {
-            registry.addComponent<DirectionalLight>(
-                id, DirectionalLight{record.directionalLightDirection, record.directionalLightColor});
-            // Phase 15e: see scene_serialization.hpp's own "Active
-            // directional light" comment for why the LAST record (in file
-            // order) with directionalLightActive == true wins here, silently
-            // overwriting whatever this pointee held from an earlier record
-            // in this same loop -- the identical "last one wins" tolerance
-            // idByName just above already has for a duplicate "name".
-            if (record.directionalLightActive && activeDirectionalLightOut != nullptr) {
-                *activeDirectionalLightOut = id;
-            }
-        }
-        if (record.hasCameraComponent) {
-            registry.addComponent<CameraComponent>(
-                id, CameraComponent{record.cameraFovYDeg, record.cameraNearPlane, record.cameraFarPlane});
-        }
-
-        // Phase 15f: MaterialOverride round-trips the same independent,
-        // opt-in-per-entity way as RigidBody/Collider/PointLight/
-        // DirectionalLight/CameraComponent above -- see
-        // scene_serialization.hpp's own Phase 15f comment for why this one,
-        // unlike PointLight/DirectionalLight/CameraComponent when THEY were
-        // introduced, round-trips from the very phase it's added rather than
-        // being deferred. Resolved/loaded exactly like modelPath just below
-        // (resolveAssetPath() against the executable's own directory, then
-        // through resources.getTexture() so it shares this engine's one
-        // Texture cache like every other texture load), with the same
-        // "surface which entity's asset reference was bad" re-throw
-        // treatment the modelPath try/catch below already establishes.
-        if (record.hasMaterialOverride) {
-            const std::string resolvedTexturePath = resolveAssetPath(record.materialOverrideDiffuseTexturePath);
-            try {
-                MaterialOverride& materialOverride = registry.addComponent<MaterialOverride>(id, MaterialOverride{});
-                materialOverride.diffuseTexture = resources.getTexture(resolvedTexturePath);
-                materialOverride.diffuseTexturePath = record.materialOverrideDiffuseTexturePath;
-            } catch (const std::exception& e) {
-                LOG_ERROR("loadScene: entity \"" + record.name + "\" failed to load materialOverride texture \"" +
-                           record.materialOverrideDiffuseTexturePath + "\": " + e.what());
-                throw std::runtime_error("loadScene: entity \"" + record.name +
-                                          "\" failed to load materialOverride texture \"" +
-                                          record.materialOverrideDiffuseTexturePath + "\": " + e.what());
-            }
-        }
-
-        if (record.modelPath.empty()) {
-            continue;
-        }
-
-        // modelPath is stored/authored relative (e.g.
-        // "assets/models/scene.obj", matching ResourceManager::getModel()'s
-        // own path convention -- see resource_manager.hpp), so it's
-        // resolved against the executable's directory here, the same way
-        // every other asset path in this engine is (see paths.hpp) --
-        // never baked into the scene file as an already-resolved absolute
-        // path, which would make assets/scenes/default.json non-portable
-        // across machines/checkouts.
-        const std::string resolvedPath = resolveAssetPath(record.modelPath);
-        if (!std::filesystem::exists(resolvedPath)) {
-            LOG_ERROR("loadScene: entity \"" + record.name + "\" references a model asset that doesn't exist: \"" +
-                       record.modelPath + "\" (resolved to \"" + resolvedPath + "\")");
-            throw std::runtime_error("loadScene: entity \"" + record.name +
-                                      "\" references a missing model asset \"" + record.modelPath + "\"");
-        }
-
-        try {
-            std::shared_ptr<Model> model = resources.getModel(resolvedPath, shader);
-            registry.addComponent<ModelComponent>(id, ModelComponent{std::move(model), record.modelPath});
-        } catch (const std::exception& e) {
-            // Re-thrown with the offending entity's name/path attached --
-            // see scene_serialization.hpp's own loadScene() comment on why
-            // a bare Model::load failure isn't enough context for a
-            // multi-entity scene file (LOG_ERROR already happened once,
-            // inside ResourceManager/Model; this is a second,
-            // entity-scoped log line, not a duplicate of the same
-            // information).
-            LOG_ERROR("loadScene: entity \"" + record.name + "\" failed to load model \"" + record.modelPath +
-                       "\": " + e.what());
-            throw std::runtime_error("loadScene: entity \"" + record.name + "\" failed to load model \"" +
-                                      record.modelPath + "\": " + e.what());
+        // Phase 15e: see scene_serialization.hpp's own "Active directional
+        // light" comment for why the LAST record (in file order) with
+        // directionalLightActive == true wins here, silently overwriting
+        // whatever this pointee held from an earlier record in this same
+        // loop -- the identical "last one wins" tolerance idByName just
+        // above already has for a duplicate "name".
+        if (record.hasDirectionalLight && record.directionalLightActive && activeDirectionalLightOut != nullptr) {
+            *activeDirectionalLightOut = id;
         }
     }
 
@@ -221,102 +274,18 @@ void saveScene(EntityRegistry& registry, const std::string& path, EntityId activ
     // (mirroring how loadScene() treats an absent "model" block) covers
     // every entity exactly once -- the reverse (driving off ModelComponent)
     // would silently skip any future Model-less entity.
-    registry.each<Transform>([&](EntityId id, Transform& transform) {
-        SceneEntityRecord record;
-        const NameComponent* nameComponent = registry.getComponent<NameComponent>(id);
-        record.name = nameComponent != nullptr ? nameComponent->name : ("entity_" + std::to_string(id.index()));
-        record.position = transform.position();
-        record.rotation = transform.rotation();
-        record.scale = transform.scale();
-
-        const ModelComponent* modelComponent = registry.getComponent<ModelComponent>(id);
-        if (modelComponent != nullptr) {
-            record.modelPath = modelComponent->path;
-        }
-
-        // Phase 8e: RigidBody/Collider round-trip the same way ModelComponent
-        // does -- present only when the entity actually has that component.
-        const RigidBody* rigidBody = registry.getComponent<RigidBody>(id);
-        if (rigidBody != nullptr) {
-            record.hasRigidBody = true;
-            record.rigidBodyGravity = rigidBody->useGravity;
-            record.rigidBodyVelocity = rigidBody->velocity;
-        }
-        const Collider* collider = registry.getComponent<Collider>(id);
-        if (collider != nullptr) {
-            record.hasCollider = true;
-            record.colliderHalfExtent = collider->halfExtent;
-        }
-
-        // Phase 15e: PointLight/DirectionalLight/CameraComponent round-trip
-        // the same way RigidBody/Collider do just above -- present only when
-        // the entity actually has that component. DirectionalLight's own
-        // "active" marker is set by comparing this entity's own id against
-        // `activeDirectionalLight` (the caller's current activeDirectionalLight_,
-        // see this function's own scene_serialization.hpp comment) -- an
-        // entity that isn't the active one (including every entity when
-        // `activeDirectionalLight` is the default-constructed invalid
-        // EntityId, i.e. "no active light at all") gets "active": false,
-        // same as DirectionalLight's own default.
-        const PointLight* pointLight = registry.getComponent<PointLight>(id);
-        if (pointLight != nullptr) {
-            record.hasPointLight = true;
-            record.pointLightColor = pointLight->color;
-            record.pointLightConstant = pointLight->constant;
-            record.pointLightLinear = pointLight->linear;
-            record.pointLightQuadratic = pointLight->quadratic;
-        }
-        const DirectionalLight* directionalLight = registry.getComponent<DirectionalLight>(id);
-        if (directionalLight != nullptr) {
-            record.hasDirectionalLight = true;
-            record.directionalLightDirection = directionalLight->direction;
-            record.directionalLightColor = directionalLight->color;
-            record.directionalLightActive = (id == activeDirectionalLight);
-        }
-        const CameraComponent* cameraComponent = registry.getComponent<CameraComponent>(id);
-        if (cameraComponent != nullptr) {
-            record.hasCameraComponent = true;
-            record.cameraFovYDeg = cameraComponent->fovYDeg;
-            record.cameraNearPlane = cameraComponent->nearPlane;
-            record.cameraFarPlane = cameraComponent->farPlane;
-        }
-
-        // Phase 15f: MaterialOverride round-trips the same way -- only when
-        // diffuseTexture is actually non-null, matching
-        // resolveDiffuseTextureOverride()'s own "null means no override"
-        // contract (material_override.hpp) exactly, so a MaterialOverride
-        // component some future caller added but left empty doesn't
-        // round-trip as a schema-invalid "materialOverride": {} block (see
-        // scene_serialization.hpp's own "Schema" comment on why
-        // "diffuseTexture" is a required field of a present block).
-        const MaterialOverride* materialOverride = registry.getComponent<MaterialOverride>(id);
-        if (materialOverride != nullptr && materialOverride->diffuseTexture != nullptr) {
-            record.hasMaterialOverride = true;
-            record.materialOverrideDiffuseTexturePath = materialOverride->diffuseTexturePath;
-        }
-
-        // Phase 14b: "parent" round-trips as the OTHER entity's own name
-        // (its NameComponent if it has one, or the same generated
-        // "entity_<index>" placeholder this function already uses for a
-        // name-less entity above) -- see scene_serialization.hpp's own
-        // "Parent references" comment for why a name, not the raw EntityId,
-        // which wouldn't mean anything after a reload. Only written when
-        // the parent still actually resolves to a live Transform: a
-        // Parent whose id no longer names a real entity (not reachable
-        // yet -- there is no entity-destroy UI before Phase 14f -- but this
-        // guards against it anyway) is deliberately left OUT of the saved
-        // file rather than round-tripping an unresolvable name that would
-        // just fail parseSceneRecords()'s own "parent" validation on the
-        // next load; the in-memory registry keeps the dangling Parent
-        // component either way, only the save omits it.
-        const Parent* parent = registry.getComponent<Parent>(id);
-        if (parent != nullptr && parent->id.valid() && registry.getComponent<Transform>(parent->id) != nullptr) {
-            const NameComponent* parentName = registry.getComponent<NameComponent>(parent->id);
-            record.parentName =
-                parentName != nullptr ? parentName->name : ("entity_" + std::to_string(parent->id.index()));
-        }
-
-        records.push_back(std::move(record));
+    // Phase 18h: the actual per-entity record-building work now lives in
+    // captureEntityRecord() (scene_serialization.hpp), shared with
+    // Application's own undo/redo entity-deletion/-creation commands -- see
+    // that function's own header comment. `transform` (the each<Transform>()
+    // callback's own second parameter) is unused here beyond driving which
+    // entities this loop visits at all -- captureEntityRecord() re-reads the
+    // same Transform component by id internally, the same "this loop exists
+    // to enumerate ids, not to hand-carry each entity's own component
+    // references" shape restoreEntityFromRecord()'s own caller (loadScene()
+    // above) already has.
+    registry.each<Transform>([&](EntityId id, Transform& /*transform*/) {
+        records.push_back(captureEntityRecord(registry, id, activeDirectionalLight));
     });
 
     writeSceneRecords(records, path);

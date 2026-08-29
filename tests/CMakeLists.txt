@@ -326,3 +326,24 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME shading_mode_test COMMAND shading_mode_test)
+
+# Phase 18h adds undo_stack_test, testing engine::UndoStack's own push/undo/
+# redo/truncate-on-new-push semantics (src/undo_stack.cpp) in isolation --
+# same "plain executable, links only the pure logic file it's testing" shape
+# as gizmo_test/shading_mode_test above. undo_stack.cpp depends on GLM
+# (TransformSnapshot) and ecs.hpp/scene_serialization.hpp for the
+# EntityId/SceneEntityRecord TYPES a Command carries -- neither pulls in any
+# GL/ResourceManager/Shader dependency (see undo_stack.hpp's own header
+# comment), so this needs no live GL context/GPU/EntityRegistry/
+# ResourceManager whatsoever.
+add_executable(undo_stack_test
+    undo_stack_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/undo_stack.cpp
+)
+target_include_directories(undo_stack_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(undo_stack_test PRIVATE glm::glm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(undo_stack_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME undo_stack_test COMMAND undo_stack_test)

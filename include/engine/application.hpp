@@ -515,6 +515,7 @@
 #include "engine/skybox.hpp"
 #include "engine/ssao.hpp"
 #include "engine/transform.hpp"
+#include "engine/undo_stack.hpp"
 #include "engine/window.hpp"
 
 namespace engine {
@@ -1009,6 +1010,78 @@ private:
     // actually achieve.
     void saveCurrentScene();
 
+    // Phase 18h: the real "Delete Object" implementation -- the one place
+    // this class actually destroys an entity via
+    // destroyEntityOrphaningChildren() (transform_hierarchy.hpp) now,
+    // replacing editor_ui.cpp's own pre-18h direct call (see that file's
+    // updated renderInspectorPanel() comment). Captures a full
+    // SceneEntityRecord of `id` (captureEntityRecord(),
+    // scene_serialization.hpp) and pushes a kDeleteEntity Command onto
+    // undoStack_ BEFORE destroying anything -- undo() later restores this
+    // exact snapshot via restoreEntityFromRecord() (see that pair's own
+    // header comments for the full reuse design, undo_stack.hpp). Clears
+    // selectedEntity_ if it named `id`, the identical "clear on delete"
+    // behavior the Inspector's own click handler always had. Shared by
+    // every real deletion path this engine has: the Inspector's own
+    // "Delete Object" button (via render()'s own deleteEntityRequested
+    // handling) and ENGINE_DEBUG_DELETE (constructor) both call this now,
+    // instead of each hand-rolling its own destroyEntityOrphaningChildren()
+    // call -- the same "debug env var / real UI action share one production
+    // code path" precedent spawnEntityFromCreateMenu() already establishes.
+    void deleteEntity(EntityId id);
+
+    // Phase 18h: undo()/redo() -- pop the most recently done/undone Command
+    // off undoStack_ (see that class's own undo_stack.hpp comment) and
+    // apply its inverse/forward effect to registry_. Both are safe to call
+    // whenever nothing is left to undo/redo (UndoStack::undo()/redo()
+    // themselves are no-ops in that case) -- every real call site (the
+    // toolbar's own undo/redo buttons, Ctrl+Z/Ctrl+Y-or-Ctrl+Shift+Z in
+    // run(), ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO in update()) calls these
+    // unconditionally rather than checking canUndo()/canRedo() itself
+    // first.
+    void undo();
+    void redo();
+
+    // Phase 18h: undo()/redo()'s own small per-kind helpers -- both undo()
+    // (applying a Command's INVERSE effect) and redo() (applying its
+    // FORWARD effect) dispatch on Command::kind to one of these three, just
+    // choosing `before` vs. `after` (kTransformEdit) or recreate-vs-destroy
+    // (kCreateEntity/kDeleteEntity) in opposite directions -- see
+    // application.cpp's own definitions for the exact dispatch table.
+    //
+    // setTransformFromSnapshot(): writes `snapshot` straight into `id`'s own
+    // live Transform component -- a no-op (not an error) if `id` no longer
+    // has one, the same defensive "a stale id is safe, never UB" tolerance
+    // ecs.hpp's own EntityId comment already documents for every other
+    // getComponent() call site in this codebase.
+    void setTransformFromSnapshot(EntityId id, const TransformSnapshot& snapshot);
+
+    // destroyCommandEntity(): destroyEntityOrphaningChildren() on
+    // cmd.entity, clearing selectedEntity_ if it named that same id -- used
+    // for BOTH undoing a creation and redoing a deletion (the two cases
+    // where a Command's own live entity needs to stop existing).
+    void destroyCommandEntity(Command& cmd);
+
+    // recreateCommandEntity(): restoreEntityFromRecord() from cmd.record,
+    // then resolves that record's own optional parentName/
+    // directionalLightActive fields against the CURRENT live registry_
+    // (findEntityByName() -- see that free function's own comment) since
+    // restoreEntityFromRecord() itself deliberately does neither (see its
+    // own scene_serialization.hpp comment for why), and finally rewrites
+    // cmd.entity to the freshly created id -- used for BOTH undoing a
+    // deletion and redoing a creation (the two cases where a Command's own
+    // entity needs to come back into existence, always as a brand-new id --
+    // see undo_stack.hpp's own header comment for why). Logs and leaves
+    // cmd.entity unchanged (pointing at whatever it held before -- a
+    // now-permanently-stale id) if restoreEntityFromRecord() itself throws
+    // (a missing/unloadable model or texture asset -- shouldn't happen for
+    // a record captured from a real, previously-successfully-loaded live
+    // entity, but not assumed impossible either); no further undo/redo
+    // against this one Command can succeed after that, the same "don't
+    // crash the whole engine over one bad asset reference" instinct
+    // spawnEntityFromDroppedModel()'s own try/catch already establishes.
+    void recreateCommandEntity(Command& cmd);
+
     // Phase 9: one sphere in the PBR test-grid -- its own placement
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
     // differ per instance; the mesh geometry itself, sphereMesh_, is shared
@@ -1377,6 +1450,15 @@ private:
     // frame). Meaningless (left at its default) whenever
     // debugGizmoDragEntity_ is std::nullopt.
     glm::vec3 debugGizmoDragStartPosition_{0.0f};
+
+    // Phase 18h: ENGINE_DEBUG_UNDO=<count>/ENGINE_DEBUG_REDO=<count> -- see
+    // those two env vars' own application.cpp comments. 0 (the default)
+    // means "unset, do nothing"; update() consumes whichever is nonzero at
+    // its own fixed scripted frame (kDebugUndoFrame/kDebugRedoFrame,
+    // application.cpp), calling undo()/redo() that many times in a row and
+    // logging registry_'s resulting state after each call.
+    int debugUndoCount_ = 0;
+    int debugRedoCount_ = 0;
     // This engine's one actual rendered view -- still exactly what it was
     // from Phase 3 onward: a free-fly camera driven each frame by real
     // WASD/mouse input (or the scripted ENGINE_CAMERA_DEMO path), entirely
@@ -1560,6 +1642,26 @@ private:
     // cleanup required.
     std::optional<EntityId> activeDirectionalLight_;
 
+    // Phase 18h: this Application's own command-stack undo/redo history --
+    // see undo_stack.hpp's own header comment for the full design. Every
+    // real mutation this class pushes onto it goes through deleteEntity()/
+    // spawnEntityFromCreateMenu()'s own trailing push, or render()'s own
+    // transformEditCommitted handling -- see each's own comment.
+    //
+    // Deliberately NOT cleared/preserved across a scene reload -- this
+    // engine has exactly one real "load a scene" call site
+    // (ENGINE_LEGACY_SCENE's own loadScene() call, constructor) and no
+    // in-editor "load a different scene" UI at all yet, so there is no live
+    // call site where preserving history across a reload would even matter
+    // today; a future phase that adds a real Scene > Open/Load UI is the
+    // right place to decide whether undo history should survive that
+    // action (this project's own established "smallest correct increment"
+    // discipline -- see e.g. physics.hpp's own RigidBody mass-field comment
+    // -- argues for clearing it there too: an undo step referencing a
+    // SceneEntityRecord/EntityId from a scene that's no longer even loaded
+    // is meaningless at best, actively confusing at worst).
+    UndoStack undoStack_;
+
     // Phase 15e: edge-triggered state for the Ctrl+S "Save Scene" keyboard
     // shortcut -- true whenever run()'s own most recent poll found BOTH a
     // Ctrl key and S held down together (and ImGui didn't want the
@@ -1581,6 +1683,18 @@ private:
     // input.hpp's own comment), just implemented directly here instead of
     // through that class.
     bool ctrlSWasDown_ = false;
+
+    // Phase 18h: the identical edge-triggered-chord pattern ctrlSWasDown_
+    // above already establishes, now for Ctrl+Z (undo) and Ctrl+Y-or-
+    // Ctrl+Shift+Z (redo -- both supported, see run()'s own comment on why
+    // "trivial to support both" won out over picking just one). Two
+    // separate bools (not one shared "was any undo/redo chord down") since
+    // the two chords are checked and edge-detected independently -- a user
+    // releasing Ctrl+Z and, in the same physical gesture, pressing
+    // Ctrl+Shift+Z must register as a FRESH redo press, not be suppressed
+    // by undo's own edge-tracking.
+    bool ctrlZWasDown_ = false;
+    bool redoChordWasDown_ = false;
 
     // Phase 16: true exactly while the free-fly camera is "captured" --
     // the OS cursor hidden, WASD/mouse-look actually feeding camera_ (see

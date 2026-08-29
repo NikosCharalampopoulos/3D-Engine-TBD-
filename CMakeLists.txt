@@ -255,6 +255,7 @@ add_executable(engine_app
     src/gizmo.cpp
     src/camera_component.cpp
     src/shading_mode.cpp
+    src/undo_stack.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

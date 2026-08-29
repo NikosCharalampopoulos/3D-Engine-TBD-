@@ -399,7 +399,9 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        fonts/editor-icons.ttf -- Phase 17b's new hand-subsetted
                        Font Awesome Free icon font (2,160 bytes, 6 glyphs),
                        re-subsetted Phase 17c to 2,916 bytes/10 glyphs (four
-                       more codepoints for the new Viewport toolbar row) +
+                       more codepoints for the new Viewport toolbar row),
+                       re-subsetted again Phase 18h to 3,152 bytes/11 glyphs
+                       (one more codepoint, the redo icon) +
                        LICENSE-font-awesome.txt (its own upstream license text)
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
 tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
@@ -9021,6 +9023,383 @@ panel already exposed, making the toolbar wiring purely redundant.
     ShadingMode::kWireframe)` case, since `editShadingMode_` is never
     touched by Play mode entering or leaving at all.
 
+### Phase 18h: real undo/redo for transform edits, entity creation, and entity deletion
+
+The Viewport toolbar's own "undo" button has been a `BeginDisabled()`'d stub
+since Phase 17c, with an explanatory tooltip reading "not implemented yet...
+a real one is separate, later scope" -- explicitly waiting for this phase.
+This phase builds a real command-stack undo/redo system covering exactly the
+three editing actions this editor actually supports today: transform edits
+(the Inspector's Transform `DragFloat3`/`DragFloat` fields, AND Phase 18e's
+translate gizmo), entity creation (the Scene panel's Create menu), and
+entity deletion (the Inspector's "Delete Object" button). Confirmed,
+deliberately not expanded scope -- material/texture assignment, light/camera
+property edits, parenting, shading-mode/Play-Edit toggles, and scene
+load/save itself all stay outside undo/redo, exactly as documented below.
+
+#### Architecture: a tagged-union `Command`, a plain `UndoStack`, reused scene-serialization capture/restore
+
+- **`undo_stack.hpp`/`undo_stack.cpp`** (new): the pure, GL/ECS-agnostic
+  half of this feature, matching this codebase's established "plain
+  structs/enums + free functions, not a virtual class hierarchy" style
+  (`gizmo.hpp`'s `GizmoAxis`/`GizmoDragState`, `shading_mode.hpp`'s
+  `ShadingMode` + `decideNextEditShadingMode()`, `camera_capture.hpp`'s
+  `decideCameraCapture()`). `Command` is a `CommandKind` enum
+  (`kTransformEdit`/`kCreateEntity`/`kDeleteEntity`) plus per-kind payload
+  fields (`TransformSnapshot before`/`after` for the first;
+  `SceneEntityRecord record` for the other two) -- not a virtual
+  `ICommand::undo()/redo()` interface with three subclasses: there is no
+  runtime-extensible set of command kinds here (exactly three, closed by
+  this phase's own confirmed scope), so a `switch` on `CommandKind` gives
+  everything virtual dispatch would, with no heap-allocated polymorphic
+  command objects. `UndoStack` owns a `std::vector<Command>` plus a
+  `position_` index (how many commands are currently "done") -- standard
+  linear command-stack semantics: `push()` first discards any stale "redo
+  tail" (every command from `position_` onward) before appending, so
+  pushing a genuinely new action after an undo correctly makes the
+  old, now-unreachable "future" unreachable, exactly the way a real
+  editor's undo/redo behaves. `undo()`/`redo()` take a caller-supplied
+  `std::function<void(Command&)>` callback rather than applying any effect
+  themselves -- deliberately: neither method has, or needs, any
+  `EntityRegistry`/`ResourceManager`/`Shader` access at all, so this whole
+  file needs no live GL context, ECS registry, or GPU-resident asset of any
+  kind to test (see Verify below), the identical
+  `scene_serialization.hpp`/`.cpp` (pure) vs. `scene_loader.cpp`
+  (`EntityRegistry`/`ResourceManager`-facing) split this project already
+  established for the identical reason. The callback receives a *mutable*
+  reference to the target `Command` specifically so it can rewrite
+  `Command::entity` in place -- see the next bullet for why that's
+  necessary.
+- **`EntityId` never recycles indices, so a create/delete `Command`'s own
+  `entity` field has to be mutable.** `ecs.hpp`'s own `EntityId` comment:
+  `EntityRegistry::create()` hands out monotonically increasing indices,
+  *never* recycled, even after an entity is destroyed. So undoing a
+  creation (destroy) then redoing it (recreate from the stored record) does
+  **not** resurrect the original id -- it allocates a brand-new one.
+  Likewise, undoing a deletion (recreate) produces a new id, and redoing
+  that *same* deletion (destroy again) has to destroy *that* new id, not
+  the long-gone original. `Command::entity` is therefore not a fixed label
+  but "the currently-live id this command refers to," rewritten by
+  `Application::recreateCommandEntity()`/`destroyCommandEntity()`
+  (`application.cpp`) every time a `kCreateEntity`/`kDeleteEntity`
+  command's entity is destroyed/recreated. `kTransformEdit`'s own `entity`
+  never changes (an edit never destroys/recreates anything), so it needs no
+  such rewriting.
+- **Entity deletion: reused `scene_serialization.hpp` machinery, not a
+  parallel snapshot mechanism.** Per this phase's own brief's strong steer,
+  `scene_loader.cpp`'s existing `loadScene()`/`saveScene()` per-entity
+  bodies were extracted into two new, independently reusable functions,
+  declared in `scene_serialization.hpp` alongside `SceneEntityRecord`
+  itself:
+  - `captureEntityRecord(registry, id, activeDirectionalLight)` -- exactly
+    `saveScene()`'s own per-entity record-building logic (Transform,
+    ModelComponent, RigidBody, Collider, PointLight, DirectionalLight,
+    CameraComponent, MaterialOverride, and the Parent-to-name lookup), now
+    called both by `saveScene()`'s own `each<Transform>()` loop *and* by
+    `Application::deleteEntity()`/`spawnEntityFromCreateMenu()`.
+  - `restoreEntityFromRecord(registry, record, resources, shader)` --
+    exactly `loadScene()`'s own per-record entity-building first pass
+    (NameComponent, Transform, RigidBody, Collider, PointLight,
+    DirectionalLight, CameraComponent, MaterialOverride), now called both
+    by `loadScene()`'s own per-record loop *and* by
+    `Application::recreateCommandEntity()`. Deliberately does **not** add a
+    Parent component or resolve "which DirectionalLight is active" --
+    both need a caller-specific name/id resolution (`loadScene()`'s own
+    whole-file `idByName` map vs. `Application`'s own
+    `findEntityByName()` against the *current* live registry) that only
+    each caller can build; both callers do that resolution themselves,
+    immediately after this call returns, mirroring `loadScene()`'s own
+    existing two-pass shape.
+
+  `loadScene()`/`saveScene()` themselves are now thin wrappers around these
+  two functions plus the whole-file-only bookkeeping (the `idByName` map,
+  the Parent second pass, "last record with `directionalLightActive` wins")
+  -- behavior-unchanged, confirmed by re-running this project's own
+  existing default-scene round-trip headlessly (see Verify).
+- **Entity creation: also reuses the same record, not a separate
+  `CreateEntityKind` + spawn-position pair.** The obvious-looking
+  alternative -- store the `CreateEntityKind` and the spawn position used,
+  then re-run `spawnEntityFromCreateMenu()` on redo -- was rejected: that
+  function computes its spawn position from `camera_.position()` *at call
+  time*, so redoing days (or just several camera-moves) later would
+  silently spawn the entity at the wrong place. Instead,
+  `spawnEntityFromCreateMenu()` now finishes by calling
+  `captureEntityRecord()` on the entity it just fully built (after every
+  kind-specific component -- PointLight/DirectionalLight/CameraComponent --
+  has already been added) and pushes a `kCreateEntity` `Command` carrying
+  that record. Redoing a creation is then byte-for-byte the same
+  `restoreEntityFromRecord()` call deletion-undo already needs -- one
+  mechanism, not two -- and is strictly *more* correct: the record already
+  holds the entity's real, as-built name/position/components, not a recipe
+  that has to be re-executed against possibly-changed ambient state. This
+  matches this project's own established "simplest correct increment" bias
+  (e.g. `physics.hpp`'s own RigidBody mass-field comment) more closely than
+  the kind+position alternative would have.
+- **A confined, deliberate creation-path gap:** only
+  `spawnEntityFromCreateMenu()` (the Scene panel's Create menu, plus its
+  own `ENGINE_DEBUG_CREATE` headless mirror) pushes a `kCreateEntity`
+  command. `spawnEntityFromDroppedModel()` (Phase 15g's Viewport
+  drag-and-drop) shares the same underlying `spawnPositionedEntity()`
+  helper but is a *different*, un-mentioned creation path this phase's own
+  confirmed scope names only "entity creation
+  (`spawnEntityFromCreateMenu()`)" for -- so a dropped model is not
+  currently undoable. Documented here rather than silently absorbed into
+  "creation is covered," per this project's "document known gaps, don't
+  paper over them" convention.
+- **A confined, deliberate deletion-restore gap: orphaned children are not
+  re-parented on undo.** `destroyEntityOrphaningChildren()`
+  (`transform_hierarchy.hpp`, Phase 14f) permanently promotes a deleted
+  entity's direct children to roots, decomposing each to its own current
+  *world* transform, at the moment of deletion -- a real, separate state
+  change to those OTHER entities, not just to the one being deleted.
+  Undoing the deletion restores the deleted entity itself (including its
+  own Parent link, if it had one) via `captureEntityRecord()`/
+  `restoreEntityFromRecord()`, but does **not** attempt to re-discover and
+  re-parent whichever children were orphaned at delete time back onto the
+  restored entity -- doing so would need its own separate,
+  `SceneEntityRecord`-shaped "which children got orphaned, and what were
+  their PRE-orphan local transforms" snapshot, real additional scope this
+  phase's own brief does not ask for. The orphaned children simply keep
+  their orphaned (root, current-world-position) state, which is safe (no
+  crash, no dangling reference) but not a full undo of every SIDE EFFECT
+  the original deletion had. Verified directly, not just reasoned about --
+  see Verify's own step-by-step log.
+
+#### Wiring: reporting intent, not mutating directly
+
+- **The Inspector's "Delete Object" button no longer calls
+  `destroyEntityOrphaningChildren()` itself.** It now only sets a new
+  `deleteEntityRequested` out-parameter (`EditorUI::renderDockspaceShell()`)
+  -- the identical "EditorUI reports intent, Application acts" shape
+  `createRequest`/`saveSceneRequested`/`textureAssignRequested` already
+  establish. `Application::deleteEntity(id)` (new) is the one real
+  implementation: captures a `SceneEntityRecord`, pushes a `kDeleteEntity`
+  `Command` onto `undoStack_`, *then* destroys the entity -- capture has to
+  happen before destruction, since `captureEntityRecord()` reads the
+  entity's still-live components. `ENGINE_DEBUG_DELETE` (constructor) now
+  calls this same method too, instead of hand-rolling the same
+  destroy-plus-clear-selection sequence a second time.
+- **A completed transform edit is reported through one shared
+  `transformEditCommitted` out-parameter**, set by whichever of two
+  producers actually completes an edit this frame (never both in the same
+  frame -- a user cannot simultaneously drag the gizmo and type into an
+  Inspector field):
+  - `renderInspectorPanel()`'s Position/Rot Y/Scale fields: each is
+    bracketed by a small `noteActivation()`/`commitIfDeactivated()` pair
+    using ImGui's own `IsItemActivated()`/`IsItemDeactivatedAfterEdit()` --
+    `noteActivation()` captures the Transform's full `TransformSnapshot`
+    into `EditorUI`'s own new `pendingInspectorTransformEditBefore_` member
+    the instant a field is first activated (captured *before* that same
+    call's own possible mutation, since the very first frame of a drag can
+    both activate and already report a changed value); `commitIfDeactivated()`
+    builds the `Command` (guarded by `transformSnapshotsEqual()`, so a
+    click that activates-then-deactivates without ever moving the value
+    pushes nothing) once that same field's interaction ends. A multi-frame
+    click-drag therefore becomes exactly one `Command`, never one per
+    frame -- the phase brief's own explicit requirement.
+  - `EditorUI::updateGizmo()`: the existing `GizmoDragState` state machine
+    already knows exactly when a drag starts (`gizmoDragStartLocalPosition_`
+    captured) and ends (`gizmoDragState_.axis` transitions back to `kNone`)
+    -- this phase adds one `if (wasDragging && result.state.axis ==
+    GizmoAxis::kNone)` block at that exact release transition, building a
+    `Command` from the cached start position and the entity's own
+    now-final live Transform, the identical `transformSnapshotsEqual()`
+    no-op guard as the Inspector path.
+
+  `Application::render()` pushes `transformEditCommitted` onto `undoStack_`
+  when present -- `EditorUI` itself never touches an `UndoStack` at all,
+  matching its pre-existing "just a Dear ImGui wrapper over data
+  Application owns" role. The registry mutation itself already happened
+  live, inline, exactly as before this phase (Position `DragFloat3`/the
+  gizmo drag both still write straight into the entity's own Transform the
+  instant they're dragged) -- this out-parameter is purely the
+  undo-history bookkeeping for an edit that already took visible effect.
+- **The toolbar's real undo/redo buttons.** `renderViewportToolbar()` gains
+  four new parameters -- `canUndo`/`canRedo` (read-only snapshots of
+  `undoStack_.canUndo()`/`canRedo()`, gating each button's `enabled` the
+  same way `physicsRunning` already gates Play/Pause's highlight) and
+  `undoRequested`/`redoRequested` (set true the frame either is clicked).
+  `Application::render()` calls `undo()`/`redo()` when either comes back
+  true. Both buttons now gray out correctly at either end of the history --
+  screenshot-proven in Verify below.
+- **Keyboard shortcuts, following the Ctrl+S precedent exactly.**
+  `run()` gains a Ctrl+Z (undo) and Ctrl+Y-*or*-Ctrl+Shift+Z (redo) block,
+  the identical edge-triggered (`ctrlZWasDown_`/`redoChordWasDown_`),
+  `!ImGui::GetIO().WantCaptureKeyboard`-gated, direct-`window_.isKeyPressed()`
+  chord read `ctrlSWasDown_`'s own block already establishes (not routed
+  through `InputActionMap` -- a chord needs an AND of simultaneous keys,
+  which that class's own single-key-OR-bindings shape doesn't support, the
+  same reason Ctrl+S itself bypasses it). Both redo chords are supported
+  (trivial -- one more `||` term) rather than forcing a single convention;
+  `ctrlZDown` explicitly excludes Shift being held so a Ctrl+Shift+Z press
+  registers as redo only, never also as undo on the same physical press.
+- **The new redo icon: Font Awesome's own "arrow-rotate-right," U+F01E --
+  verified against the vendored font, not guessed.** `editor_icons.hpp`
+  gains `kIconRedo` and `ToolbarButton::kRedo`. The codepoint was confirmed
+  directly against the SAME upstream `fa-solid-900.ttf` (Font Awesome Free
+  6.7.2 Solid) Phase 17b/17c's own `pyftsubset` runs already used, via
+  `fontTools.ttLib.TTFont(...).getBestCmap()`: `0xF0E2 ->
+  "arrow-rotate-left"` (the existing `kIconUndo`), `0xF01E ->
+  "arrow-rotate-right"` -- Font Awesome's own paired left/right rotate-arrow
+  icons, used everywhere for undo/redo, confirming this is the natural,
+  intended counterpart rather than an assumption. Re-subsetted into the
+  SAME vendored `assets/fonts/editor-icons.ttf`, the identical command
+  Phase 17c already established, one more codepoint appended:
+  ```
+  python3 -m fontTools.subset fa-solid-900.ttf \
+    --unicodes=F07B,F1B2,F0EB,F185,F030,F03E,F00A,F0E2,F04B,F04C,F01E \
+    --glyph-names --layout-features='' --no-hinting --desubroutinize \
+    --output-file=editor-icons.ttf
+  ```
+  The result is **3,152 bytes, 12 glyphs** (the eleven named codepoints
+  plus the mandatory `.notdef`), up from Phase 17c's 2,916-byte/11-glyph
+  file -- still a small fraction of the ~426 KB upstream release.
+  `editor_ui.cpp`'s own `kIconGlyphRanges` array grows one more `{lo, hi}`
+  pair, built from the same `editor_icons.hpp` constant as every other
+  entry.
+
+#### Deliberately not done this phase (documented scope, not an oversight)
+
+- **No undo for material/texture assignment, light/camera property edits,
+  parenting changes, shading-mode/Play-Edit-mode toggles, or scene
+  load/save itself.** Exactly this phase's own confirmed scope boundary.
+- **No merging/coalescing of unrelated consecutive edits.** Each of the
+  three action types always gets its own discrete `Command` -- no "smart
+  grouping" heuristics (e.g. treating several quick Position drags as one
+  step). The only "merging" that exists at all is the no-op guard
+  (`transformSnapshotsEqual()`), which *suppresses* a push, never combines
+  two real ones.
+- **No undo-history persistence across a scene load.** `undoStack_` is
+  simply never cleared automatically today, because this engine has
+  exactly one real "load a scene" call site (`ENGINE_LEGACY_SCENE`'s own
+  constructor-time `loadScene()` call) and no in-editor "load a different
+  scene" UI at all yet -- there is no live call site where this would even
+  matter. A future phase that adds a real Scene > Open/Load UI is the
+  right place to decide this for real (and should very likely clear it
+  then, per `undoStack_`'s own `application.hpp` comment: a stale
+  `SceneEntityRecord`/`EntityId` from an unloaded scene is meaningless at
+  best).
+- **No undo-history LIST UI.** Only the toolbar's Undo/Redo buttons plus
+  the two keyboard shortcuts -- no panel showing the stack's own contents.
+- **Two confined creation/deletion gaps**, both documented above in detail
+  and confirmed inert (not crashing, not silently wrong) by this phase's
+  own headless proof: a drag-and-drop-created entity isn't undoable, and an
+  undone deletion doesn't re-parent whichever children were orphaned at
+  delete time.
+
+#### Verify
+
+- **Full clean rebuild** (`rm -rf build`, `cmake -B build -S .
+  -DCMAKE_BUILD_TYPE=Debug`, `cmake --build build`) produced **zero
+  warnings** from any engine source file. `ctest` reports **17/17
+  passing** -- the 16 pre-existing targets plus this phase's own new
+  `undo_stack_test`: real, non-trivial coverage of `UndoStack`'s own
+  push/undo/redo/truncate-on-new-push semantics (an empty stack's
+  undo()/redo() are confirmed no-ops that never invoke the callback; a
+  three-command push/undo/undo/undo/redo/redo/redo round-trip confirmed
+  hands each command back in the correct last-undone-first /
+  first-redone-first order; pushing after two undos confirmed discards the
+  stale two-command redo tail, with the newly pushed command's own `after`
+  value -- not either of the discarded ones -- coming back on the next
+  undo; the `Command::entity`-rewrite contract create/delete commands
+  depend on, confirmed by simulating a destroy-then-recreate-as-a-new-id
+  cycle and checking a SECOND undo of the same command slot sees the
+  rewritten id, not the original one; `clear()` resets both size and
+  position), plus `transformSnapshotsEqual()`'s own exact-equality
+  contract and the three `makeXyzCommand()` constructors. `editor_icons_test`
+  also gained two new assertions confirming `kRedo` returns its own
+  distinct glyph, not a second copy of `kUndo`.
+- **The no-regression baseline, isolated to exactly the toolbar's own new
+  enabled state.** A pre-Phase-18h build (Phase 18g's own commit,
+  `5e81b9a`, built fresh in a separate `git worktree`) and this phase's
+  build were both run headlessly (`ENGINE_MAX_FRAMES=60`, no debug env
+  vars, no selection) and screenshotted. `compare -metric AE` between the
+  two PNGs reports **5,030** differing pixels, confirmed by inspection to
+  be confined ENTIRELY to the toolbar's own button row: the now-real,
+  enabled "undo" glyph (previously drawn dim/disabled) plus the brand-new
+  "redo" button inserted after it, pushing Play/Pause one button-width to
+  the right -- the whole 3D viewport and every other panel (Scene/Assets/
+  Inspector) are pixel-identical outside that one row.
+- **Full wired-path proof, not just the isolated pure functions --
+  create/move/delete/undo x3/redo x2, exact positions and entity counts at
+  every step.** Two new headless hooks, `ENGINE_DEBUG_UNDO=<count>`/
+  `ENGINE_DEBUG_REDO=<count>` (fire at fixed scripted frames 25/30,
+  calling the exact same `Application::undo()`/`redo()` a real Ctrl+Z/
+  toolbar click would, `<count>` times each, logging the registry's full
+  entity/position state after every individual call), combined with the
+  existing `ENGINE_DEBUG_CREATE=cube ENGINE_DEBUG_SELECT=Cube
+  ENGINE_DEBUG_GIZMO_DRAG=Cube ENGINE_DEBUG_DELETE=falling_cube` (Cube
+  created, selected, dragged +2.0 along world +X via the real gizmo drag
+  script, then `falling_cube` deleted -- orphaning `parented_demo_cube` to
+  its own current world position, per Phase 14f's existing behavior). The
+  resulting undo stack, built in this exact order --
+  `[Create(Cube), Delete(falling_cube), TransformEdit(Cube)]` -- and the
+  full, verbatim log of every step:
+  ```
+  after undo() #1: 3 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); Cube=(0.934383,0.682818,1.221885)
+  after undo() #2: 4 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); Cube=(0.934383,0.682818,1.221885); falling_cube=(0,2.5,1.1)
+  after undo() #3: 3 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); falling_cube=(0,2.5,1.1)
+  after redo() #1: 4 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); falling_cube=(0,2.5,1.1); Cube=(0.934383,0.682818,1.221885)
+  after redo() #2: 3 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); Cube=(0.934383,0.682818,1.221885)
+  ```
+  Every single value is an exact match for what the command stack predicts:
+  undo #1 reverts the drag (Cube's position lands back on its own original,
+  captured-at-creation spawn point, `0.934383,0.682818,1.221885` -- not a
+  re-derived-from-camera guess); undo #2 restores `falling_cube` at
+  `(0,2.5,1.1)`, byte-identical to `assets/scenes/default.json`'s own
+  authored position, as a **brand-new entity** (its recreated id is
+  different from its original one, confirmed in the log by index, matching
+  this phase's own documented "`EntityId`s never recycle" design); undo #3
+  removes `Cube` entirely, returning the scene to exactly its original
+  3-entity baseline; redo #1 recreates `Cube` at that SAME original spawn
+  position (not the dragged one -- only 2 of the 3 stacked commands were
+  redone, so the still-pending `TransformEdit` correctly stays un-replayed);
+  redo #2 deletes `falling_cube` a second time. `parented_demo_cube`'s own
+  position, `(0.5,2.8,1.1)`, never changes across any of the five steps --
+  the documented "orphaned children are not re-parented on undo" gap,
+  confirmed inert rather than merely asserted.
+  - Three screenshots taken at exact log-synchronized moments (a custom
+    capture script polling the running process's own stdout for each
+    step's distinctive log line, then screenshotting immediately, rather
+    than `tools/run_headless.sh`'s own early-stopping "content looks big
+    enough" heuristic, which is tuned for "does anything render at all,"
+    not "capture state as of a specific later frame") visually confirm the
+    same trajectory: right after the drag (undo/redo not yet triggered),
+    the Scene panel lists exactly `parented_demo_cube`/`scene`/`Cube`
+    (`falling_cube` already gone), `Cube` selected with its Inspector
+    Position reading `2.934 0.683 1.222` (the dragged value), and the
+    toolbar's undo glyph bright/enabled while redo stays dim/disabled;
+    right after the three undos, the Scene panel lists
+    `parented_demo_cube`/`scene`/`falling_cube` (`Cube` gone, `falling_cube`
+    back), and the toolbar has visibly FLIPPED -- undo now dim/disabled,
+    redo now bright/enabled; right after the two redos, the Scene panel
+    lists `parented_demo_cube`/`scene`/`Cube` again (`falling_cube` gone a
+    second time), `Cube` now visibly rendered in the 3D viewport at its
+    original spawn position, and BOTH toolbar buttons read bright/enabled
+    (one redo step -- the transform edit -- still legitimately available).
+  - The Inspector's own Transform-field edit path (`renderInspectorPanel()`'s
+    `noteActivation()`/`commitIfDeactivated()`) shares its entire consuming
+    half -- `Command` construction via `makeTransformEditCommand()`,
+    `transformSnapshotsEqual()`'s no-op guard, `undoStack_.push()`,
+    `Application::undo()`/`redo()`, `setTransformFromSnapshot()` -- with
+    the gizmo path this run already exercises end-to-end; only the
+    ImGui-specific *producing* half
+    (`IsItemActivated()`/`IsItemDeactivatedAfterEdit()`) is unique to it,
+    and is not independently exercisable headlessly the same reason
+    `ENGINE_DEBUG_GIZMO_DRAG` itself had to exist in the first place (Xvfb
+    has no physical pointer device to drive a real ImGui widget
+    interaction) -- verified by code-reading/logical soundness only, the
+    same honest verification-ceiling accounting this project's own Phase
+    17d README section already gives for a different Xvfb-unreachable
+    interaction (title-bar dragging).
+  - `scene_loader.cpp`'s own refactor (`captureEntityRecord()`/
+    `restoreEntityFromRecord()` now doing what `saveScene()`/`loadScene()`
+    used to do inline) is behavior-preserving: the same headless run's own
+    startup log shows the existing `assets/scenes/default.json` loading
+    exactly as before (all three entities, `parented_demo_cube`'s existing
+    Parent link intact pre-deletion), and every recreated/captured record
+    above round-trips its own values exactly.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -9032,7 +9411,7 @@ panel already exposed, making the toolbar wiring purely redundant.
 | **Assimp** | CMake `FetchContent` (git, tag `v5.4.3`) | De facto standard asset-import library; loads Phase 5's OBJ/glTF scenes via one well-known API instead of hand-rolling per-format parsers. Importer scope narrowed to just OBJ + glTF (see "Phase 5" above) to keep build time/scope down. |
 | **nlohmann/json** | CMake `FetchContent` (git, tag `v3.11.3`) | Single-header, MIT-licensed JSON library; Phase 8b's scene file format (see "Phase 8b" above) -- fetched the same way as GLFW/GLM/Assimp (an ordinary tagged git dependency), not hand-vendored like GLAD/stb_image below (see "Phase 8b"'s own writeup on why that precedent doesn't apply to a JSON library). |
 | **Dear ImGui** | CMake `FetchContent` (git, tag `v1.92.9b`), built as a first-party `imgui` static library target (see "Phase 8c" above) | Phase 8c's debug overlay (entity inspector, render-pass toggles, frame stats) -- the de facto standard immediate-mode debug UI library for real-time engines/tools; ships no CMake build of its own by design, so this project compiles its core sources + GLFW/OpenGL3 backend files directly, the same "small first-party target" shape `glad` below already uses. |
-| **Font Awesome Free 6.7.2 (Solid)** | Vendored, hand-subsetted to 10 glyphs (2,916 bytes) in `assets/fonts/editor-icons.ttf`, from the same offline-downloaded upstream release file Phase 17b first subsetted (re-subsetted with 4 more codepoints by Phase 17c -- see that section above) | Scene Hierarchy/Assets Browser row icons (folder/mesh/point-light/directional-light/camera/texture, Phase 17b) plus the Viewport toolbar's own grid/undo/play/pause icons (Phase 17c -- its other two buttons reuse the directional-light/texture glyphs above verbatim) -- OFL 1.1 licensed (fonts), permissive/redistribution-friendly; vendored rather than `FetchContent`'d since the upstream repo is large and a subsetting step is needed either way (see "Phase 17b"'s own writeup for the full reasoning). |
+| **Font Awesome Free 6.7.2 (Solid)** | Vendored, hand-subsetted to 11 glyphs (3,152 bytes) in `assets/fonts/editor-icons.ttf`, from the same offline-downloaded upstream release file Phase 17b first subsetted (re-subsetted with 4 more codepoints by Phase 17c, one more by Phase 18h -- see those sections above) | Scene Hierarchy/Assets Browser row icons (folder/mesh/point-light/directional-light/camera/texture, Phase 17b) plus the Viewport toolbar's own grid/undo/redo/play/pause icons (Phase 17c/18h -- its other two buttons reuse the directional-light/texture glyphs above verbatim) -- OFL 1.1 licensed (fonts), permissive/redistribution-friendly; vendored rather than `FetchContent`'d since the upstream repo is large and a subsetting step is needed either way (see "Phase 17b"'s own writeup for the full reasoning). |
 
 ### GL loader: why hand-written instead of a generated GLAD
 

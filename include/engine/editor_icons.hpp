@@ -124,6 +124,23 @@ constexpr char32_t kIconUndo = 0xF0E2;   // Font Awesome "arrow-rotate-left" (th
 constexpr char32_t kIconPlay = 0xF04B;   // Font Awesome "play"
 constexpr char32_t kIconPause = 0xF04C;  // Font Awesome "pause"
 
+// Phase 18h: one more codepoint, re-subsetted into the SAME vendored file
+// the exact same way Phase 17c's own four grew Phase 17b's original six --
+// see README.md's own Phase 18h section for the exact re-subsetting command
+// and before/after glyph-count proof. Font Awesome Free 6.7.2 Solid's own
+// "arrow-rotate-right" glyph (U+F01E) -- verified directly against the
+// vendored upstream fa-solid-900.ttf's own cmap (fontTools'
+// TTFont.getBestCmap()), not guessed from memory -- is this family's own
+// "redo" glyph, the natural mirror of kIconUndo's "arrow-rotate-left" just
+// above (F0E2/F01E are Font Awesome's own paired left/right rotate-arrow
+// icons, used everywhere for undo/redo). Nothing in this engine's existing
+// six-glyph set is a plausible redo substitute the way kLighting/
+// kTextureMode reuse kIconDirectionalLight/kIconTexture verbatim (see
+// ToolbarButton's own comment below) -- undo and redo are visually
+// mirror-image, not identical, concepts, so this genuinely needs its own
+// new glyph rather than reusing kIconUndo a second time.
+constexpr char32_t kIconRedo = 0xF01E;  // Font Awesome "arrow-rotate-right" (the family's "redo" glyph)
+
 // Given one Scene Hierarchy row's own component flags (see
 // scene_hierarchy.hpp's own SceneTreeNode fields -- set once, in
 // buildSceneTree(), from the same registry.getComponent<T>() checks every
@@ -193,6 +210,9 @@ enum class ToolbarButton {
     kLighting,
     kTextureMode,
     kUndo,
+    // Phase 18h: the redo button added alongside the now-real undo button --
+    // see kIconRedo's own comment above.
+    kRedo,
     kPlay,
     kPause,
 };
@@ -217,6 +237,11 @@ enum class ToolbarButton {
 // "swap which IMAGE is on screen" toggle), so reusing the constant is more
 // honest than inventing a visually-near-duplicate second glyph purely so
 // each ToolbarButton enumerator would map to its own unique constant name.
+// Phase 18h: kUndo/kRedo now return real, distinct glyphs of their own
+// (kIconUndo/kIconRedo above) -- both buttons were BeginDisabled()'d stubs
+// with no real behavior through Phase 18g (kRedo did not exist at all until
+// this phase), so this is the first time either constant is actually drawn
+// live.
 char32_t toolbarButtonIconGlyph(ToolbarButton button);
 
 }  // namespace engine
