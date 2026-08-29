@@ -8779,6 +8779,248 @@ the object along that one axis.
     draw nothing" guard genuinely produces zero visible difference when the
     whole feature never engages.
 
+### Phase 18f: a scene Camera entity actually controls Play mode, plus real Wireframe/Solid/Rendered shading modes
+
+Two independent deliverables, confirmed directly by the project owner. The
+first closes `camera_component.hpp`'s own Phase 15c gap head-on -- that
+header's original comment named "a way to make an ECS entity actually
+control this engine's rendered view" as explicit future scope; this phase
+is that future scope. The second repurposes two Viewport toolbar buttons
+that, since Phase 18a/18b-era code, had only ever toggled
+`ssaoDisabled_`/`ssaoDebugMode_` -- functionality the pre-existing F1 debug
+panel already exposed, making the toolbar wiring purely redundant.
+
+#### Deliverable 1: a scene Camera entity controls Play mode's view, and only one is ever allowed
+
+- **Single-camera enforcement, at two independent layers.**
+  `camera_component.hpp`'s new `resolveActiveCamera(EntityRegistry&)`
+  (`camera_component.cpp` -- CameraComponent gained a real `.cpp` this
+  phase, no longer the "plain data struct, no logic function" header Phase
+  15c-18e left it as) scans the `CameraComponent` pool and returns
+  `{active, ignoredCount}` -- `active` is the FIRST entity found by registry
+  iteration order, `ignoredCount` counts any others. At the UI layer, the
+  Scene panel's Create menu's own `renderCreateEntityMenuItems()`
+  (`editor_ui.cpp`) `BeginDisabled()`'s the "Camera" item the instant
+  `hasActiveCamera` (`resolveActiveCamera(registry_).active.valid()`,
+  recomputed fresh every frame in `Application::render()`) is true -- the
+  SAME `BeginDisabled()` + `ImGuiHoveredFlags_AllowWhenDisabled` tooltip
+  technique Phase 14f's own original "not implemented yet" gaps already
+  established, reused here for a completely different reason (the item now
+  HAS a real handler; it's disabled to enforce "at most one"). Re-enables
+  itself the instant that one entity is deleted, since `hasActiveCamera` is
+  never a cached snapshot. At the DATA layer -- the one path the UI-level
+  restriction can't reach, a hand-edited/loaded scene JSON already
+  containing more than one `CameraComponent` record -- `resolveActiveCamera()`'s
+  own "first found, count the rest" rule is what stays correct regardless,
+  and `Application::render()` `LOG_WARN`s once (edge-triggered, the
+  identical `pointLightOverflowActive_`-style discipline
+  `collectPointLights()`'s own overflow warning already established) the
+  frame that count goes above zero.
+- **Play mode's main render pass, via a temporary real `Camera` value, not a
+  parallel view/projection code path.** `camera_component.hpp`'s new
+  `resolveCameraWorldPose(const glm::mat4& worldMatrix)` -- pure, no
+  `EntityRegistry` dependency at all -- extracts a world-space eye position
+  (the matrix's translation column) and look-AT target (`position +`
+  the standard engine-forward vector `(0,0,-1)` rotated through the
+  matrix's own rotation, normalized so a scaled ancestor's non-uniform
+  scale can't distort the direction -- see that function's own header
+  comment for exactly why normalizing after the multiply, not before, is
+  what makes this correct under `resolveWorldMatrix()`'s full parent-chain
+  scale). `Application::render()` feeds `resolveWorldMatrix(registry_,
+  activeCameraResolution.active)`'s result into it, then hands the
+  resulting position/target straight to `engine::Camera::setPositionLookingAt()`
+  (`camera.hpp`, unmodified since Phase 3) -- the exact function that
+  already turns a position+target pair into the yaw/pitch pair `Camera`'s
+  own `getViewMatrix()` needs. The payoff: `computeCascades()` already
+  takes `const Camera&`, so this temporary `sceneRenderCamera` is a
+  drop-in substitute for `camera_` everywhere render() already used it for
+  FRAMING this frame (shadow cascades, view/projection, `uViewPos`) --
+  zero new parallel code paths, only a `const Camera& renderCamera =
+  usingSceneCamera ? sceneRenderCamera : camera_;` selection made once, near
+  the top of `render()`. `CameraComponent::fovYDeg`/`nearPlane`/`farPlane`
+  feed `Camera::setFov()`/`setClipPlanes()` directly. One accepted, documented
+  limit: a Camera entity's world ROLL is not representable (`Camera` has no
+  roll anywhere in this engine, free-fly included) and is silently dropped,
+  exactly as it already would be for `camera_` itself.
+- **Precedence, exactly as confirmed:** `usingSceneCamera` is
+  `physicsRunning_ && (an active Camera entity exists)` -- Edit mode is
+  UNCONDITIONALLY unaffected (`camera_` renders every Edit-mode frame,
+  Camera entity or not); Play mode with NO Camera entity gracefully falls
+  back to `camera_` too (the exact same free-fly view Edit mode was just
+  showing). Only Play mode WITH an active Camera entity substitutes it.
+  `cluster_light_culler_`'s own cluster grid (built from `camera_`'s
+  projection, only on a screen-size change) and `uClusterNearPlane`
+  deliberately stay `camera_`-based even during this substitution -- a
+  documented, minor, accepted mismatch (this engine's small fixed light
+  count means it has no visible effect) rather than real, separate scope
+  (rebuilding the cluster grid per-frame for this one case).
+- **The Phase 16 double-click-to-capture gesture is disabled while Play
+  mode is viewing through a scene Camera entity** -- the project owner's
+  own confirmed precedent: "there is no free-fly camera to fly while the
+  game view is locked to the scene camera," matching how Unity's own Game
+  view works. Enforced at the one place a same-frame double-click request
+  is latched for next frame's `decideCameraCapture()` call
+  (`cameraCaptureRequestPending_ = cameraCaptureRequested && !usingSceneCamera;`)
+  rather than a new parameter threaded into `EditorUI`'s own detection --
+  `usingSceneCamera` is Application-owned state EditorUI has no other
+  reason to know about. An EXISTING capture is also actively released
+  (`setCameraCaptured(false)`, logged) the instant `usingSceneCamera`
+  becomes true, so the OS cursor never stays hidden/locked with no camera
+  left for it to control.
+- **`camera_component.hpp`'s own Phase 15c header comment, updated, not
+  left describing superseded behavior as still true** -- the same
+  superseded-note convention Phase 18d's own selection-outline replacement
+  already established. The paragraph explicitly scoping this feature out
+  ("What this component deliberately is NOT...") is replaced by a "Phase
+  18f: this component stopped being inert" paragraph naming exactly what
+  changed and what (Edit mode, free-fly input handling) is still,
+  deliberately, untouched.
+
+#### Deliverable 2: real Wireframe / Solid / Rendered viewport shading modes
+
+- **`shading_mode.hpp`/`.cpp`, a pure, GL/ImGui-free module** -- the same
+  shape `camera_capture.hpp`/`gizmo.hpp`/`window_chrome.hpp` already
+  establish. `ShadingMode` is a 3-way enum (`kRendered`/`kSolid`/
+  `kWireframe`) spread across the toolbar's two repurposed buttons,
+  radio-button style: `decideNextEditShadingMode(current, wireframeClicked,
+  solidClicked)` is the whole "which button does what" decision (clicking
+  the currently-active one returns to `kRendered`; clicking the other
+  switches straight to it); `effectiveShadingMode(physicsRunning,
+  editShadingMode)` is `physicsRunning ? kRendered : editShadingMode` --
+  ONE formula that is this entire feature's "Play mode always forces
+  Rendered, restoring Edit's prior choice on Stop" behavior, with **no**
+  separate save/restore bookkeeping anywhere, because `editShadingMode_`
+  (`Application`'s own new member) is simply never written by
+  entering/leaving Play mode, only by a real Edit-mode toolbar click.
+- **The toolbar's own "lighting"/"texture-mode" buttons are repurposed, not
+  duplicated** -- `ssaoDisabled_`/`ssaoDebugMode_` themselves, and the F1
+  debug panel's own "Disable SSAO"/"SSAO debug view" checkboxes that own
+  them, are **completely unchanged**; `renderDockspaceShell()`'s own
+  parameter list swaps its old `bool& ssaoDisabled, bool& ssaoDebugMode`
+  pair for one `ShadingMode& editShadingMode` instead. Both buttons stay
+  clickable during Play mode (the project owner's confirmed, documented
+  choice over `BeginDisabled()`'ing them) -- a click still updates
+  `editShadingMode_` for whenever Edit mode resumes; their `active`
+  highlight reads `effectiveShadingMode()`'s result, not `editShadingMode_`
+  directly, so the highlight always honestly shows Rendered (neither
+  button lit) the instant Play mode overrides an Edit-mode Wireframe/Solid
+  choice.
+- **Wireframe**: `glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)` around exactly
+  the main color pass (entities/ground/PBR spheres), reset to `GL_FILL`
+  immediately after (before the skybox draw and the postprocess/gizmo
+  passes, which must never be line-rasterized) -- the simplest standard
+  technique, no new shader. The shadow pass, SSAO, and SSR are skipped
+  OUTRIGHT this frame (not merely disabled-and-still-run) -- "no meaningful
+  surface data for any of the three" per this phase's own confirmed brief.
+- **Solid**: `uSolidShading` (new uniform, `basic.frag`/`pbr.frag`) swaps a
+  flat `vec4(1.0)`/skipped `uAlbedoMap` sample in for the real diffuse/
+  albedo texture -- `baseColor`/`albedo` reduce to the material's own flat
+  tint, every lighting/shadow term after that point completely unaffected,
+  so shape still reads via real shading. SSAO/SSR are ALSO skipped for
+  Solid (this project's own established preference for the simpler choice
+  when either is defensible -- see `physics.hpp`'s own restraint-in-scope
+  precedent this phase's brief cites); shadows are KEPT (part of "basic
+  lighting," and the shadow depth-only pass has no texture dependency to go
+  wrong against untextured geometry).
+- **The selection outline (Phase 18d) is Rendered-mode-only as of this
+  phase** -- its own occlusion test depends on SSAO's `ssaoGBuffer_` depth
+  pre-pass, which doesn't run in Wireframe/Solid; `hasSelectionOutline`
+  (and the `renderSelectionMask()` call itself) are gated on the identical
+  `skipHeavyPassesThisFrame` flag SSAO/SSR already are, a documented,
+  minor scope reduction rather than compositing against a stale buffer.
+- **No new grid overlay** -- the project owner's own original ask for a
+  Blender-style grid fallback was specifically conditional on there being
+  no real floor mesh; `groundMesh_` already exists and participates in all
+  three shading modes exactly like any other scene geometry, so this is
+  resolved with no new code.
+- **Verify** (both deliverables).
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S .
+    -DCMAKE_BUILD_TYPE=Debug`, this project's real convention) produced
+    **zero warnings**. `ctest` reports **16/16 passing** -- 14 pre-existing
+    targets plus two new ones: `camera_component_test` (extended --
+    `resolveCameraWorldPose()` checked against an identity matrix, a
+    translated+90-degree-yawed matrix, and a non-uniformly-scaled matrix
+    confirming the look direction stays unit-length/undistorted;
+    `resolveActiveCamera()` checked against zero, one, and three
+    `CameraComponent` entities, confirming the "first found, count the
+    rest" rule and its own call-to-call stability) and `shading_mode_test`
+    (new -- every `decideNextEditShadingMode()` transition table entry,
+    the simultaneous-both-clicked tie-break, and `effectiveShadingMode()`
+    for all three `ShadingMode` values under both `physicsRunning` states).
+  - **A real methodology finding, documented rather than papered over:**
+    `tools/run_headless.sh`'s own polling loop (screenshot as soon as a
+    file-size threshold is cleared on 3 consecutive 0.2s polls) can, on
+    this session's host, still occasionally land on a genuine mid-settle
+    frame during the dockspace's own multi-step Viewport panel resize (the
+    startup log shows the panel settling `800x600 -> 413x497 -> 427x497`
+    over its first couple of frames, rebuilding every offscreen render
+    target each time) -- producing a screenshot with a visibly wrong aspect
+    ratio and missing panel-tab labels, and (via `compare -metric AE`) a
+    huge, misleading diff against an otherwise-identical build. Confirmed
+    NOT a code regression: the SAME `engine_app` binary compared against
+    ITSELF across two separate `run_headless.sh` invocations showed the
+    identical large-diff symptom, while a fixed-delay manual capture (Xvfb
+    + a flat 3-second sleep before exactly one `xwd`, bypassing the
+    polling heuristic entirely) produced **`0`** differing pixels against a
+    pre-Phase-18f baseline build (`17347f8`, Phase 18e, built in a separate
+    `git worktree` so the working tree under active edit was never
+    touched) both times it was tried. All of this phase's own screenshot
+    comparisons below use that same fixed-delay capture method.
+  - **No-regression baseline**: default state (Rendered mode, no Camera
+    entity, Edit mode) -- `compare -metric AE` between the pre-18f
+    baseline build and this phase's build reports **`0`** differing
+    pixels, confirmed across two independent runs.
+  - **Deliverable 1, Camera entity genuinely changes Play mode's vantage
+    point**: `ENGINE_DEBUG_CREATE=camera ENGINE_DEBUG_FORCE_PLAY_MODE=1`
+    logs `Created entity "Camera" (index 3) via the Scene panel's Create
+    menu` and `Camera entity present (index 3): the Scene panel's Create
+    menu "Camera" item is now disabled.` (the log-based disabled-state
+    proof this phase's own verification brief calls for, in place of a
+    screenshot of an open popup -- Xvfb has no pointer device to open one
+    with, the same limitation `camera_capture.hpp`'s own header comment
+    already documents for a different feature). The resulting screenshot
+    shows the Play button highlighted, a "Camera" entity in the Scene tree,
+    and a vantage point with the PBR sphere grid/pyramid entirely out of
+    frame -- `compare -metric AE` against the default Edit-mode screenshot
+    reports **211,158 of 480,000** pixels differing, an unmistakable,
+    visually-confirmed vantage-point change (the spawned Camera entity's
+    default identity rotation, facing world `-Z`, differs sharply from the
+    free-fly camera's own angled-at-the-scene default pose).
+  - **Fallback, proven separately**: `ENGINE_DEBUG_FORCE_PLAY_MODE=1` alone
+    (no Camera entity) against the same default-state baseline reports
+    only **5,852** differing pixels -- visually confirmed as just the
+    Play/Pause button highlight swap plus a few frames' worth of gravity on
+    `falling_cube`, i.e. still genuinely the free-fly view, not a
+    coincidentally-similar-looking scene Camera one.
+  - **Capture release, proven in the log**:
+    `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1 ENGINE_DEBUG_CREATE=camera
+    ENGINE_DEBUG_FORCE_PLAY_MODE=1` logs capture entering at startup, then
+    `Play mode is now viewing through a scene Camera entity -- releasing
+    free-fly camera capture...` immediately after -- the release logic
+    firing exactly once, at construction, before the first real frame.
+  - **Deliverable 2, all three shading modes visibly distinct, same
+    scene/camera pose**: `ENGINE_DEBUG_SHADING_MODE=rendered|solid|wireframe`
+    screenshots, pairwise `compare -metric AE`: Rendered-vs-Solid
+    **156,199**, Rendered-vs-Wireframe **127,542**, Solid-vs-Wireframe
+    **157,049** (all out of 480,000) -- visually, Solid shows the
+    ground/pyramid/box losing their checkerboard texture for a flat tint
+    while keeping real shading, and Wireframe shows only mesh edges with
+    the toolbar's "lighting" button lit; Rendered is pixel-identical to
+    this phase's own no-regression baseline above.
+  - **Play forces Rendered even with Wireframe selected, proven together**:
+    `ENGINE_DEBUG_SHADING_MODE=wireframe ENGINE_DEBUG_FORCE_PLAY_MODE=1`
+    logs the Wireframe startup choice, but the resulting screenshot is
+    fully textured/shaded (NOT wireframe) with neither toolbar button lit
+    -- `compare -metric AE` against the plain Rendered screenshot reports
+    only **7,707** differing pixels (the Play-button highlight plus a few
+    frames of gravity, the identical small-diff signature the fallback
+    check above already establishes as "not a real Wireframe render").
+    Returning to Edit mode restoring the prior Wireframe choice is
+    guaranteed by `effectiveShadingMode()`'s own formula -- proven directly
+    by `shading_mode_test`'s own `effectiveShadingMode(false,
+    ShadingMode::kWireframe)` case, since `editShadingMode_` is never
+    touched by Play mode entering or leaving at all.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

@@ -303,6 +303,7 @@
 #include "engine/asset_browser.hpp"
 #include "engine/ecs.hpp"
 #include "engine/gizmo.hpp"
+#include "engine/shading_mode.hpp"
 
 struct GLFWwindow;
 typedef unsigned int ImGuiID;
@@ -494,6 +495,19 @@ public:
     // activeDirectionalLight_ itself, only displays it, so there is nothing
     // for a reference to let this function write back.
     //
+    // Phase 18f: `hasActiveCamera`, the identical read-only-BY-VALUE shape,
+    // mirrors Application's own resolveActiveCamera(registry_).active.valid()
+    // this frame (camera_component.hpp) -- true once a scene Camera entity
+    // exists. renderCreateEntityMenuItems() (editor_ui.cpp) reads it to
+    // BeginDisabled() the Create menu's own "Camera" item the same way it
+    // already disables an item that has no real handler at all (this
+    // file's own CreateEntityKind comment) -- except here the item DOES have
+    // a real handler; it's disabled specifically to enforce this project's
+    // confirmed "at most one Camera entity" rule, re-enabling itself the
+    // instant that one entity is deleted (since `hasActiveCamera` is
+    // recomputed fresh every call, from the registry's actual live content,
+    // not a one-time snapshot).
+    //
     // Phase 15e: `saveSceneRequested` -- unconditionally set to false at the
     // top of every call, then true only if this frame's new File > Save
     // Scene menu item (see this class's own Phase 15e header comment) was
@@ -571,22 +585,32 @@ public:
     // renderViewportToolbar()) reads/writes them directly, exactly the same
     // "EditorUI mutates Application's own state through a reference, no
     // getter/setter round-trip" shape `selectedEntity`/`cameraCaptureRequested`
-    // above already use. `ssaoDisabled`/`ssaoDebugMode` are Application's own
-    // ssaoDisabled_/ssaoDebugMode_ (application.hpp, Phase 13f) -- the SAME
-    // two members the F1 debug overlay's own "Render Passes" checkboxes
-    // already bind by address (Application::renderDebugUI(),
-    // application.cpp), now ALSO toggleable from this second, always-visible
-    // toolbar surface. Unlike `cameraCaptured`/`cameraCaptureRequested`
-    // above (a read-only snapshot plus a separate "what was requested"
-    // out-flag, because Application needs to gate window_/camera_ state
-    // changes on its own side of the render()/run() boundary -- see that
-    // pair's own Phase 16 comment), these two need no such split: EditorUI
-    // performing the toggle immediately, in place, is already the entire
-    // effect a click on either button has (Application::render() re-reads
-    // them next frame exactly the way it already re-reads them after the F1
-    // overlay's own Checkbox() calls -- see application.cpp's own Phase 8c
-    // comment on why those were already "live-toggleable with no further
-    // plumbing"). `editor_icons.hpp`'s own ToolbarButton/
+    // above already use. Originally (Phase 17c-18e) these two were
+    // `ssaoDisabled`/`ssaoDebugMode` -- Application's own ssaoDisabled_/
+    // ssaoDebugMode_ (application.hpp, Phase 13f), the SAME two members the
+    // F1 debug overlay's own "Render Passes" checkboxes already bind by
+    // address (Application::renderDebugUI(), application.cpp) -- bound to
+    // this toolbar's "lighting"/"texture-mode" buttons purely because they
+    // were the only two Application flags this toolbar had anything real to
+    // toggle at the time; the two F1 checkboxes remained the actual owning
+    // UI for that pair the whole time.
+    //
+    // Phase 18f repurposes those same two buttons for real Wireframe/Solid/
+    // Rendered shading-mode control (see shading_mode.hpp's own header
+    // comment for the full design), which is enough of a DIFFERENT feature
+    // -- three states spread across two buttons, not two independent
+    // booleans -- that a single `ShadingMode& editShadingMode` parameter
+    // replaces the old `bool& ssaoDisabled, bool& ssaoDebugMode` pair here.
+    // ssaoDisabled_/ssaoDebugMode_ themselves are COMPLETELY UNCHANGED --
+    // still real Application members, still toggled by the F1 overlay's own
+    // checkboxes exactly as before -- this toolbar simply stops being a
+    // second way to reach them. `editShadingMode` is Application's own
+    // editShadingMode_ (application.hpp's own Phase 18f comment) -- the
+    // EDIT-mode choice, mutated ONLY by a real toolbar button click here,
+    // never by Play/Pause (see that member's own comment for why "never
+    // touched by entering/leaving Play mode" is what makes Play-forces-
+    // Rendered/Edit-restores-its-own-choice fall out with no extra
+    // bookkeeping). `editor_icons.hpp`'s own ToolbarButton/
     // toolbarButtonIconGlyph() comment records why only these two of the
     // toolbar's six buttons have a real flag to bind to at all; the other
     // four (grid/undo/play/pause) are shown but BeginDisabled()'d, needing
@@ -660,10 +684,11 @@ public:
     // against the toolbar and Phase 16 camera capture.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity,
-                                           std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
+                                           std::optional<EntityId> activeDirectionalLight, bool hasActiveCamera,
+                                           bool& saveSceneRequested,
                                            std::optional<std::string>& textureAssignRequested,
                                            std::optional<std::string>& assetDropRequested, bool cameraCaptured,
-                                           bool& cameraCaptureRequested, bool& ssaoDisabled, bool& ssaoDebugMode,
+                                           bool& cameraCaptureRequested, ShadingMode& editShadingMode,
                                            bool& physicsRunning, bool showCustomTitleBar, bool windowMaximized,
                                            std::pair<int, int> windowPos, TitleBarAction& titleBarAction,
                                            const glm::vec3& cameraPosition, const glm::mat4& cameraView,

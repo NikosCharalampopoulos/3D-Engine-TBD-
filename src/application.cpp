@@ -1067,6 +1067,40 @@ bool debugForcePlayModeFromEnv() {
     return value != nullptr && *value != '\0' && std::string(value) != "0";
 }
 
+// Phase 18f: ENGINE_DEBUG_SHADING_MODE=<rendered|solid|wireframe>
+// (case-insensitive), unset by default -- same getenv-gated-value shape as
+// ENGINE_DEBUG_SELECT/ENGINE_DEBUG_CREATE above, but for editShadingMode_
+// instead. Closes the identical "no real mouse to click a toolbar button
+// with" gap ENGINE_DEBUG_FORCE_PLAY_MODE closes for physicsRunning_ just
+// above -- applied once, in the constructor, setting the exact same
+// editShadingMode_ member a real "lighting"/"texture-mode" toolbar click
+// would (via decideNextEditShadingMode(), shading_mode.hpp), so render()'s
+// own effectiveShadingMode() gate runs the identical production code path
+// either way. An unrecognized value is logged as a warning and ignored
+// (stays at the ShadingMode::kRendered default), the same "don't silently
+// misbehave on a typo'd env var" treatment every other value-carrying
+// ENGINE_DEBUG_* var in this file already gets.
+ShadingMode debugShadingModeFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_SHADING_MODE");
+    if (value == nullptr || *value == '\0') {
+        return ShadingMode::kRendered;
+    }
+    std::string lowered(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowered == "rendered") {
+        return ShadingMode::kRendered;
+    }
+    if (lowered == "solid") {
+        return ShadingMode::kSolid;
+    }
+    if (lowered == "wireframe") {
+        return ShadingMode::kWireframe;
+    }
+    LOG_WARN("ENGINE_DEBUG_SHADING_MODE=\"" + lowered + "\" is not one of rendered/solid/wireframe; ignored");
+    return ShadingMode::kRendered;
+}
+
 // Phase 16: ENGINE_DEBUG_SIMULATE_ESCAPE=1, unset by default -- same
 // getenv-gated-behavior pattern as every plain on/off flag above. Xvfb has
 // no real keyboard at all (see this project's own established headless-
@@ -1897,7 +1931,14 @@ Application::Application(int width, int height, const std::string& title, std::u
       ssaoDisabled_(ssaoDisabledFromEnv()),
       ssaoDebugMode_(ssaoDebugModeFromEnv()),
       ssrDisabled_(ssrDisabledFromEnv()),
-      debugSimulateEscape_(debugSimulateEscapeFromEnv()) {
+      debugSimulateEscape_(debugSimulateEscapeFromEnv()),
+      // Phase 18f: same getenv-gated-value-shape initialization as every
+      // other member above -- see debugShadingModeFromEnv()'s own comment.
+      // Declared/initialized AFTER physicsRunning_ (which has no
+      // initializer-list entry at all, see that member's own comment) to
+      // match application.hpp's own declaration order, avoiding a
+      // -Wreorder warning under this project's -Wall -Wextra build.
+      editShadingMode_(debugShadingModeFromEnv()) {
     // No depth buffer testing existed in Phase 1 (nothing but a flat clear
     // needed it); real 3D geometry does, so faces occlude each other
     // correctly instead of painting in draw-call order.
@@ -2415,6 +2456,17 @@ Application::Application(int width, int height, const std::string& title, std::u
 
     if (cameraDemoMode_) {
         LOG_INFO("ENGINE_CAMERA_DEMO set: driving the camera through a scripted orbit instead of live input");
+    }
+
+    // Phase 18f: log the resolved shading mode only when it's not the
+    // default -- editShadingMode_ was already set from
+    // debugShadingModeFromEnv() in the initializer list above; this just
+    // makes a non-default startup choice visible in a headless run's own
+    // log, the same "log a non-default debug-env-var outcome" precedent
+    // ENGINE_DEBUG_FORCE_PLAY_MODE's own LOG_INFO (just below) establishes.
+    if (editShadingMode_ != ShadingMode::kRendered) {
+        LOG_INFO(std::string("ENGINE_DEBUG_SHADING_MODE set: starting Edit mode in ") +
+                  (editShadingMode_ == ShadingMode::kSolid ? "Solid" : "Wireframe") + " shading mode");
     }
 
     // Phase 16: ENGINE_DEBUG_FORCE_CAMERA_CAPTURE -- see
@@ -2969,7 +3021,16 @@ void Application::renderGizmo(const glm::mat4& view, const glm::mat4& projection
     const glm::mat4 worldMatrix = resolveWorldMatrix(registry_, *selectedEntity_);
     const glm::vec3 gizmoOrigin = glm::vec3(worldMatrix[3]);
 
-    const float distanceToCamera = glm::length(camera_.position() - gizmoOrigin);
+    // Phase 18f: the eye position is recovered from `view` itself
+    // (glm::inverse(view)'s own translation column) rather than read
+    // straight from camera_ -- `view` is whichever camera value actually
+    // rendered THIS frame (camera_'s own free-fly pose, or a scene Camera
+    // entity's resolved pose during Play mode -- see render()'s own Phase
+    // 18f comment), so deriving it from `view` keeps the gizmo's own
+    // distance-based scaling correct under either, with no second camera
+    // reference threaded into this method's own signature.
+    const glm::vec3 eyePosition(glm::inverse(view)[3]);
+    const float distanceToCamera = glm::length(eyePosition - gizmoOrigin);
     const float axisLength = gizmoAxisLength(distanceToCamera);
 
     // Editor chrome, not scene content -- always renders on top, regardless
@@ -3240,6 +3301,132 @@ void Application::render() {
     const DirectionalLight activeLight = resolveActiveDirectionalLight(
         registry_, activeDirectionalLight_.value_or(EntityId()), DirectionalLight{kLightDirection, kLightColor});
 
+    // Phase 18f: this frame's active Camera entity (if any), resolved fresh
+    // every frame -- see camera_component.hpp's own resolveActiveCamera()
+    // comment for why this needs no persisted "which one" member the way
+    // activeDirectionalLight_ does. `ignoredCount` is only ever nonzero for
+    // a hand-edited/loaded scene JSON containing more than one Camera
+    // entity (the Create menu's own Phase 18f change prevents this through
+    // ordinary use, see editor_ui.cpp's own renderCreateEntityMenuItems()
+    // comment) -- edge-triggered LOG_WARN, identical discipline to
+    // pointLightOverflowActive_'s own collectPointLights()-overflow warning
+    // above, rather than warning every single frame the condition persists.
+    const ActiveCameraResolution activeCameraResolution = resolveActiveCamera(registry_);
+    const bool cameraOverflowThisFrame = activeCameraResolution.ignoredCount > 0;
+    if (cameraOverflowThisFrame && !cameraOverflowActive_) {
+        LOG_WARN("Scene has " + std::to_string(activeCameraResolution.ignoredCount) +
+                  " extra Camera entit" + (activeCameraResolution.ignoredCount == 1 ? "y" : "ies") +
+                  " beyond the one this engine actually uses; only the entity with index " +
+                  std::to_string(activeCameraResolution.active.index()) +
+                  " (the first found by registry iteration order) is treated as the scene's active camera -- "
+                  "the rest are ignored.");
+    }
+    cameraOverflowActive_ = cameraOverflowThisFrame;
+
+    // Phase 18f: edge-triggered proof, in the log, that the Create menu's
+    // "Camera" item is genuinely BeginDisabled()'d -- see
+    // createMenuCameraItemDisabled_'s own application.hpp comment for why
+    // this exists at all (a headless run has no other way to observe a
+    // disabled popup MenuItem() without a real mouse to open the popup
+    // with). `hasActiveCamera` here is the exact same value passed to
+    // editorUI_.renderDockspaceShell() further down this same render() call
+    // -- see that call site's own comment.
+    const bool hasActiveCamera = activeCameraResolution.active.valid();
+    if (hasActiveCamera != createMenuCameraItemDisabled_) {
+        LOG_INFO(hasActiveCamera
+                      ? "Camera entity present (index " + std::to_string(activeCameraResolution.active.index()) +
+                            "): the Scene panel's Create menu \"Camera\" item is now disabled."
+                      : "No Camera entity present: the Scene panel's Create menu \"Camera\" item is enabled again.");
+        createMenuCameraItemDisabled_ = hasActiveCamera;
+    }
+
+    // Phase 18f: Play mode (physicsRunning_) viewing through a scene Camera
+    // entity replaces camera_ (the free-fly camera) as this frame's actual
+    // render viewpoint -- see application.hpp's own updated camera_ comment
+    // for the full precedence rule, and camera_component.hpp's own header
+    // comment for why Edit mode is completely unaffected regardless of
+    // whether a Camera entity exists. `activeCameraComponent` is looked up
+    // once here and reused below (rather than a second getComponent() call)
+    // -- non-null only when `physicsRunning_` even bothers to ask, since
+    // Edit mode never needs it at all.
+    const CameraComponent* activeCameraComponent =
+        (physicsRunning_ && hasActiveCamera) ? registry_.getComponent<CameraComponent>(activeCameraResolution.active)
+                                              : nullptr;
+    const bool usingSceneCamera = activeCameraComponent != nullptr;
+
+    // Phase 18f: while Play mode is actively viewing through a scene Camera
+    // entity, there is no free-fly camera to fly -- the Phase 16 double-
+    // click-to-capture gesture is disabled for the duration (this engine's
+    // own confirmed precedent: Unity's Game view only ever shows what the
+    // game camera sees, with no free-look). Releasing an EXISTING capture
+    // the instant this becomes true (rather than merely refusing new capture
+    // requests going forward) avoids leaving the OS cursor hidden/locked
+    // with no camera left for it to actually control -- setCameraCaptured()
+    // is a safe no-op when cameraCaptured_ is already false, so this costs
+    // nothing on the overwhelmingly common frame this condition ISN'T newly
+    // true. New capture requests are refused further down, where
+    // cameraCaptureRequestPending_ is latched for next frame's
+    // decideCameraCapture() call (see that call site's own Phase 18f
+    // comment) -- not here, since EditorUI's own Viewport double-click
+    // detection has already run further down in this SAME render() call by
+    // the time `usingSceneCamera` is known for certain this frame, so there
+    // is nothing to gate yet at this point.
+    if (usingSceneCamera && cameraCaptured_) {
+        setCameraCaptured(false);
+        LOG_INFO("Play mode is now viewing through a scene Camera entity -- releasing free-fly camera capture "
+                  "(there is no free-fly camera to fly while the game view is locked to the scene camera).");
+    }
+
+    // Phase 18f: `renderCamera` is what every "which viewpoint is this frame
+    // actually rendered from" call below reads from -- camera_ unless
+    // `usingSceneCamera`, in which case a fresh, temporary Camera value
+    // built from the active entity's own resolved world pose +
+    // CameraComponent optics. Building a REAL Camera value (rather than
+    // threading a second view/projection pair by hand through every
+    // render()/renderShadowPass()/computeCascades() call site below) is what
+    // lets every one of those call sites stay completely unmodified from
+    // Phase 18e -- computeCascades() already takes `const Camera&`, exactly
+    // this type, so this is a drop-in substitution, not a parallel code
+    // path. Camera::setPositionLookingAt() (camera.hpp, unchanged since
+    // Phase 3) is what actually turns `pose.position`/`pose.lookTarget`
+    // into the yaw/pitch pair Camera's own getViewMatrix() needs --
+    // reusing it here is exactly what
+    // resolveCameraWorldPose()'s own header comment already explains
+    // `lookTarget` (a point, not a bare direction) was shaped for.
+    //
+    // One accepted limitation, matching engine::Camera's own established
+    // "no roll" design (camera.hpp's own header comment): a Camera entity's
+    // world rotation ROLL (rotation around its own forward axis) is not
+    // representable by a yaw/pitch Camera and is silently dropped here,
+    // exactly as it already would be if a user tried to roll the free-fly
+    // camera_ itself -- there is no roll anywhere in this engine's camera
+    // model, Play mode included.
+    Camera sceneRenderCamera(camera_.position());
+    if (usingSceneCamera) {
+        const glm::mat4 activeCameraWorldMatrix = resolveWorldMatrix(registry_, activeCameraResolution.active);
+        const CameraWorldPose pose = resolveCameraWorldPose(activeCameraWorldMatrix);
+        sceneRenderCamera.setPositionLookingAt(pose.position, pose.lookTarget);
+        sceneRenderCamera.setFov(activeCameraComponent->fovYDeg);
+        sceneRenderCamera.setClipPlanes(activeCameraComponent->nearPlane, activeCameraComponent->farPlane);
+    }
+    const Camera& renderCamera = usingSceneCamera ? sceneRenderCamera : camera_;
+
+    // Phase 18f: this frame's actual shading mode -- editShadingMode_ in
+    // Edit mode, unconditionally ShadingMode::kRendered whenever
+    // physicsRunning_ is true -- see application.hpp's own editShadingMode_
+    // comment and shading_mode.hpp's own effectiveShadingMode() for why this
+    // one call is the entirety of "Play mode always forces Rendered,
+    // restoring Edit's prior choice on return" with no save/restore step of
+    // its own. `wireframeThisFrame` gates the polygon-mode switch around the
+    // main color pass below; `skipHeavyPassesThisFrame` gates SSAO/SSR (both
+    // Wireframe and Solid) and the selection-mask pass (which depends on
+    // SSAO's own depth pre-pass, see renderSelectionMask()'s own comment) --
+    // see this function's own further-down comments at each gated call site
+    // for exactly why each one is or isn't skipped.
+    const ShadingMode effectiveModeThisFrame = effectiveShadingMode(physicsRunning_, editShadingMode_);
+    const bool wireframeThisFrame = effectiveModeThisFrame == ShadingMode::kWireframe;
+    const bool skipHeavyPassesThisFrame = effectiveModeThisFrame != ShadingMode::kRendered;
+
     // Phase 13c: the camera's own aspect ratio (computed above) feeds
     // computeCascades()'s per-cascade sub-frustum construction (see
     // Camera::getProjectionMatrix's near/far overload), so cascades must be
@@ -3249,9 +3436,13 @@ void Application::render() {
     // directly any more -- the two are identical whenever no Directional
     // Light entity is active, so this is a no-op change for every scene that
     // doesn't use this phase's new feature (see this engine's own default
-    // scene, still zero Directional Light entities).
+    // scene, still zero Directional Light entities). Phase 18f: built from
+    // `renderCamera`, not `camera_` directly any more -- identical whenever
+    // Play mode isn't viewing through a scene Camera entity (the two are the
+    // same object in that case), so this too is a no-op change for every
+    // frame that doesn't use this phase's new feature.
     const std::array<Cascade, kCascadeCount> cascades =
-        computeCascades(camera_, aspect, glm::normalize(activeLight.direction));
+        computeCascades(renderCamera, aspect, glm::normalize(activeLight.direction));
     std::array<glm::mat4, kCascadeCount> lightSpaceMatrices{};
     for (int i = 0; i < kCascadeCount; ++i) {
         lightSpaceMatrices[static_cast<std::size_t>(i)] = cascades[static_cast<std::size_t>(i)].lightSpaceMatrix;
@@ -3264,11 +3455,20 @@ void Application::render() {
     // Phase 14c comment above), since renderShadowPass() leaves it pointed
     // at whichever cascade it wrote to last (all the same, generally
     // different, resolution).
-    renderShadowPass(lightSpaceMatrices);
-    GL_CHECK(glViewport(0, 0, viewportWidth_, viewportHeight_));
+    //
+    // Phase 18f: skipped entirely in Wireframe mode -- "no meaningful
+    // surface data for SSAO/SSR/shadows" (this phase's own confirmed brief)
+    // -- rather than run against a mode with no filled faces at all. Kept
+    // for Solid mode (shadows are part of "basic lighting," which Solid
+    // mode explicitly keeps -- see application.cpp's own Phase 18f comment
+    // further down on the main color pass for the full Solid-mode rationale).
+    if (!wireframeThisFrame) {
+        renderShadowPass(lightSpaceMatrices);
+        GL_CHECK(glViewport(0, 0, viewportWidth_, viewportHeight_));
+    }
 
-    const glm::mat4 view = camera_.getViewMatrix();
-    const glm::mat4 projection = camera_.getProjectionMatrix(aspect);
+    const glm::mat4 view = renderCamera.getViewMatrix();
+    const glm::mat4 projection = renderCamera.getProjectionMatrix(aspect);
 
     // Phase 13f: SSAO's own three screen-space passes -- run here (after the
     // shadow pass, before the main color pass) so shader_/pbrShader_ below
@@ -3281,7 +3481,22 @@ void Application::render() {
     // kSSAODownsampleFactor) resolution -- hdrFramebuffer_.bindForWriting()
     // right below rebinds both correctly before anything draws into the
     // window's own framebuffer chain.
-    renderSSAO(view, projection);
+    //
+    // Phase 18f: skipped entirely for Wireframe AND Solid mode
+    // (`skipHeavyPassesThisFrame`) -- there is no meaningful surface data
+    // for a screen-space technique to reconstruct occlusion from once the
+    // scene isn't being drawn with its ordinary filled/textured faces (this
+    // phase's own confirmed brief, for Wireframe explicitly; Solid mode
+    // extends the same skip since this project's own established preference
+    // is the SIMPLER choice when either is defensible -- see this project's
+    // physics.hpp restraint-in-scope precedent this phase's own brief cites
+    // -- rather than separately verifying SSAO looks correct against
+    // untextured Solid-mode geometry). uSSAOEnabled (below) is what actually
+    // stops shader_/pbrShader_ from ever SAMPLING ssaoBlurred_'s possibly-
+    // stale contents in that case -- not skipping this call alone.
+    if (!skipHeavyPassesThisFrame) {
+        renderSSAO(view, projection);
+    }
 
     // Phase 18d: the selection mask pass -- depends only on ssaoGBuffer_'s
     // depth texture (just finished above), not on hdrFramebuffer_'s own main
@@ -3294,7 +3509,22 @@ void Application::render() {
     // (or, when this frame has no selection, doesn't touch FBO bindings at
     // all) -- hdrFramebuffer_.bindForWriting() right below rebinds correctly
     // either way.
-    renderSelectionMask(view, projection);
+    //
+    // Phase 18f: also skipped whenever renderSSAO() (just above) was --
+    // renderSelectionMask()'s own occlusion test reads ssaoGBuffer_'s depth
+    // texture (Phase 18d's own design), which only renderSSAO() ever
+    // refreshes; running this against a Wireframe/Solid frame's STALE
+    // ssaoGBuffer_ (whatever a previous Rendered frame left behind) would be
+    // exactly the "garbage/line-rasterized G-buffer content" this phase's
+    // own brief warns against for SSAO/SSR, just one step removed. The
+    // selection outline is therefore a Rendered-mode-only feature as of this
+    // phase -- `hasSelectionOutline` further down in this same function
+    // gates postprocess.frag's own sampling on the identical
+    // `skipHeavyPassesThisFrame` condition, so a stale mask is never actually
+    // composited even on the very first Wireframe/Solid frame.
+    if (!skipHeavyPassesThisFrame) {
+        renderSelectionMask(view, projection);
+    }
 
     // Phase 7b: the whole lit scene (+ skybox) renders into hdrFramebuffer_
     // -- a floating-point off-screen target -- instead of straight to the
@@ -3408,7 +3638,14 @@ void Application::render() {
     shader_->setVec3("uLightDirection", activeLight.direction);
     shader_->setVec3("uLightColor", activeLight.color);
     shader_->setVec3("uAmbientColor", kAmbientColor);
-    shader_->setVec3("uViewPos", camera_.position());
+    // Phase 18f: renderCamera's own position, not camera_'s -- this feeds
+    // every view-dependent lighting term below (specular halfway vectors,
+    // Fresnel-adjacent terms in pbr.frag's own upload further down), so it
+    // MUST match whichever eye position `view`/`projection` above were
+    // actually built from, or every specular highlight would silently
+    // reflect the free-fly camera_'s position while the image itself is
+    // rendered from a completely different scene Camera entity.
+    shader_->setVec3("uViewPos", renderCamera.position());
 
     // Phase 13d: clustered lighting's own per-frame uniforms -- basic.frag's
     // computeClusterIndex() needs the same screen size/near/far the compute
@@ -3421,6 +3658,21 @@ void Application::render() {
     // the viewport's own resolution, matching what recomputeClusterAABBs()
     // itself now builds the cluster grid against.
     shader_->setVec2("uScreenSize", glm::vec2(static_cast<float>(viewportWidth_), static_cast<float>(viewportHeight_)));
+    // Phase 18f: deliberately STILL camera_.nearPlane(), not
+    // renderCamera.nearPlane() -- the cluster grid clusterLightCuller_ built
+    // (recomputeClusterAABBs(), still built from camera_'s own projection --
+    // see that method's own comment) has to stay self-consistent with
+    // whatever near plane computeClusterIndex() (basic.frag) reconstructs a
+    // fragment's cluster from, or the two would disagree about where each
+    // cluster's depth slice boundaries fall. A scene Camera entity's own
+    // near/far are used for its actual PROJECTION matrix above (`projection`)
+    // and every shadow cascade split (computeCascades(), above); clustered
+    // light culling accuracy under a scene Camera entity with different clip
+    // planes than camera_'s is a known, minor, accepted limitation of this
+    // phase -- this engine's fixed, small light count means a slightly
+    // mismatched cluster lookup has no visible effect in practice, and
+    // rebuilding the cluster grid itself per-frame for this one case would
+    // be real, separate scope beyond what this phase's brief asks for.
     shader_->setFloat("uClusterNearPlane", camera_.nearPlane());
     shader_->setFloat("uClusterFarPlane", ClusterLightCuller::kClusterFarDistance);
     shader_->setInt("uClusterDebug", clusterDebugMode_ ? 1 : 0);
@@ -3433,9 +3685,17 @@ void Application::render() {
     // uploads above already rely on). ssaoDisabled_ (ENGINE_SSAO_DISABLE)
     // forces uSSAOEnabled to 0 instead, making both shaders fall back to an
     // unconditional ssao = 1.0 -- see basic.frag/pbr.frag's own comment.
+    // Phase 18f: `skipHeavyPassesThisFrame` forces the identical 0 -- renderSSAO()
+    // itself didn't even run this frame in that case (see this function's
+    // own comment at that call site), so ssaoBlurred_ holds stale contents
+    // that must never actually be sampled.
     ssaoBlurred_.bindColorTexture(kSSAOMapTextureUnit);
     shader_->setInt("uSSAOMap", static_cast<int>(kSSAOMapTextureUnit));
-    shader_->setInt("uSSAOEnabled", ssaoDisabled_ ? 0 : 1);
+    shader_->setInt("uSSAOEnabled", (ssaoDisabled_ || skipHeavyPassesThisFrame) ? 0 : 1);
+    // Phase 18f: Solid mode's own "shaded, but no diffuse texture" flag --
+    // see basic.frag's own uSolidShading comment. 0 (the ordinary, textured
+    // Rendered-mode path) for every frame except an effective Solid one.
+    shader_->setInt("uSolidShading", effectiveModeThisFrame == ShadingMode::kSolid ? 1 : 0);
 
     // Phase 7a: point/spot lights, uploaded as a live count + a fixed-size
     // array each frame (see basic.frag's uNumPointLights/uPointLights and
@@ -3495,6 +3755,28 @@ void Application::render() {
     // change as that count does. Phase 8a: previously `for (const Entity&
     // entity : entities_)`, see this class's own Phase 8a header comment and
     // ecs.hpp.
+    //
+    // Phase 18f: Wireframe mode switches GL_FILL to GL_LINE for exactly this
+    // main color pass -- entities_/the ground plane/the PBR sphere grid
+    // below, restored to GL_FILL again right after the sphere loop, BEFORE
+    // skybox_.draw() -- the simplest standard technique for a real wireframe
+    // view (this phase's own confirmed brief), and no new shader is needed
+    // for it: shader_/pbrShader_ still run their ordinary fragment shaders
+    // per rasterized LINE fragment instead of per filled triangle, so
+    // Wireframe's edges are still lit/shadowed exactly like Rendered mode's
+    // filled faces would be. Deliberately scoped narrowly to just this block
+    // (not set earlier, before the shadow/SSAO pre-passes) -- those two are
+    // skipped OUTRIGHT in Wireframe mode already (see this function's own
+    // comments at each call site), so there is no "wireframe-rasterized
+    // garbage pre-pass data" risk for a narrower scope to avoid; skybox_/the
+    // postprocess tonemap quad/renderGizmo()'s own flat-shaded triangles
+    // below must never be line-rasterized (a GL_LINE fullscreen quad would
+    // draw only its two diagonal edges, breaking the entire tonemap
+    // composite), which is exactly why the reset back to GL_FILL happens
+    // immediately after the sphere loop, well before any of those run.
+    if (wireframeThisFrame) {
+        GL_CHECK(glPolygonMode(GL_FRONT_AND_BACK, GL_LINE));
+    }
     registry_.each<ModelComponent>([&](EntityId id, ModelComponent& mc) {
         if (mc.model) {
             // Phase 14b: the main color pass draws every entity at its
@@ -3570,20 +3852,29 @@ void Application::render() {
     // -- see that upload's own comment.
     pbrShader_->setVec3("uLightDirection", activeLight.direction);
     pbrShader_->setVec3("uLightColor", activeLight.color);
-    pbrShader_->setVec3("uViewPos", camera_.position());
+    // Phase 18f: see shader_'s identical uViewPos upload above for why this
+    // is renderCamera, not camera_.
+    pbrShader_->setVec3("uViewPos", renderCamera.position());
 
     // Phase 13d: see shader_'s identical upload above (Phase 14c: also
     // viewportWidth_/viewportHeight_ now, same reasoning).
     pbrShader_->setVec2("uScreenSize",
                          glm::vec2(static_cast<float>(viewportWidth_), static_cast<float>(viewportHeight_)));
+    // Phase 18f: deliberately still camera_.nearPlane() -- see shader_'s
+    // identical upload above for why.
     pbrShader_->setFloat("uClusterNearPlane", camera_.nearPlane());
     pbrShader_->setFloat("uClusterFarPlane", ClusterLightCuller::kClusterFarDistance);
     pbrShader_->setInt("uClusterDebug", clusterDebugMode_ ? 1 : 0);
 
     // Phase 13f: same texture unit shader_'s own upload above already bound
-    // ssaoBlurred_ to -- see that upload's comment.
+    // ssaoBlurred_ to -- see that upload's comment. Phase 18f:
+    // `skipHeavyPassesThisFrame` forces this off too -- see shader_'s own
+    // identical upload above.
     pbrShader_->setInt("uSSAOMap", static_cast<int>(kSSAOMapTextureUnit));
-    pbrShader_->setInt("uSSAOEnabled", ssaoDisabled_ ? 0 : 1);
+    pbrShader_->setInt("uSSAOEnabled", (ssaoDisabled_ || skipHeavyPassesThisFrame) ? 0 : 1);
+    // Phase 18f: same Solid-mode flag shader_'s own upload above already
+    // sets -- see basic.frag's/pbr.frag's own uSolidShading comment.
+    pbrShader_->setInt("uSolidShading", effectiveModeThisFrame == ShadingMode::kSolid ? 1 : 0);
 
     // Phase 13g: off during this, the ordinary once-per-frame PBR draw --
     // pbr.frag's IBL-only specular term is computed exactly as Phase 10 left
@@ -3657,6 +3948,14 @@ void Application::render() {
                   std::to_string(cullStats.totalDrawables) + " drawables culled this frame");
     }
 
+    // Phase 18f: restored to GL_FILL immediately after the main color pass
+    // (entities_/ground/PBR spheres) finishes, BEFORE skybox_.draw() -- see
+    // this function's own comment where GL_LINE was set, above, for exactly
+    // why this reset can't wait any later.
+    if (wireframeThisFrame) {
+        GL_CHECK(glPolygonMode(GL_FRONT_AND_BACK, GL_FILL));
+    }
+
     // Phase 7b: the skybox is drawn LAST, still into hdrFramebuffer_ -- see
     // skybox.hpp's Skybox::draw() for the GL_LEQUAL depth trick that makes
     // it only paint over pixels nothing above just drew, i.e. the actual
@@ -3701,8 +4000,12 @@ void Application::render() {
     // hdrResolveFramebuffer_ exactly as the first pass alone produced it
     // (pbr.frag's IBL-only specular term, unchanged) -- see that env var's
     // own comment for why this exists (isolating SSR's own contribution for
-    // headless before/after verification).
-    if (!ssrDisabled_) {
+    // headless before/after verification). Phase 18f: `skipHeavyPassesThisFrame`
+    // skips it too, for both Wireframe and Solid mode -- see this function's
+    // own comment at the SSAO call site above for the identical reasoning
+    // (no meaningful surface data to ray-march against once the scene wasn't
+    // shaded with its ordinary filled/textured faces this frame).
+    if (!ssrDisabled_ && !skipHeavyPassesThisFrame) {
         renderSSRComposite(view, projection);
         hdrFramebuffer_.resolveTo(hdrResolveFramebuffer_);
         // Bug fix: resolveTo() above only overwrites hdrResolveFramebuffer_'s
@@ -3840,7 +4143,14 @@ void Application::render() {
     // can never influence this frame's output. This is what guarantees the
     // "nothing selected => pixel-identical to before this feature existed"
     // default this phase's own brief requires.
-    const bool hasSelectionOutline = selectedEntity_.has_value() &&
+    // Phase 18f: also requires !skipHeavyPassesThisFrame -- renderSelectionMask()
+    // itself didn't even run this frame in Wireframe/Solid mode (see this
+    // function's own comment at that call site), so selectionMaskFramebuffer_
+    // holds stale contents from whenever a Rendered frame last wrote it;
+    // this is what stops postprocess.frag from ever sampling that stale
+    // buffer, the identical role this same flag already plays for
+    // uHasSelection's own pre-existing "nothing selected" case just above.
+    const bool hasSelectionOutline = !skipHeavyPassesThisFrame && selectedEntity_.has_value() &&
                                       registry_.getComponent<ModelComponent>(*selectedEntity_) != nullptr &&
                                       registry_.getComponent<ModelComponent>(*selectedEntity_)->model != nullptr;
     selectionMaskFramebuffer_.bindColorTexture(3);
@@ -4025,19 +4335,30 @@ void Application::render() {
     TitleBarAction titleBarAction;
     // Phase 18e: `view`/`projection` -- the SAME matrices this frame's own
     // shadow/SSAO/selection-mask/gizmo passes above already used (computed
-    // once, near the top of this function, from camera_'s state as of the
-    // START of this frame) -- and `camera_.position()`, passed straight
-    // through as EditorUI's own new `cameraPosition`/`cameraView`/
-    // `cameraProjection` parameters so its gizmo hit-test (updateGizmo(),
-    // editor_ui.cpp) reasons about the exact same camera state
-    // Application::renderGizmo() just drew the gizmo's own pickable geometry
-    // with -- see that method's own header comment for why the two must
-    // agree.
+    // once, near the top of this function, from renderCamera's state as of
+    // the START of this frame) -- and `renderCamera.position()` (Phase 18f:
+    // was `camera_.position()` -- see that member's own updated
+    // application.hpp comment for why this must be whichever camera value
+    // actually rendered THIS frame), passed straight through as EditorUI's
+    // own new `cameraPosition`/`cameraView`/`cameraProjection` parameters so
+    // its gizmo hit-test (updateGizmo(), editor_ui.cpp) reasons about the
+    // exact same camera state Application::renderGizmo() just drew the
+    // gizmo's own pickable geometry with -- see that method's own header
+    // comment for why the two must agree.
+    //
+    // Phase 18f: two more arguments -- `hasActiveCamera` (computed near the
+    // top of this function; Create menu's own "at most one Camera entity"
+    // enforcement, see editor_ui.cpp's own renderCreateEntityMenuItems()
+    // comment) and `editShadingMode_` (replacing the old `ssaoDisabled_`/
+    // `ssaoDebugMode_` pair here -- those two members are UNCHANGED, still
+    // real, still owned by the F1 debug overlay's own checkboxes; this call
+    // simply stops being a second way to reach them, see editor_ui.hpp's own
+    // updated renderDockspaceShell() comment for the full story).
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
-        viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_,
-        activeDirectionalLight_, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
-        cameraCaptureRequested, ssaoDisabled_, ssaoDebugMode_, physicsRunning_, !window_.isDecorated(),
-        window_.isMaximized(), window_.getWindowPos(), titleBarAction, camera_.position(), view, projection);
+        viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, activeDirectionalLight_,
+        hasActiveCamera, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
+        cameraCaptureRequested, editShadingMode_, physicsRunning_, !window_.isDecorated(), window_.isMaximized(),
+        window_.getWindowPos(), titleBarAction, renderCamera.position(), view, projection);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
     }
@@ -4078,7 +4399,19 @@ void Application::render() {
     // SAME frame's run() loop iteration, before update()/render() ran (see
     // run()'s own Phase 16 comment), so it is always false by the time this
     // line runs.
-    cameraCaptureRequestPending_ = cameraCaptureRequested;
+    //
+    // Phase 18f: `&& !usingSceneCamera` -- a Viewport double-click detected
+    // THIS frame, while Play mode is viewing through a scene Camera entity,
+    // must never be allowed to capture the free-fly camera next frame (see
+    // this function's own Phase 18f comment, near the top, on why there is
+    // no free-fly camera to fly while the game view is locked to the scene
+    // camera). This is the actual enforcement of that rule -- suppressing it
+    // HERE, at the one place a same-frame request is latched for next
+    // frame's decideCameraCapture() call, rather than threading a new
+    // parameter into EditorUI's own double-click detection, since
+    // `usingSceneCamera` is Application-owned state EditorUI has no need to
+    // know about for any other reason.
+    cameraCaptureRequestPending_ = cameraCaptureRequested && !usingSceneCamera;
     // Phase 15e: the File > Save Scene menu item's own second trigger path
     // (alongside run()'s own Ctrl+S check) -- see editor_ui.hpp/.cpp's own
     // Phase 15e comments for why EditorUI only ever reports this request

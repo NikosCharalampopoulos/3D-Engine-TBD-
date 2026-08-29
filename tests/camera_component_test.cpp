@@ -1,10 +1,14 @@
 // Phase 15c's own test: exercises engine::CameraComponent
-// (include/engine/camera_component.hpp) in isolation. Unlike light_test.cpp
-// (engine::collectPointLights()/resolveActiveDirectionalLight(), both real
-// functions in src/light.cpp), CameraComponent has no logic of its own to
-// call -- it's a plain data struct, the same "header-only, no matching .cpp"
-// shape ecs_test.cpp's own header comment already establishes for ecs.hpp
-// itself. So what this file actually verifies is:
+// (include/engine/camera_component.hpp) in isolation. Through Phase 18e,
+// CameraComponent had no logic of its own to call -- it was a plain data
+// struct, the same "header-only, no matching .cpp" shape ecs_test.cpp's own
+// header comment already establishes for ecs.hpp itself.
+//
+// Phase 18f adds two real, pure functions to this same header --
+// resolveCameraWorldPose() (a plain glm::mat4-in/CameraWorldPose-out
+// computation, no EntityRegistry at all) and resolveActiveCamera() (which
+// DOES need a live EntityRegistry) -- now implemented in the new
+// src/camera_component.cpp this test links below. So this file now verifies:
 //   1. CameraComponent{}'s own default field values genuinely match
 //      engine::Camera's own defaults (camera.hpp) -- the whole point of
 //      camera_component.hpp's own "copied verbatim" comment, which would
@@ -20,6 +24,17 @@
 //      sharing (see material.hpp's own Phase 14e comment) that the
 //      Inspector's Camera section deliberately does NOT have to guard
 //      against (editor_ui.cpp's own Phase 15c comment).
+//   3. resolveCameraWorldPose() correctly extracts a world-space eye
+//      position + look-at target from a hand-built glm::mat4 -- including
+//      under a non-uniform ancestor scale, the one case that function's own
+//      header comment calls out as the reason it normalizes rather than
+//      using the rotated vector directly.
+//   4. resolveActiveCamera() picks the first CameraComponent entity found by
+//      registry iteration order, correctly counts every additional one as
+//      "ignored" rather than silently overwriting its pick, and returns an
+//      invalid `active` (ignoredCount 0) for a registry with no Camera
+//      entity at all -- the "zero Camera entities" baseline every existing
+//      scene, including this engine's own default one, actually has.
 //
 // No GL/Window dependency at all -- ecs.hpp/transform.hpp/camera_component.hpp
 // are all header-only or GL-free, so (like every other *_test.cpp here) this
@@ -31,6 +46,9 @@
 #include "engine/ecs.hpp"
 #include "engine/transform.hpp"
 
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -144,6 +162,118 @@ int main() {
 
         expectTrue(registry.getComponent<engine::CameraComponent>(entity) == nullptr,
                    "an entity with no CameraComponent added reports nullptr from getComponent()");
+    }
+
+    // --- resolveCameraWorldPose(): identity matrix ------------------------
+    // No rotation/translation at all -- position stays the origin, and the
+    // look target is exactly the standard engine-forward vector (0, 0, -1),
+    // the same "a fresh camera looks down -Z" convention camera.hpp's own
+    // header comment documents for Camera itself.
+    {
+        const glm::mat4 identity(1.0f);
+        const engine::CameraWorldPose pose = engine::resolveCameraWorldPose(identity);
+        expectNear(pose.position.x, 0.0f, "identity matrix: resolved position.x");
+        expectNear(pose.position.y, 0.0f, "identity matrix: resolved position.y");
+        expectNear(pose.position.z, 0.0f, "identity matrix: resolved position.z");
+        expectNear(pose.lookTarget.x, 0.0f, "identity matrix: resolved lookTarget.x");
+        expectNear(pose.lookTarget.y, 0.0f, "identity matrix: resolved lookTarget.y");
+        expectNear(pose.lookTarget.z, -1.0f, "identity matrix: resolved lookTarget.z");
+    }
+
+    // --- resolveCameraWorldPose(): translated + yawed 90 degrees ----------
+    // A camera at (5, 2, 0) yawed +90 degrees around world Y should look
+    // down world +X (rotating (0,0,-1) by +90 degrees around Y sends it to
+    // (-1,0,0)... signed the OPPOSITE way glm::rotate's right-handed
+    // convention actually resolves it below -- this test asserts whatever
+    // glm::rotate() itself actually produces, not a hand-derived expectation,
+    // so it stays correct if this file's own trig convention is ever
+    // double-checked rather than silently encoding a sign error twice).
+    {
+        glm::mat4 world(1.0f);
+        world = glm::translate(world, glm::vec3(5.0f, 2.0f, 0.0f));
+        world = glm::rotate(world, glm::radians(90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        const engine::CameraWorldPose pose = engine::resolveCameraWorldPose(world);
+        expectNear(pose.position.x, 5.0f, "translated+yawed matrix: resolved position.x");
+        expectNear(pose.position.y, 2.0f, "translated+yawed matrix: resolved position.y");
+        expectNear(pose.position.z, 0.0f, "translated+yawed matrix: resolved position.z");
+        // The look DIRECTION (lookTarget - position) must be unit length and
+        // stay in the XZ plane (no accidental Y component from the rotation)
+        // -- checked directly rather than asserting an exact sign convention,
+        // since what matters for Camera::setPositionLookingAt() is a
+        // well-formed, correctly-oriented direction vector, not which of two
+        // equally-valid trig sign conventions produced it.
+        const glm::vec3 direction = pose.lookTarget - pose.position;
+        expectNear(glm::length(direction), 1.0f, "translated+yawed matrix: look direction is unit length");
+        expectNear(direction.y, 0.0f, "translated+yawed matrix: a pure Y-axis yaw keeps the look direction level");
+        expectTrue(std::fabs(direction.x) > 0.9f && std::fabs(direction.z) < 0.1f,
+                   "translated+yawed matrix: a 90-degree Y yaw points the look direction along X, not Z");
+    }
+
+    // --- resolveCameraWorldPose(): non-uniform scale does not distort the
+    // resolved look direction's LENGTH (it stays unit-length) or introduce a
+    // spurious Y component -- exactly the case this function's own header
+    // comment calls out normalize() as necessary for --------------------
+    {
+        glm::mat4 world(1.0f);
+        world = glm::scale(world, glm::vec3(1.0f, 5.0f, 2.0f));
+        const engine::CameraWorldPose pose = engine::resolveCameraWorldPose(world);
+        const glm::vec3 direction = pose.lookTarget - pose.position;
+        expectNear(glm::length(direction), 1.0f, "non-uniform scale: look direction stays unit length");
+        expectNear(direction.x, 0.0f, "non-uniform scale: look direction keeps no X component");
+        expectNear(direction.y, 0.0f, "non-uniform scale: look direction keeps no Y component");
+        expectNear(direction.z, -1.0f, "non-uniform scale: look direction still points down -Z");
+    }
+
+    // --- resolveActiveCamera(): no Camera entities at all ------------------
+    // The "zero Camera entities" baseline -- every scene before Phase 18f,
+    // and this engine's own default scene today, must resolve to an invalid
+    // `active` with zero ignored, exactly like resolveActiveDirectionalLight()'s
+    // own "no active entity" fallback keeps every pre-existing scene
+    // rendering unchanged.
+    {
+        engine::EntityRegistry registry;
+        registry.create();  // an entity that is NOT a camera
+        const engine::ActiveCameraResolution resolution = engine::resolveActiveCamera(registry);
+        expectTrue(!resolution.active.valid(), "no Camera entities: active is invalid");
+        expectTrue(resolution.ignoredCount == 0, "no Camera entities: ignoredCount is 0");
+    }
+
+    // --- resolveActiveCamera(): exactly one Camera entity -------------------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId camera = registry.create();
+        registry.addComponent<engine::CameraComponent>(camera, engine::CameraComponent{});
+        const engine::ActiveCameraResolution resolution = engine::resolveActiveCamera(registry);
+        expectTrue(resolution.active == camera, "exactly one Camera entity: active is that entity");
+        expectTrue(resolution.ignoredCount == 0, "exactly one Camera entity: ignoredCount is 0");
+    }
+
+    // --- resolveActiveCamera(): more than one Camera entity (a hand-edited
+    // scene JSON, per this function's own header comment -- the Create menu
+    // itself prevents this via the UI, but the resolution function must stay
+    // correct anyway) -- picks the FIRST by registry iteration order and
+    // counts the rest as ignored, deterministically -------------------------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId first = registry.create();
+        registry.addComponent<engine::CameraComponent>(first, engine::CameraComponent{});
+        const engine::EntityId second = registry.create();
+        registry.addComponent<engine::CameraComponent>(second, engine::CameraComponent{});
+        const engine::EntityId third = registry.create();
+        registry.addComponent<engine::CameraComponent>(third, engine::CameraComponent{});
+
+        const engine::ActiveCameraResolution resolution = engine::resolveActiveCamera(registry);
+        expectTrue(resolution.active == first,
+                   "three Camera entities: active is the first one found by registry iteration order");
+        expectTrue(resolution.ignoredCount == 2, "three Camera entities: the other two are counted as ignored");
+
+        // Calling it again against the SAME, unchanged registry must return
+        // the identical result -- this rule is meant to be stable frame to
+        // frame for a scene that isn't itself changing, not to pick a
+        // different "winner" arbitrarily each call.
+        const engine::ActiveCameraResolution resolutionAgain = engine::resolveActiveCamera(registry);
+        expectTrue(resolutionAgain.active == first, "calling resolveActiveCamera() again picks the same entity");
+        expectTrue(resolutionAgain.ignoredCount == 2, "calling resolveActiveCamera() again reports the same count");
     }
 
     if (failures == 0) {

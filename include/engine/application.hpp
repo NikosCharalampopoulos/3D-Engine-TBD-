@@ -497,6 +497,7 @@
 #include <vector>
 
 #include "engine/camera.hpp"
+#include "engine/camera_component.hpp"
 #include "engine/cluster_light_culler.hpp"
 #include "engine/debug_ui.hpp"
 #include "engine/ecs.hpp"
@@ -509,6 +510,7 @@
 #include "engine/pbr_material.hpp"
 #include "engine/resource_manager.hpp"
 #include "engine/shader.hpp"
+#include "engine/shading_mode.hpp"
 #include "engine/shadow_map.hpp"
 #include "engine/skybox.hpp"
 #include "engine/ssao.hpp"
@@ -816,15 +818,24 @@ private:
     // NameComponent (no ModelComponent) shape once more, plus a freshly
     // addComponent<CameraComponent>()'d camera_component.hpp component at its
     // own struct defaults. Unlike kDirectionalLight just above, this case
-    // does NOT assign any Application member afterward -- there is
-    // deliberately no activeCameraEntity_-shaped member anywhere in this
-    // class (see camera_component.hpp's own header comment for the full
-    // reasoning): nothing in render() ever reads "which entity is the
-    // active camera" the way it reads activeDirectionalLight_, because
-    // nothing in this engine's rendering pipeline is driven by a
-    // CameraComponent at all yet. This engine's actual rendered view still
-    // comes entirely from camera_ below, completely unaffected by creating
-    // (or editing, or deleting) any number of Camera entities.
+    // does NOT assign any Application member afterward -- through Phase 18e
+    // there was deliberately no activeCameraEntity_-shaped member anywhere
+    // in this class, because nothing in render() read "which entity is the
+    // active camera" at all yet.
+    //
+    // Phase 18f: still no member assignment here -- resolveActiveCamera()
+    // (camera_component.hpp) resolves this fresh from registry_ every frame
+    // render() runs instead (no "most recently created" bookkeeping needed;
+    // see that function's own header comment for why). This call site is
+    // only reachable at all while the Create menu's own "Camera" item is
+    // enabled, i.e. while zero Camera entities currently exist (editor_ui.cpp's
+    // own Phase 18f renderCreateEntityMenuItems() comment) or via the
+    // ENGINE_DEBUG_CREATE headless hook, which -- like the UI -- is not
+    // itself extra-guarded against creating a second one; the defensive
+    // multiple-Camera-entity handling lives entirely in resolveActiveCamera()
+    // instead (see its own header comment for why: a hand-edited scene JSON
+    // is the one path that can't go through this menu-level restriction at
+    // all).
     void spawnEntityFromCreateMenu(CreateEntityKind kind);
 
     // Phase 15g: factored out of spawnEntityFromCreateMenu() above -- the
@@ -1373,12 +1384,30 @@ private:
     // component (camera_component.hpp) and lets a user Create camera
     // entities from the Scene panel, but deliberately does NOT touch this
     // member or its own update path (see camera_.processMovement()/
-    // processMouseInput() calls in update()) -- there is no
-    // "activeCameraEntity_" member anywhere in this class, unlike
-    // activeDirectionalLight_ below, because nothing reads one. See
-    // camera_component.hpp's own header comment for why redirecting this
-    // camera_'s own control to an ECS entity is real, separate, future
-    // scope, not folded into this phase.
+    // processMouseInput() calls in update()) -- there was no
+    // "activeCameraEntity_" member anywhere in this class through Phase
+    // 18e, unlike activeDirectionalLight_ below, because nothing read one.
+    //
+    // Phase 18f: still true for EDIT mode -- camera_ is what Edit mode
+    // renders from, unconditionally, whether or not a Camera entity exists,
+    // exactly as every phase before this one. Play mode is now the one
+    // exception: render() resolves which (if any) Camera entity is active
+    // FRESH every frame (camera_component.hpp's resolveActiveCamera(), no
+    // persisted "which one" member needed the way activeDirectionalLight_
+    // needs one -- see that function's own header comment for why a Camera
+    // entity's resolution rule doesn't need to remember anything ACROSS
+    // frames the way "most recently created" does) and, only while
+    // `physicsRunning_` is true AND one exists, builds a temporary Camera
+    // value from that entity's own resolved world pose + CameraComponent
+    // optics and renders from THAT instead of camera_ for that one frame --
+    // see render()'s own Phase 18f comment for the full mechanism. camera_
+    // itself is still updated every frame regardless (update() never gates
+    // camera_.processMovement()/processMouseInput() on this) -- only which
+    // Camera value render() actually reads FROM for that frame's view/
+    // projection matrices changes; free-fly input keeps accumulating into
+    // camera_ even while Play mode is rendering from a scene Camera entity
+    // instead, so Edit mode picks up exactly where free-fly flight left off
+    // the instant Play mode ends.
     Camera camera_;
     // Phase 8d: the data-driven key-binding table pollInputState() now
     // consults each frame (see input.hpp/input_action_map.hpp) -- owned
@@ -1645,6 +1674,58 @@ private:
     // verification -- see debugForcePlayModeFromEnv()'s own application.cpp
     // comment).
     bool physicsRunning_ = false;
+
+    // Phase 18f: which shading mode EDIT mode is currently set to --
+    // mutated ONLY by a real toolbar button click (EditorUI's own
+    // renderDockspaceShell(), the same "passed through and mutated by
+    // reference" shape ssaoDisabled_/ssaoDebugMode_/physicsRunning_ above
+    // already use), NEVER by entering or leaving Play mode. render() never
+    // reads this directly -- it reads effectiveShadingMode(physicsRunning_,
+    // editShadingMode_) (shading_mode.hpp) instead, which is `editShadingMode_`
+    // itself in Edit mode and unconditionally ShadingMode::kRendered in Play
+    // mode. That single formula is this whole feature's "Play mode always
+    // looks Rendered; returning to Edit mode restores whatever was selected
+    // before, with no explicit save/restore step anywhere" behavior -- since
+    // this member is simply never touched by the Play/Pause buttons, there
+    // is nothing FOR Play mode to have overwritten in the first place, so
+    // there is nothing to restore either. Default ShadingMode::kRendered --
+    // today's only behavior before this phase, unchanged for a scene that
+    // never touches the toolbar's repurposed lighting/texture-mode buttons.
+    ShadingMode editShadingMode_ = ShadingMode::kRendered;
+
+    // Phase 18f: edge-tracking state for resolveActiveCamera()'s own
+    // `ignoredCount` (camera_component.hpp) -- true once render() has seen
+    // more than one Camera entity exist in registry_ (a hand-edited/loaded
+    // scene JSON, since the Create menu's own UI-level restriction prevents
+    // this through ordinary use) and not yet seen that clear. The identical
+    // "warn on the false->true edge only, stay silent while it persists,
+    // warn again if it clears and later re-triggers" discipline
+    // pointLightOverflowActive_ above already establishes for its own,
+    // structurally similar "more than this engine's single-slot capacity
+    // actually supports" warning -- see render()'s own Phase 18f comment for
+    // the exact comparison. Default false (no extra Camera entities),
+    // matching every other bool member in this class defaulting to
+    // "off/normal."
+    bool cameraOverflowActive_ = false;
+
+    // Phase 18f: edge-tracking state for a LOG_INFO line proving the Create
+    // menu's "Camera" item is genuinely disabled -- true once render() has
+    // seen `resolveActiveCamera(registry_).active.valid()` (i.e.
+    // `hasActiveCamera`, the value passed to EditorUI::renderDockspaceShell())
+    // become true and not yet seen it go back to false. Exists specifically
+    // because a Dear ImGui BeginDisabled()'d popup MenuItem() has no other
+    // externally-observable signal under this project's headless Xvfb
+    // verification (the popup itself only opens on a real mouse click this
+    // environment has no device to send -- see camera_capture.hpp's own
+    // header comment on this same Xvfb limitation for a different feature) --
+    // a log line naming the exact moment the condition BeginDisabled() reads
+    // becomes true is the "debug-log line proving the disabled state"
+    // alternative this phase's own verification brief explicitly allows for
+    // exactly this reason. Same edge-triggered "log on the false->true/
+    // true->false transition, stay silent while the state persists"
+    // discipline pointLightOverflowActive_/cameraOverflowActive_ above
+    // already establish, not a fresh idea introduced only for this.
+    bool createMenuCameraItemDisabled_ = false;
 };
 
 }  // namespace engine

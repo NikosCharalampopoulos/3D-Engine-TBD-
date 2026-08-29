@@ -142,15 +142,21 @@ endif()
 add_test(NAME light_test COMMAND light_test)
 
 # Phase 15c adds camera_component_test, testing engine::CameraComponent
-# (include/engine/camera_component.hpp) in isolation. Unlike light_test
-# above, camera_component.hpp has no matching src/*.cpp at all -- it's a
-# plain data struct with no logic function of its own (see its own header
-# comment) -- so, like ecs_test above, this links no extra src/*.cpp file;
-# the header alone (plus ecs.hpp/transform.hpp, both header-only or GL-free)
-# is the whole implementation under test. No GL context/GPU needed either --
-# just GLM for glm::vec3/glm::quat (via Transform).
+# (include/engine/camera_component.hpp) in isolation. Through Phase 18e,
+# camera_component.hpp had no matching src/*.cpp at all -- it was a plain
+# data struct with no logic function of its own.
+#
+# Phase 18f adds two real, pure functions (resolveCameraWorldPose()/
+# resolveActiveCamera()) implemented in the new src/camera_component.cpp --
+# this target now links it, the same "plain executable, links only the pure
+# logic file it's testing" shape as light_test/transform_hierarchy_test
+# above. resolveActiveCamera() needs a live EntityRegistry (ecs.hpp, already
+# header-only/GL-free), so this still needs no live GL context/GPU -- just
+# GLM for glm::vec3/glm::quat/glm::mat4 (via Transform and the new
+# resolveCameraWorldPose() tests).
 add_executable(camera_component_test
     camera_component_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/camera_component.cpp
 )
 target_include_directories(camera_component_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(camera_component_test PRIVATE glm::glm)
@@ -303,3 +309,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME gizmo_test COMMAND gizmo_test)
+
+# Phase 18f adds shading_mode_test, testing engine::decideNextEditShadingMode()/
+# engine::effectiveShadingMode() (src/shading_mode.cpp) in isolation -- same
+# "plain executable, links only the pure logic file it's testing" shape as
+# camera_capture_test/gizmo_test above. shading_mode.cpp depends on nothing
+# beyond its own header (no ecs.hpp, no GLM, no GL/ImGui at all), so this
+# needs no live GL context/GPU/Dear ImGui frame whatsoever.
+add_executable(shading_mode_test
+    shading_mode_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/shading_mode.cpp
+)
+target_include_directories(shading_mode_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(shading_mode_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME shading_mode_test COMMAND shading_mode_test)

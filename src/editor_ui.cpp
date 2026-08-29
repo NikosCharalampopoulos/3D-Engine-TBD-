@@ -378,7 +378,10 @@ void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& 
 // closes a popup automatically the instant one of its own MenuItem()s is
 // clicked, the default behavior this engine's other popups (if any existed
 // yet) would already rely on too.
-CreateEntityKind renderCreateEntityMenuItems() {
+//
+// `hasActiveCamera` (Phase 18f): true once a scene Camera entity already
+// exists -- see editor_ui.hpp's own updated renderDockspaceShell() comment.
+CreateEntityKind renderCreateEntityMenuItems(bool hasActiveCamera) {
     CreateEntityKind result = CreateEntityKind::kNone;
 
     if (ImGui::MenuItem("Cube")) {
@@ -429,16 +432,41 @@ CreateEntityKind renderCreateEntityMenuItems() {
     }
 
     // Phase 15c: "Camera" is real now too -- the third and last of this
-    // Create menu's own Phase 14f-inherited BeginDisabled()'d gaps. Unlike
-    // the two lights above, a Camera entity doesn't compete for any shared
-    // rendering resource (nothing in this engine's rendering pipeline reads
-    // a CameraComponent at all yet), so there is no "active camera"
-    // resolution to build here the way Directional Light needed -- see
-    // camera_component.hpp's own header comment for the full reasoning, and
-    // application.hpp's Camera-related comments for what this deliberately
-    // does NOT wire up (this engine's actual rendered view stays entirely
-    // Application's own free-fly camera_ object, untouched by this phase).
-    if (ImGui::MenuItem("Camera")) {
+    // Create menu's own Phase 14f-inherited BeginDisabled()'d gaps.
+    //
+    // Phase 18f: now BeginDisabled()'d again -- but for a completely
+    // different reason than Phase 14f's original "not implemented yet" gap
+    // (disabledCreateMenuItem() above still exists for exactly that other
+    // reason, on genuinely-not-built items elsewhere; "Camera" now HAS a
+    // real handler). This project's own confirmed, explicit design: at most
+    // ONE Camera entity may exist at a time (see camera_component.hpp's own
+    // resolveActiveCamera() comment for the full reasoning -- there is
+    // exactly one rendered view per frame, so "which of several Cameras is
+    // active" isn't a real choice the way "which of several lights is
+    // active" is). Once `hasActiveCamera` is true, this item is
+    // BeginDisabled()'d with an explanatory tooltip -- the SAME
+    // BeginDisabled()-plus-explanatory-tooltip technique
+    // disabledCreateMenuItem() above already establishes for its own,
+    // differently-reasoned gaps (ImGui::BeginDisabled() makes the item
+    // itself unclickable; ImGuiHoveredFlags_AllowWhenDisabled lets
+    // IsItemHovered() still report a hover so the tooltip shows) -- reusing
+    // that exact mechanism rather than inventing a second one, just inlined
+    // here instead of going through that lambda, since this is the only
+    // item with this particular (`hasActiveCamera`-conditional) reason to be
+    // disabled. Re-enables itself the instant that one Camera entity is
+    // deleted, since `hasActiveCamera` is recomputed fresh from the
+    // registry's real content every single call -- no separate "did it just
+    // get deleted" bookkeeping needed here at all.
+    if (hasActiveCamera) {
+        ImGui::BeginDisabled();
+        ImGui::MenuItem("Camera");
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "Only one Camera entity is allowed at a time (this engine has exactly one rendered view). "
+                "Delete the existing Camera entity to create a new one.");
+        }
+    } else if (ImGui::MenuItem("Camera")) {
         result = CreateEntityKind::kCamera;
     }
 
@@ -1194,16 +1222,43 @@ bool toolbarIconButton(const char* strId, char32_t glyph, bool active, bool enab
 // active/enabled wiring, and their tooltips are otherwise byte-for-byte
 // unchanged from 17c.
 //
-// Two of the six are REAL, wired to the exact same Application-owned bool
-// members the F1 debug overlay's own "Render Passes" checkboxes already
-// bind BY ADDRESS (Application::renderDebugUI(), application.cpp) --
-// `ssaoDisabled`/`ssaoDebugMode` arrive here BY REFERENCE from
-// renderDockspaceShell()'s own new parameters of the same name, so a click
-// on either button mutates the identical runtime state the F1 overlay's own
-// checkbox already reads/writes, not a second, parallel copy of it -- the
+// Two of the six were, through Phase 18e, wired to the exact same
+// Application-owned bool members the F1 debug overlay's own "Render Passes"
+// checkboxes already bind BY ADDRESS (Application::renderDebugUI(),
+// application.cpp) -- `ssaoDisabled`/`ssaoDebugMode`, mutated directly the
 // same "EditorUI mutates Application's own state directly through a
 // reference" shape `selectedEntity`/`cameraCaptureRequested` already
-// establish elsewhere in this same function.
+// establish elsewhere in this same function. That wiring was always purely
+// redundant with the F1 overlay's own checkboxes (the exact same two flags,
+// reachable two ways) rather than a real, DIFFERENT toolbar feature -- see
+// this function's own updated Phase 18f comment below for what replaces it.
+//
+// Phase 18f repurposes those same two buttons for real Wireframe/Solid/
+// Rendered shading-mode control -- see shading_mode.hpp's own header
+// comment for the full three-states-two-buttons design.
+// ssaoDisabled_/ssaoDebugMode_ themselves are UNCHANGED, still real
+// Application members the F1 overlay's own checkboxes still fully own; this
+// toolbar simply stops being a second way to reach them.
+// `editShadingMode` arrives here BY REFERENCE (Application's own
+// editShadingMode_, application.hpp) -- but a click never writes it
+// directly the way `ssaoDisabled = !ssaoDisabled` did; it goes through
+// decideNextEditShadingMode() (shading_mode.hpp) instead, since a 3-states-
+// on-2-buttons radio group is a real small decision (what does clicking
+// "lighting" do if "texture-mode" is currently the active one?), not a bare
+// negation. `effective`, computed once via effectiveShadingMode() below,
+// is what the two buttons' own `active` highlight reads -- NOT
+// `editShadingMode` directly -- so their highlight always honestly reflects
+// what this frame is actually rendering (Rendered, both unhighlighted, the
+// instant Play mode is entered) even while `editShadingMode` itself keeps
+// remembering a Wireframe/Solid choice underneath for Edit mode to resume
+// with later. Both buttons stay `enabled=true` even during Play mode
+// (Application's own confirmed, documented choice -- see
+// application.hpp's own editShadingMode_ comment for why "clickable, just
+// silently updates editShadingMode_ for whenever Edit mode resumes" was
+// picked over BeginDisabled()'ing them): a click during Play mode still
+// calls decideNextEditShadingMode() and still writes `editShadingMode`,
+// it's simply not what THIS frame's `effective` reads from, since
+// `physicsRunning` is true.
 //
 // Two more -- grid, undo -- are still shown (matching the mockup) but
 // BeginDisabled()'d with an explanatory tooltip: this engine has no
@@ -1236,48 +1291,51 @@ bool toolbarIconButton(const char* strId, char32_t glyph, bool active, bool enab
 // the "no decision left to make, just an assignment" shape `ssaoDisabled =
 // !ssaoDisabled`/`ssaoDebugMode = !ssaoDebugMode` above already established
 // needs no extracted helper either.
-void renderViewportToolbar(bool& ssaoDisabled, bool& ssaoDebugMode, bool& physicsRunning) {
+void renderViewportToolbar(ShadingMode& editShadingMode, bool& physicsRunning) {
     toolbarIconButton("grid", kIconGrid, /*active=*/false, /*enabled=*/false,
                        "Viewport grid overlay -- not implemented yet. This engine has no ground-plane "
                        "grid-drawing code anywhere today; a real one is separate, later scope.");
 
     ImGui::SameLine();
-    // SSAO is fundamentally a LIGHTING technique (screen-space AMBIENT
-    // OCCLUSION -- it darkens ambient/indirect light in creases and contact
-    // points), so this "sun" button toggling ssaoDisabled is a real
-    // rendering-mode concept honestly mapped to the mockup's own "lighting
-    // toggle" slot, not a cosmetic reuse of the glyph for something
-    // unrelated. `active` reads true when SSAO is currently DISABLED (the
-    // non-default, "you toggled this" state) -- the same "highlighted = the
-    // alternate state is currently engaged" reading a toggle button
-    // ordinarily has, not "highlighted = the normal default."
+
+    // Phase 18f: `effective` is what BOTH buttons' own `active` highlight
+    // reads from -- see this function's own updated header comment for why
+    // that's deliberately NOT `editShadingMode` directly.
+    const ShadingMode effective = effectiveShadingMode(physicsRunning, editShadingMode);
+
+    // The "sun" slot maps to Wireframe -- an intentional glyph reuse (this
+    // icon set has no dedicated wireframe-cube icon), same as the
+    // Phase 17c-18e version of this button reused it for a different
+    // "lighting-adjacent" concept before it. `active` reads true only when
+    // the EFFECTIVE mode is Wireframe (so Play mode never shows this
+    // highlighted, even if Edit mode had it selected) -- see this
+    // function's own header comment.
     if (toolbarIconButton(
-            "lighting", kIconDirectionalLight, /*active=*/ssaoDisabled, /*enabled=*/true,
-            ssaoDisabled
-                ? "Lighting: SSAO disabled (click to re-enable ambient occlusion). Same "
-                  "Application::ssaoDisabled_ the F1 debug overlay's \"Disable SSAO\" checkbox already controls."
-                : "Lighting: SSAO enabled (click to disable ambient occlusion). Same Application::ssaoDisabled_ "
-                  "the F1 debug overlay's \"Disable SSAO\" checkbox already controls.")) {
-        ssaoDisabled = !ssaoDisabled;
+            "lighting", kIconDirectionalLight, /*active=*/effective == ShadingMode::kWireframe, /*enabled=*/true,
+            effective == ShadingMode::kWireframe
+                ? "Wireframe: showing only mesh edges (click to return to Rendered). Forced back to Rendered "
+                  "automatically while Play mode is running."
+                : "Wireframe -- click to show only mesh edges, no shading. Forced back to Rendered automatically "
+                  "while Play mode is running.")) {
+        editShadingMode = decideNextEditShadingMode(editShadingMode, /*wireframeButtonClicked=*/true,
+                                                      /*solidButtonClicked=*/false);
     }
 
     ImGui::SameLine();
-    // The "image/texture-mode" slot maps to ssaoDebugMode -- toggling it
-    // swaps the Viewport's own rendered picture between the ordinary shaded
-    // scene and the raw SSAO occlusion buffer shown directly
-    // (postprocess.frag's own Phase 13f uSSAODebug uniform, application.cpp)
-    // -- a literal "which IMAGE is the Viewport showing" toggle, honestly
-    // mapped rather than forced.
+    // The "image/texture-mode" slot maps to Solid -- objects shaded (basic
+    // lighting still applied) but without their own diffuse/albedo texture,
+    // exactly the "which IMAGE is the Viewport showing" reading this same
+    // slot already had pre-Phase-18f, just honestly repointed at a real
+    // shading mode instead of a raw debug buffer view.
     if (toolbarIconButton(
-            "texturemode", kIconTexture, /*active=*/ssaoDebugMode, /*enabled=*/true,
-            ssaoDebugMode
-                ? "Texture mode: showing the raw SSAO occlusion buffer (click to return to the normal shaded "
-                  "view). Same Application::ssaoDebugMode_ the F1 debug overlay's \"SSAO debug view\" checkbox "
-                  "already controls."
-                : "Texture mode: click to show the raw SSAO occlusion buffer instead of the normal shaded view. "
-                  "Same Application::ssaoDebugMode_ the F1 debug overlay's \"SSAO debug view\" checkbox already "
-                  "controls.")) {
-        ssaoDebugMode = !ssaoDebugMode;
+            "texturemode", kIconTexture, /*active=*/effective == ShadingMode::kSolid, /*enabled=*/true,
+            effective == ShadingMode::kSolid
+                ? "Solid: shaded without diffuse textures (click to return to Rendered). Forced back to Rendered "
+                  "automatically while Play mode is running."
+                : "Solid -- click to shade objects without their diffuse textures, keeping basic lighting. Forced "
+                  "back to Rendered automatically while Play mode is running.")) {
+        editShadingMode = decideNextEditShadingMode(editShadingMode, /*wireframeButtonClicked=*/false,
+                                                      /*solidButtonClicked=*/true);
     }
 
     ImGui::SameLine();
@@ -1408,9 +1466,9 @@ void renderViewportToolbar(bool& ssaoDisabled, bool& ssaoDebugMode, bool& physic
 // rather than a bug -- this function still updates it with this frame's OWN
 // now-known width before returning, same as `outBgMin`/`outBgMax` above are
 // only knowable this late.
-void renderViewportToolbarOverlay(bool& ssaoDisabled, bool& ssaoDebugMode, bool& physicsRunning,
-                                   ImVec2 originScreenPos, float viewportContentWidth, float& groupWidth,
-                                   ImVec2& outBgMin, ImVec2& outBgMax) {
+void renderViewportToolbarOverlay(ShadingMode& editShadingMode, bool& physicsRunning, ImVec2 originScreenPos,
+                                   float viewportContentWidth, float& groupWidth, ImVec2& outBgMin,
+                                   ImVec2& outBgMax) {
     // Matches applyEditorTheme()'s own WindowPadding (10,10) as the margin
     // from the panel's own top edge, and the same value again as the
     // background rect's own inset around the button group -- reusing an
@@ -1439,7 +1497,7 @@ void renderViewportToolbarOverlay(bool& ssaoDisabled, bool& ssaoDebugMode, bool&
     splitter.SetCurrentChannel(drawList, 1);
     ImGui::SetCursorScreenPos(ImVec2(startX, originScreenPos.y + margin));
     ImGui::BeginGroup();
-    renderViewportToolbar(ssaoDisabled, ssaoDebugMode, physicsRunning);
+    renderViewportToolbar(editShadingMode, physicsRunning);
     ImGui::EndGroup();
     const ImVec2 groupMin = ImGui::GetItemRectMin();
     const ImVec2 groupMax = ImGui::GetItemRectMax();
@@ -1971,12 +2029,12 @@ void EditorUI::renderTitleBar(bool showCustomTitleBar, bool windowMaximized, std
 
 CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                                  std::optional<EntityId>& selectedEntity,
-                                                 std::optional<EntityId> activeDirectionalLight,
+                                                 std::optional<EntityId> activeDirectionalLight, bool hasActiveCamera,
                                                  bool& saveSceneRequested,
                                                  std::optional<std::string>& textureAssignRequested,
                                                  std::optional<std::string>& assetDropRequested,
                                                  bool cameraCaptured, bool& cameraCaptureRequested,
-                                                 bool& ssaoDisabled, bool& ssaoDebugMode, bool& physicsRunning,
+                                                 ShadingMode& editShadingMode, bool& physicsRunning,
                                                  bool showCustomTitleBar, bool windowMaximized,
                                                  std::pair<int, int> windowPos, TitleBarAction& titleBarAction,
                                                  const glm::vec3& cameraPosition, const glm::mat4& cameraView,
@@ -2108,7 +2166,7 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         ImGui::SameLine();
         ImGui::TextDisabled("(right-click for the same menu)");
         if (ImGui::BeginPopupContextWindow("SceneCreateMenu", ImGuiPopupFlags_NoOpenOverItems)) {
-            createRequest = renderCreateEntityMenuItems();
+            createRequest = renderCreateEntityMenuItems(hasActiveCamera);
             ImGui::EndPopup();
         }
         ImGui::Separator();
@@ -2281,7 +2339,7 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // occupied this frame.
         ImVec2 toolbarBgMin;
         ImVec2 toolbarBgMax;
-        renderViewportToolbarOverlay(ssaoDisabled, ssaoDebugMode, physicsRunning, panelScreenPos, contentRegion.x,
+        renderViewportToolbarOverlay(editShadingMode, physicsRunning, panelScreenPos, contentRegion.x,
                                       toolbarGroupWidthLastFrame_, toolbarBgMin, toolbarBgMax);
 
         // Phase 18e: the translate gizmo's own hit-test/drag handling --

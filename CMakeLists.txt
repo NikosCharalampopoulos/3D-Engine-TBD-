@@ -253,6 +253,8 @@ add_executable(engine_app
     src/editor_icons.cpp
     src/window_chrome.cpp
     src/gizmo.cpp
+    src/camera_component.cpp
+    src/shading_mode.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)
