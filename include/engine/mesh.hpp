@@ -204,6 +204,30 @@ Mesh makeFullscreenQuad();
 // numerically fitted" tangent convention).
 Mesh makeUVSphere(int latSegments = 32, int lonSegments = 32, float radius = 1.0f);
 
+// Phase 18e: a simple procedural arrow -- a thin cylindrical shaft plus a
+// conical tip -- pointing along local +X from the origin, unit length by
+// default (shaftLength + tipLength = 1.0). Used by the translate gizmo's
+// three axis handles (see gizmo.hpp/application.cpp's renderGizmo()): one
+// shared instance of this mesh is reused for all three axes, each drawn with
+// its own model matrix that rotates local +X to point along the world axis
+// that handle represents (gizmo.hpp's gizmoAxisDirection()) and scales it by
+// that frame's own gizmoAxisLength() (gizmo.hpp), so the caller controls
+// both orientation and on-screen size without rebuilding this geometry.
+// Deliberately solid triangles (Mesh::draw() only ever issues GL_TRIANGLES,
+// see this class's own comment above), not a bare GL_LINES segment -- a
+// solid arrow is both easier to see and, since it has real surface area
+// rather than a single-pixel-wide line, an easier target for this project's
+// own gizmo.hpp hit-testing math to reason about matching what's actually
+// rendered. Not meant to be lit (see gizmo.frag's own comment on why the
+// pass drawing this is flat/unlit, matching every real DCC tool's own
+// manipulation-gizmo convention) -- normals are only approximate (outward-
+// radial, ignoring the cone's own slant) and texCoord/tangent are unused
+// placeholders (gizmo.vert never reads either), the same "unused attributes
+// get an arbitrary placeholder value" precedent makeFullscreenQuad() already
+// establishes.
+Mesh makeGizmoArrow(float shaftLength = 0.72f, float shaftRadius = 0.018f, float tipLength = 0.28f,
+                     float tipRadius = 0.06f, int segments = 10);
+
 }  // namespace engine
 
 #endif  // ENGINE_MESH_HPP

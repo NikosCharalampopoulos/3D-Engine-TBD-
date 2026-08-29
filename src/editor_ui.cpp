@@ -1978,7 +1978,9 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  bool cameraCaptured, bool& cameraCaptureRequested,
                                                  bool& ssaoDisabled, bool& ssaoDebugMode, bool& physicsRunning,
                                                  bool showCustomTitleBar, bool windowMaximized,
-                                                 std::pair<int, int> windowPos, TitleBarAction& titleBarAction) {
+                                                 std::pair<int, int> windowPos, TitleBarAction& titleBarAction,
+                                                 const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                                                 const glm::mat4& cameraProjection) {
     // Phase 17d: the identical "false/empty every frame except the one where
     // the real thing actually happened" reset every other out-parameter in
     // this function already follows (see e.g. cameraCaptureRequested just
@@ -2282,6 +2284,16 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         renderViewportToolbarOverlay(ssaoDisabled, ssaoDebugMode, physicsRunning, panelScreenPos, contentRegion.x,
                                       toolbarGroupWidthLastFrame_, toolbarBgMin, toolbarBgMax);
 
+        // Phase 18e: the translate gizmo's own hit-test/drag handling --
+        // called here, after the toolbar overlay (so toolbarBgMin/toolbarBgMax
+        // are this frame's real values) and before the camera-capture
+        // double-click check just below, whose own guard this frame's result
+        // feeds into (see `gizmoActiveThisFrame`'s own use there). See
+        // updateGizmo()'s own header comment above for the full design.
+        const bool gizmoActiveThisFrame =
+            updateGizmo(registry, selectedEntity, cameraPosition, cameraView, cameraProjection, panelScreenPos,
+                        contentRegion, toolbarBgMin, toolbarBgMax);
+
         // Phase 16: the camera-capture trigger -- a double-click anywhere in
         // this panel's own content region, gated to only fire while NOT
         // already captured (see this class's own renderDockspaceShell()
@@ -2348,7 +2360,20 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // background rect but outside every button) headlessly, since a real
         // double-click gesture landing precisely in a toolbar gap is not
         // reproducible in this project's own Xvfb environment.
-        if (shouldRequestCameraCaptureFromDoubleClick(
+        //
+        // Phase 18e: also gated on `!gizmoActiveThisFrame` -- a single
+        // click-drag on a gizmo arm must never be misread as the start of a
+        // double-click camera capture, and camera capture must not be
+        // enterable while a gizmo drag is in progress (this phase's own
+        // documented precedence rule: the gizmo wins outright, camera
+        // capture simply isn't evaluated at all this frame). This mirrors
+        // exactly how `toolbarBgMin`/`toolbarBgMax` already exclude the
+        // toolbar's own footprint above -- the gizmo's own on-screen
+        // handles are, from this guard's perspective, just one more piece of
+        // Viewport-panel chrome a double-click can land on without meaning
+        // "start flying the camera."
+        if (!gizmoActiveThisFrame &&
+            shouldRequestCameraCaptureFromDoubleClick(
                 cameraCaptured, ImGui::IsAnyItemHovered(),
                 ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax), ImGui::IsWindowHovered(),
                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))) {
@@ -2382,6 +2407,109 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     ImGui::End();
 
     return createRequest;
+}
+
+void EditorUI::setDebugMouseOverride(std::optional<glm::vec2> screenPos, bool mouseDown, bool mousePressedThisFrame) {
+    debugMouseScreenPosOverride_ = screenPos;
+    debugMouseDownOverride_ = mouseDown;
+    debugMousePressedOverride_ = mousePressedThisFrame;
+}
+
+bool EditorUI::updateGizmo(EntityRegistry& registry, std::optional<EntityId> selectedEntity,
+                           const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                           const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
+                           const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax) {
+    if (!selectedEntity.has_value()) {
+        // Nothing selected -- no gizmo, no interaction. Also drops any
+        // stale in-progress drag rather than leaving gizmoDragState_
+        // pointing at an axis for an entity that's no longer even selected
+        // (e.g. the Inspector's own "Delete Object" fired mid-drag).
+        gizmoDragState_ = GizmoDragState{};
+        return false;
+    }
+    Transform* transform = registry.getComponent<Transform>(*selectedEntity);
+    if (transform == nullptr) {
+        gizmoDragState_ = GizmoDragState{};
+        return false;
+    }
+
+    // World-space gizmo origin -- mirrors Application::renderGizmo()'s own
+    // resolveWorldMatrix()-based placement exactly (see that method's own
+    // Phase 14b comment), so this hit-test always agrees with where the
+    // gizmo is actually drawn.
+    const glm::mat4 worldMatrix = resolveWorldMatrix(registry, *selectedEntity);
+    const glm::vec3 gizmoOrigin = glm::vec3(worldMatrix[3]);
+    const float distanceToCamera = glm::length(cameraPosition - gizmoOrigin);
+    const float axisLength = gizmoAxisLength(distanceToCamera);
+    const float pickTolerance = gizmoPickTolerance(axisLength);
+
+    // This frame's mouse state -- either real Dear ImGui queries, or
+    // ENGINE_DEBUG_GIZMO_DRAG's own synthetic override (setDebugMouseOverride()'s
+    // own header comment). `mouseInViewportImage` mirrors the camera-capture
+    // guard's own conditions exactly (renderDockspaceShell()'s own
+    // shouldRequestCameraCaptureFromDoubleClick() call, further down this
+    // same method) -- only a press that lands on the plain 3D image itself,
+    // never a toolbar button/background or some other overlapping panel, may
+    // start a NEW grab. The debug override always counts as "in the
+    // viewport" -- it's a synthetic aim at real gizmo geometry, computed by
+    // Application from this exact frame's own camera/viewport state (see
+    // that env var's own application.cpp comment), not a click that could
+    // have landed anywhere else.
+    glm::vec2 mouseScreenPos;
+    bool mouseDown = false;
+    bool mousePressedThisFrame = false;
+    bool mouseInViewportImage = false;
+    if (debugMouseScreenPosOverride_.has_value()) {
+        mouseScreenPos = *debugMouseScreenPosOverride_;
+        mouseDown = debugMouseDownOverride_;
+        mousePressedThisFrame = debugMousePressedOverride_;
+        mouseInViewportImage = true;
+    } else {
+        const ImVec2 mousePos = ImGui::GetIO().MousePos;
+        mouseScreenPos = glm::vec2(mousePos.x - panelScreenPos.x, mousePos.y - panelScreenPos.y);
+        mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        mousePressedThisFrame = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        mouseInViewportImage = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+                                !ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax);
+    }
+
+    const Ray ray = screenPointToWorldRay(mouseScreenPos.x, mouseScreenPos.y, contentRegion.x, contentRegion.y,
+                                           cameraView, cameraProjection);
+
+    // Hit-testing only matters for deciding whether to START a new grab
+    // (updateGizmoDrag()'s own "current.axis == kNone" branch, gizmo.hpp) --
+    // it's ignored entirely while already dragging -- so gating it on
+    // `mouseInViewportImage` here only prevents a NEW grab from starting
+    // over a toolbar button/background or another panel; an ALREADY
+    // in-progress drag keeps tracking the ray regardless of hover, the same
+    // "a drag outlives hover" behavior titleBarDragging_ already has (see
+    // renderTitleBar()'s own header comment).
+    const GizmoAxis hoverAxis =
+        mouseInViewportImage ? hitTestGizmoAxes(ray, gizmoOrigin, axisLength, pickTolerance).axis : GizmoAxis::kNone;
+
+    const bool wasDragging = gizmoDragState_.axis != GizmoAxis::kNone;
+    const GizmoDragResult result =
+        updateGizmoDrag(gizmoDragState_, mouseDown, mousePressedThisFrame, hoverAxis, ray, gizmoOrigin);
+
+    if (!wasDragging && result.state.axis != GizmoAxis::kNone) {
+        // Just grabbed this frame -- remember the entity's own LOCAL
+        // Transform::position() right now, the anchor every later frame's
+        // WORLD-space delta gets added onto (see gizmoDragStartLocalPosition_'s
+        // own header comment for exactly why LOCAL, not gizmo.hpp's own
+        // WORLD-space `gizmoOrigin` anchor -- this is the local-vs-world
+        // translation this file's own header comment on renderDockspaceShell()
+        // promises happens here).
+        gizmoDragStartLocalPosition_ = transform->position();
+    }
+
+    if (result.newPosition.has_value()) {
+        const glm::vec3 worldDelta = *result.newPosition - result.state.startEntityPosition;
+        transform->setPosition(gizmoDragStartLocalPosition_ + worldDelta);
+    }
+
+    gizmoDragState_ = result.state;
+
+    return hoverAxis != GizmoAxis::kNone || gizmoDragState_.axis != GizmoAxis::kNone;
 }
 
 void EditorUI::render() {

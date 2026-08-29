@@ -293,6 +293,8 @@
 // only be verified by code-reading/logical-soundness, not by an actual
 // interactive headless run -- see that section for the full accounting).
 
+#include <glm/glm.hpp>
+
 #include <optional>
 #include <string>
 #include <utility>
@@ -300,9 +302,17 @@
 
 #include "engine/asset_browser.hpp"
 #include "engine/ecs.hpp"
+#include "engine/gizmo.hpp"
 
 struct GLFWwindow;
 typedef unsigned int ImGuiID;
+// Phase 18e: forward-declared (like ImGuiID above) purely so updateGizmo()'s
+// own private declaration below can take a few of Dear ImGui's plain
+// ImVec2 structs by const reference without this header pulling in the
+// whole of <imgui.h> the way editor_ui.cpp itself does -- an incomplete
+// type is sufficient for a reference parameter in a declaration with no
+// definition in this file.
+struct ImVec2;
 
 namespace engine {
 
@@ -623,6 +633,31 @@ public:
     // click has (Application::update() re-reads it next frame the same way
     // it already re-reads ssaoDisabled_/ssaoDebugMode_ after this same
     // call).
+    //
+    // Phase 18e: three more trailing parameters -- `cameraPosition`/
+    // `cameraView`/`cameraProjection`, Application's own camera_.position()/
+    // getViewMatrix()/getProjectionMatrix(aspect) for THIS frame, read-only
+    // (the identical by-value-snapshot shape `cameraCaptured`/
+    // `activeDirectionalLight` above already use for state EditorUI only
+    // ever reads, never assigns). The translate gizmo's own interaction --
+    // hit-testing which axis handle (if any) the mouse is over, and running
+    // the drag itself -- happens entirely INSIDE this call's own Viewport
+    // panel Begin()/End() block (updateGizmo(), private, below), the only
+    // place Dear ImGui's own IsWindowHovered()/mouse queries can be scoped
+    // to that one docked panel (the identical reason the Phase 16
+    // double-click-to-capture check already lives there, not in
+    // Application). Unlike every other interactive feature this class
+    // reports back via an out-parameter for Application to act on, a gizmo
+    // drag is applied DIRECTLY here, mutating `registry`'s own Transform
+    // component in place -- the exact same "EditorUI mutates registry_'s
+    // Transform straight through the reference it's holding" pattern
+    // renderInspectorPanel()'s own Position DragFloat3 already establishes,
+    // just driven by a mouse drag instead of a typed number. See
+    // gizmo.hpp's own header comment for the full design (including why a
+    // WORLD-space drag delta is applied to the entity's LOCAL Transform
+    // position, unconverted through any parent) and updateGizmo()'s own
+    // comment below for exactly how the interaction itself is scoped/gated
+    // against the toolbar and Phase 16 camera capture.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity,
                                            std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
@@ -630,7 +665,29 @@ public:
                                            std::optional<std::string>& assetDropRequested, bool cameraCaptured,
                                            bool& cameraCaptureRequested, bool& ssaoDisabled, bool& ssaoDebugMode,
                                            bool& physicsRunning, bool showCustomTitleBar, bool windowMaximized,
-                                           std::pair<int, int> windowPos, TitleBarAction& titleBarAction);
+                                           std::pair<int, int> windowPos, TitleBarAction& titleBarAction,
+                                           const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                                           const glm::mat4& cameraProjection);
+
+    // Phase 18e: the headless verification hook behind ENGINE_DEBUG_GIZMO_DRAG
+    // (see that env var's own application.cpp comment for the full design).
+    // When `screenPos` is non-nullopt, updateGizmo() (private, below) uses
+    // `screenPos`/`mouseDown`/`mousePressedThisFrame` as this frame's mouse
+    // state INSTEAD OF real Dear ImGui queries (GetIO().MousePos,
+    // IsMouseDown(), a locally-computed press edge) -- everything
+    // DOWNSTREAM of that one substitution (screenPointToWorldRay(),
+    // hitTestGizmoAxes(), updateGizmoDrag(), and the resulting Transform
+    // mutation) is the exact same production code a real mouse-driven drag
+    // runs through, never a separate bypass path. `screenPos` is in the same
+    // "relative to the Viewport panel's own top-left corner" space the real
+    // path already computes (`io.MousePos - panelScreenPos`) -- Application
+    // computes this directly via gizmo.hpp's own worldPointToScreenPoint()
+    // against its own viewportWidth_/viewportHeight_, so it never needs to
+    // know this panel's absolute on-screen position at all. Passing
+    // std::nullopt (this class's own default state, never set otherwise)
+    // restores the real ImGui-driven path -- an ordinary interactive run
+    // never calls this at all.
+    void setDebugMouseOverride(std::optional<glm::vec2> screenPos, bool mouseDown, bool mousePressedThisFrame);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()
@@ -687,6 +744,44 @@ private:
     void renderTitleBar(bool showCustomTitleBar, bool windowMaximized, std::pair<int, int> windowPos,
                          TitleBarAction& action);
 
+    // Phase 18e: the translate gizmo's own mouse-interaction handling --
+    // hit-testing which axis (if any) the mouse is over, running
+    // gizmo.hpp's updateGizmoDrag() state machine, and, while dragging,
+    // writing the resulting position straight into `registry`'s Transform
+    // for `selectedEntity`. A private member function (like renderTitleBar()
+    // above), not a free function, for the identical reason: it needs this
+    // class's OWN persistent cross-frame state (gizmoDragState_ below) to
+    // know whether a drag is still in progress.
+    //
+    // Must be called from INSIDE the "Viewport" panel's own Begin()/End()
+    // block, AFTER the toolbar overlay has been submitted (so
+    // `toolbarBgMin`/`toolbarBgMax` are this frame's real values) -- the
+    // same placement/ordering constraint renderDockspaceShell()'s own Phase
+    // 16 double-click-to-capture check already documents, and for the
+    // identical reason (Dear ImGui's hover/mouse queries only mean "over
+    // THIS one docked panel" when called from inside it).
+    //
+    // Returns true on any frame the mouse is currently interacting with a
+    // gizmo axis at all -- hovering one (even without a button down) OR
+    // actively dragging one -- so renderDockspaceShell()'s own camera-
+    // capture double-click check can suppress itself that same frame: a
+    // single click-drag on a gizmo arm must never be misread as the start
+    // of a double-click camera capture, and camera capture must not be
+    // enterable while a gizmo drag is in progress (this phase's own
+    // documented precedence rule). `registry`/`selectedEntity` mirror
+    // renderDockspaceShell()'s own same-named parameters exactly;
+    // `cameraPosition`/`cameraView`/`cameraProjection` are that method's own
+    // new Phase 18e parameters, threaded straight through; `panelScreenPos`/
+    // `contentRegion` are the Viewport panel's own on-screen origin/size,
+    // already captured earlier in the SAME renderDockspaceShell() call (see
+    // that method's own Phase 14d/14c comments); `toolbarBgMin`/
+    // `toolbarBgMax` are renderViewportToolbarOverlay()'s own just-measured
+    // background rect, the identical rect the camera-capture guard already
+    // excludes mouse interaction over.
+    bool updateGizmo(EntityRegistry& registry, std::optional<EntityId> selectedEntity, const glm::vec3& cameraPosition,
+                      const glm::mat4& cameraView, const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
+                      const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax);
+
     bool layoutBuilt_ = false;
     // Phase 17d: true from the frame a title-bar drag starts (a left-click on
     // the title bar's own empty, non-button area -- see renderTitleBar()'s
@@ -734,6 +829,37 @@ private:
     // onward) -- the same harmless, documented frame-0 imperfection
     // viewportWidth_/viewportHeight_ already accept.
     float toolbarGroupWidthLastFrame_ = 0.0f;
+
+    // Phase 18e: the translate gizmo's own persistent cross-frame drag state
+    // -- gizmo.hpp's own GizmoDragState, the identical "not dragging /
+    // dragging-axis-X/Y/Z" state machine described there, threaded back in
+    // as `current` on every updateGizmo() call and overwritten with
+    // whatever it returns. Has to persist across frames for the same reason
+    // titleBarDragging_ above does: a real drag routinely continues for many
+    // frames after its own starting one.
+    GizmoDragState gizmoDragState_;
+    // The selected entity's own LOCAL Transform::position() as of the frame
+    // gizmoDragState_ transitioned from kNone to a real axis -- gizmo.hpp
+    // itself knows nothing about Transform/local-vs-world space (see its own
+    // header comment on why); THIS is where that translation actually
+    // happens: updateGizmo() applies each frame's WORLD-space delta
+    // (gizmoDragState_'s own anchor minus this frame's fresh drag-state
+    // result) onto this cached LOCAL starting position, not onto the
+    // entity's own (already-moving) live Transform value, for the same
+    // "anchor captured once at grab time, never re-read mid-drag" reason
+    // GizmoDragState::startEntityPosition itself is captured once.
+    // Meaningless (left at its default) whenever gizmoDragState_.axis ==
+    // GizmoAxis::kNone.
+    glm::vec3 gizmoDragStartLocalPosition_{0.0f};
+    // Phase 18e: ENGINE_DEBUG_GIZMO_DRAG's own headless-verification
+    // override state -- see setDebugMouseOverride()'s own comment above.
+    // std::nullopt (the default, and the state every ordinary interactive
+    // run stays in forever) means updateGizmo() uses real Dear ImGui mouse
+    // queries; a real value here is FROM Application's own update(), never
+    // written from inside this class itself.
+    std::optional<glm::vec2> debugMouseScreenPosOverride_;
+    bool debugMouseDownOverride_ = false;
+    bool debugMousePressedOverride_ = false;
 
     // Phase 15d: built exactly once, in the constructor -- see this class's
     // own header comment above and asset_browser.hpp's own "Caching"

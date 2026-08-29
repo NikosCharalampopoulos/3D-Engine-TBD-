@@ -27,6 +27,7 @@
 #include "engine/camera_capture.hpp"
 #include "engine/camera_component.hpp"
 #include "engine/frustum.hpp"
+#include "engine/gizmo.hpp"
 #include "engine/gl_debug.hpp"
 #include "engine/hdri_loader.hpp"
 #include "engine/light.hpp"
@@ -101,6 +102,10 @@ const std::string kSSAOBlurFragmentShaderPath = resolveAssetPath("assets/shaders
 // itself).
 const std::string kSelectionMaskVertexShaderPath = resolveAssetPath("assets/shaders/selection_mask.vert");
 const std::string kSelectionMaskFragmentShaderPath = resolveAssetPath("assets/shaders/selection_mask.frag");
+// Phase 18e: the translate gizmo's own program -- see gizmo.vert/.frag's own
+// header comments and renderGizmo()'s own application.hpp comment.
+const std::string kGizmoVertexShaderPath = resolveAssetPath("assets/shaders/gizmo.vert");
+const std::string kGizmoFragmentShaderPath = resolveAssetPath("assets/shaders/gizmo.frag");
 // Phase 9: the PBR pass's own program (see application.hpp's Phase 9 note
 // and assets/shaders/pbr.vert/pbr.frag).
 const std::string kPBRVertexShaderPath = resolveAssetPath("assets/shaders/pbr.vert");
@@ -352,6 +357,23 @@ constexpr float kSelectionMaskDepthBias = 0.0015f;
 // engine already accepts for SSAOKernel's own SSAO_KERNEL_SIZE (see
 // ssao.hpp's own comment).
 constexpr glm::vec3 kSelectionOutlineColor{0.176f, 0.765f, 0.698f};
+
+// Phase 18e: the translate gizmo's three axis colors -- the standard,
+// near-universal DCC convention (Blender/Unity/Unreal all agree on this
+// exact X=red/Y=green/Z=blue mapping), deliberately NOT this project's own
+// teal editor accent (kSelectionOutlineColor just above): a manipulation
+// tool's whole job is "which axis am I about to drag," and three
+// maximally-distinguishable, colorblind-conventional colors serve that far
+// better than a single theme-matched accent would (which the selection
+// outline above -- a passive highlight, not something a user aims a click
+// at -- has no equivalent need to distinguish between multiple simultaneous
+// targets). Slightly desaturated/darkened from pure (1,0,0)/(0,1,0)/(0,0,1)
+// so each also reads clearly against this engine's own light-gray ground
+// plane and dark viewport background, not just against a neutral gray test
+// swatch.
+constexpr glm::vec3 kGizmoAxisColorX{0.85f, 0.18f, 0.18f};
+constexpr glm::vec3 kGizmoAxisColorY{0.25f, 0.78f, 0.25f};
+constexpr glm::vec3 kGizmoAxisColorZ{0.20f, 0.45f, 0.95f};
 
 // Phase 13f: SSAO tuning constants (see ssao.hpp/ssao.cpp and
 // assets/shaders/ssao.frag/ssao_blur.frag).
@@ -1249,6 +1271,31 @@ std::optional<DebugForceVelocity> debugForceVelocityFromEnv() {
     }
 }
 
+// Phase 18e: ENGINE_DEBUG_GIZMO_DRAG=<entity name>, unset by default -- the
+// gizmo's own headless verification hook, same getenv-gated-value shape as
+// ENGINE_DEBUG_SELECT/ENGINE_DEBUG_FORCE_STATIC above. Xvfb has no physical
+// pointer device at all (this project's own established headless-testing
+// constraint -- see e.g. camera_capture.hpp's own header comment on why a
+// real double-click gesture can't be reproduced there either), so there is
+// no way to drive a real mouse-drag across a rendered gizmo handle under
+// this project's own CI/dev headless target. This env var instead feeds a
+// SCRIPTED sequence of synthetic screen-space mouse positions + a mouse-
+// down/up state into the exact same production entry point a real mouse
+// would (EditorUI::updateGizmo(), via its own setDebugMouseOverride()) --
+// see that method's own editor_ui.hpp comment for exactly how, and why this
+// is not a shortcut that bypasses hit-testing/axis-selection: only the raw
+// "where is the mouse, is the button down" INPUT is substituted; every
+// function downstream of that (screenPointToWorldRay(), hitTestGizmoAxes(),
+// updateGizmoDrag(), and the resulting Transform mutation) is the same
+// unmodified code a real mouse-driven drag runs through. The identical
+// substitution shape ENGINE_DEBUG_SIMULATE_ESCAPE already established for
+// keyboard input (a synthetic key STATE fed into the same real
+// InputActionMap edge-detection, not a hand-rolled bypass of it).
+std::string debugGizmoDragEntityNameFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_GIZMO_DRAG");
+    return value != nullptr ? std::string(value) : std::string();
+}
+
 // Phase 14f: ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty|pointlight|
 // directionallight|camera> (case-insensitive; "pointlight" added Phase 15a,
 // "directionallight" added Phase 15b, "camera" added Phase 15c), unset by
@@ -1629,6 +1676,51 @@ constexpr std::uint64_t kDebugSimulateEscapeFrame = 3;
 // own Phase 16 Verify section for the exact log proof this produces.
 constexpr std::uint64_t kDebugSimulateEscapeHoldFrames = 5;
 
+// Phase 18e: ENGINE_DEBUG_GIZMO_DRAG's own scripted frame schedule -- see
+// debugGizmoDragEntityNameFromEnv()'s own comment for the full design. 15
+// (not 0/3, unlike kDebugSimulateEscapeFrame) so a headless run's log
+// clearly shows a few ordinary settled frames first, then the scripted grab
+// + drag beginning, giving a screenshot taken just before frame 15 something
+// meaningful to diff against a screenshot taken mid-drag.
+constexpr std::uint64_t kDebugGizmoDragStartFrame = 15;
+
+// The world-space offset (along the fixed +X axis this debug script always
+// drags, kDebugGizmoDragAxis below) requested at each successive scripted
+// frame, starting from the target entity's own position at frame
+// kDebugGizmoDragStartFrame (the grab itself, which anchors the drag
+// without moving anything yet, matching updateGizmoDrag()'s own documented
+// "the grab frame produces no position update" contract). Five entries
+// (grab + four move steps) means the scripted drag spans frames
+// [kDebugGizmoDragStartFrame, kDebugGizmoDragStartFrame + 5) inclusive of
+// the grab frame; the very next frame after that (index 5, out of bounds of
+// this array) is where the script releases the mouse button -- see this
+// env var's own update() call site for exactly how this array's bounds
+// drive that.
+//
+// Deliberately starts at 0.4, not exactly 0.0 -- a grab aimed EXACTLY at the
+// gizmo's own origin (offset 0) is where all three axis handles physically
+// meet, so hitTestGizmoAxes() would have to pick a "closest" axis among
+// three genuinely tied (distance-0) candidates, decided only by
+// floating-point noise in each axis's own closestPointsBetweenLines() call
+// -- confirmed by an earlier run of this exact script starting at 0.0, which
+// grabbed kY instead of kX purely from that tie. Starting the grab itself
+// safely away from the origin, on a point unambiguously closest to the X
+// axis specifically, is what a real hand aiming a mouse at a visible arrow
+// (never at the exact pixel where three arrows converge) would naturally do
+// anyway.
+constexpr float kDebugGizmoDragOffsets[] = {0.4f, 0.9f, 1.4f, 1.9f, 2.4f};
+constexpr std::size_t kDebugGizmoDragStepCount = sizeof(kDebugGizmoDragOffsets) / sizeof(kDebugGizmoDragOffsets[0]);
+
+// This debug script always drags along world +X -- picking one fixed axis
+// (rather than making the axis itself configurable via the env var) keeps
+// this hook's own contract simple and its expected result trivial to state
+// and verify by hand (final x == start x + kDebugGizmoDragOffsets' own last
+// entry, y/z unchanged); the underlying updateGizmoDrag()/hitTestGizmoAxes()
+// machinery itself is fully axis-generic (see tests/gizmo_test.cpp, which
+// exercises all three), so this is a scope choice for the DEBUG SCRIPT only,
+// not a limitation this phase is smuggling into the real feature.
+constexpr GizmoAxis kDebugGizmoDragAxis = GizmoAxis::kX;
+
 }  // namespace
 
 Application::Application(int width, int height, const std::string& title, std::uint64_t maxFrames, bool maximized,
@@ -1648,6 +1740,9 @@ Application::Application(int width, int height, const std::string& title, std::u
       // Phase 18d: the selection mask pass's own program -- see this class's
       // own Phase 18d header comment.
       selectionMaskShader_(resources_.getShader(kSelectionMaskVertexShaderPath, kSelectionMaskFragmentShaderPath)),
+      // Phase 18e: the translate gizmo's own program -- see this class's own
+      // Phase 18e header comment.
+      gizmoShader_(resources_.getShader(kGizmoVertexShaderPath, kGizmoFragmentShaderPath)),
       pbrShader_(resources_.getShader(kPBRVertexShaderPath, kPBRFragmentShaderPath)),
       irradianceShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kIrradianceFragmentShaderPath)),
       prefilterShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kPrefilterFragmentShaderPath)),
@@ -1775,6 +1870,9 @@ Application::Application(int width, int height, const std::string& title, std::u
       groundMaterial_(*shader_, resources_.getTexture(kGroundDiffuseTexturePath), /*tint=*/glm::vec3(1.0f),
                       /*shininess=*/24.0f, resources_.getTexture(kGroundNormalMapPath)),
       postProcessQuad_(makeFullscreenQuad()),
+      // Phase 18e: the translate gizmo's shared arrow mesh -- see mesh.hpp's
+      // makeGizmoArrow() and this class's own renderGizmo() header comment.
+      gizmoArrowMesh_(makeGizmoArrow()),
       // Phase 9: the PBR sphere grid's shared geometry -- one Mesh, reused
       // (with a different PBRMaterial + Transform) by every sphere in
       // sphereInstances_ (built below, in the constructor body, since it
@@ -2032,6 +2130,38 @@ Application::Application(int width, int height, const std::string& title, std::u
                           std::to_string(found.index()) + " dynamic (RigidBody added, gravity on)");
             } else {
                 LOG_WARN("ENGINE_DEBUG_FORCE_DYNAMIC=\"" + forceDynamicName + "\" does not match any entity's name");
+            }
+        }
+    }
+
+    // Phase 18e: ENGINE_DEBUG_GIZMO_DRAG -- see
+    // debugGizmoDragEntityNameFromEnv()'s own comment above for the full
+    // design. Resolved once, here, after the scene has finished populating
+    // registry_, the identical "resolve a debug target entity name to a real
+    // EntityId once at startup" shape ENGINE_DEBUG_SELECT/_FORCE_STATIC/
+    // _FORCE_DYNAMIC immediately above already establish. update() is what
+    // actually drives the scripted drag frame by frame once this is set --
+    // see that method's own Phase 18e comment.
+    //
+    // Important, and worth calling out explicitly: this alone does NOT
+    // select the entity -- EditorUI's own updateGizmo() only ever hit-tests
+    // against whatever `selectedEntity_` currently is (exactly like a real
+    // gizmo only ever appears for the ALREADY-selected entity, never this
+    // env var's own target). A verification run therefore also needs
+    // ENGINE_DEBUG_SELECT set to the SAME entity name for the scripted drag
+    // to actually hit anything -- every example in this phase's own README
+    // section sets both together for exactly this reason.
+    {
+        const std::string gizmoDragName = debugGizmoDragEntityNameFromEnv();
+        if (!gizmoDragName.empty()) {
+            const EntityId found = findEntityByName(registry_, gizmoDragName);
+            if (found.valid()) {
+                debugGizmoDragEntity_ = found;
+                LOG_INFO("ENGINE_DEBUG_GIZMO_DRAG=\"" + gizmoDragName + "\": will script a synthetic gizmo drag "
+                          "against entity " + std::to_string(found.index()) + " starting frame " +
+                          std::to_string(kDebugGizmoDragStartFrame));
+            } else {
+                LOG_WARN("ENGINE_DEBUG_GIZMO_DRAG=\"" + gizmoDragName + "\" does not match any entity's name");
             }
         }
     }
@@ -2460,6 +2590,74 @@ void Application::update(double deltaTime, const InputState& input) {
         }
     }
 
+    // Phase 18e: ENGINE_DEBUG_GIZMO_DRAG's own scripted synthetic drag --
+    // see debugGizmoDragEntityNameFromEnv()'s own comment for the full
+    // design/why. This block only ever decides WHAT synthetic mouse input to
+    // feed EditorUI this frame (via setDebugMouseOverride()) -- it never
+    // touches the entity's Transform directly; EditorUI::updateGizmo(),
+    // called later this SAME frame from render(), is what actually runs the
+    // real hit-test/drag-state-machine/Transform-mutation code against that
+    // input, exactly as it would for a real mouse-driven drag. Every
+    // position logged below is therefore this frame's value as of the START
+    // of update() -- i.e. the result of whatever the PREVIOUS frame's own
+    // scripted step already applied, not this frame's (which EditorUI hasn't
+    // run yet) -- the same one-frame latency this class documents everywhere
+    // else a per-frame read precedes the ImGui pass that might change it
+    // (selectedEntity_'s own header comment).
+    if (debugGizmoDragEntity_.has_value()) {
+        Transform* transform = registry_.getComponent<Transform>(*debugGizmoDragEntity_);
+        if (transform != nullptr) {
+            if (frameCount_ == kDebugGizmoDragStartFrame) {
+                debugGizmoDragStartPosition_ = transform->position();
+            }
+
+            if (frameCount_ >= kDebugGizmoDragStartFrame &&
+                frameCount_ < kDebugGizmoDragStartFrame + kDebugGizmoDragStepCount) {
+                const std::size_t step = static_cast<std::size_t>(frameCount_ - kDebugGizmoDragStartFrame);
+                const glm::vec3 targetWorldPoint = debugGizmoDragStartPosition_ +
+                                                    gizmoAxisDirection(kDebugGizmoDragAxis) * kDebugGizmoDragOffsets[step];
+                const float aspect = viewportHeight_ != 0
+                                          ? static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_)
+                                          : 1.0f;
+                const std::optional<glm::vec2> screenPoint =
+                    worldPointToScreenPoint(targetWorldPoint, static_cast<float>(viewportWidth_),
+                                             static_cast<float>(viewportHeight_), camera_.getViewMatrix(),
+                                             camera_.getProjectionMatrix(aspect));
+                if (screenPoint.has_value()) {
+                    editorUI_.setDebugMouseOverride(*screenPoint, /*mouseDown=*/true,
+                                                     /*mousePressedThisFrame=*/step == 0);
+                } else {
+                    // Behind the camera this frame (shouldn't happen with
+                    // this engine's own default camera pose/scene, but see
+                    // worldPointToScreenPoint()'s own "no meaningful result"
+                    // contract) -- skip this one step's override rather than
+                    // feeding a garbage screen position; the drag simply
+                    // doesn't advance this one frame.
+                    LOG_WARN("ENGINE_DEBUG_GIZMO_DRAG: target world point projects behind the camera at step " +
+                              std::to_string(step) + "; skipping");
+                }
+                LOG_INFO("Phase 18e gizmo-drag-verify: frame " + std::to_string(frameCount_) + " step " +
+                          std::to_string(step) + ", entity " + std::to_string(debugGizmoDragEntity_->index()) +
+                          " position = (" + std::to_string(transform->position().x) + ", " +
+                          std::to_string(transform->position().y) + ", " + std::to_string(transform->position().z) +
+                          ")");
+            } else if (frameCount_ == kDebugGizmoDragStartFrame + kDebugGizmoDragStepCount) {
+                // One frame past the last scripted move step -- release the
+                // mouse button, ending the drag the same way a real
+                // mouse-button-up would (see updateGizmoDrag()'s own
+                // release-branch contract, gizmo.hpp).
+                editorUI_.setDebugMouseOverride(std::nullopt, /*mouseDown=*/false, /*mousePressedThisFrame=*/false);
+                LOG_INFO("Phase 18e gizmo-drag-verify: frame " + std::to_string(frameCount_) +
+                          " release, entity " + std::to_string(debugGizmoDragEntity_->index()) +
+                          " final position = (" + std::to_string(transform->position().x) + ", " +
+                          std::to_string(transform->position().y) + ", " + std::to_string(transform->position().z) +
+                          ")");
+            }
+        }
+        // else: defensive only -- every entity this env var can resolve to
+        // (findEntityByName(), constructor) has a Transform by construction.
+    }
+
     if (frustumCullDemoMode_) {
         // Phase 13b: the camera's fixed "facing away from the scene" pose
         // was already set once in the constructor -- nothing to do here
@@ -2736,6 +2934,116 @@ void Application::renderSelectionMask(const glm::mat4& view, const glm::mat4& pr
     // actually rendered.
     const glm::mat4 worldMatrix = resolveWorldMatrix(registry_, *selectedEntity_);
     selectedModel->model->drawDepthOnly(*selectionMaskShader_, worldMatrix);
+}
+
+void Application::renderGizmo(const glm::mat4& view, const glm::mat4& projection) {
+    // Phase 18e: no selection, or the selection has no Transform to place a
+    // gizmo at -- draw nothing, matching this engine's established "no
+    // selection => no [feature]" convention (the old 2D outline, Phase 18d's
+    // real one, renderSelectionMask() just above). Unlike that mask pass,
+    // this does NOT also require a ModelComponent -- an Empty entity (no
+    // mesh, Transform + NameComponent only, e.g. Scene panel's Create >
+    // Empty) is still a real, selectable, movable object in this engine, and
+    // the project owner's own request ("move it from inside the scene") is
+    // about position, which every selectable entity has regardless of
+    // whether it renders a mesh.
+    if (!selectedEntity_.has_value()) {
+        return;
+    }
+    if (registry_.getComponent<Transform>(*selectedEntity_) == nullptr) {
+        return;
+    }
+
+    // Phase 14b: the gizmo's own visual origin is the entity's actual
+    // rendered WORLD position (resolveWorldMatrix()), not its bare local
+    // Transform::position() -- identical for an unparented entity, and what
+    // makes the gizmo visually sit ON a parented entity exactly where it's
+    // actually drawn, the same reasoning renderSelectionMask()'s own Phase
+    // 14b comment already gives for its own mask draw. EditorUI's own
+    // updateGizmo() (editor_ui.cpp) independently derives this SAME world
+    // position for hit-testing, so the two always agree on where the
+    // pickable geometry actually is -- see gizmo.hpp's own header comment on
+    // why a drag's resulting DELTA is still applied to the entity's LOCAL
+    // position, only this rendering/hit-test origin uses the resolved world
+    // one.
+    const glm::mat4 worldMatrix = resolveWorldMatrix(registry_, *selectedEntity_);
+    const glm::vec3 gizmoOrigin = glm::vec3(worldMatrix[3]);
+
+    const float distanceToCamera = glm::length(camera_.position() - gizmoOrigin);
+    const float axisLength = gizmoAxisLength(distanceToCamera);
+
+    // Editor chrome, not scene content -- always renders on top, regardless
+    // of what else in the scene would otherwise occlude it (see this
+    // method's own application.hpp comment for why, and gizmo.frag's own
+    // comment for why this whole pass is flat/unlit like every real DCC
+    // tool's own manipulation gizmo). Depth testing is explicitly disabled
+    // for these three draws, not merely irrelevant: viewportColorFramebuffer_'s
+    // own depth buffer, at this point in the pipeline, holds only the
+    // postprocess fullscreen quad's own uniform near-plane depth
+    // (postprocess.vert emits a fixed clip-space z of 0 for every fragment)
+    // -- leaving depth testing ON here would fail nearly every gizmo
+    // fragment against that flat plane rather than usefully self-occluding
+    // against real scene geometry, none of which remains in this buffer by
+    // this point (it is already the fully composited 2D image). Restored to
+    // enabled immediately after -- this engine's own constructor-established
+    // default (`glEnable(GL_DEPTH_TEST)`) every other pass, this frame and
+    // every frame after it, relies on.
+    GL_CHECK(glDisable(GL_DEPTH_TEST));
+
+    gizmoShader_->use();
+    gizmoShader_->setMat4("uView", view);
+    gizmoShader_->setMat4("uProjection", projection);
+    gizmoArrowMesh_.bind();
+
+    struct GizmoAxisDraw {
+        GizmoAxis axis;
+        glm::vec3 color;
+    };
+    // Fixed X/Y/Z draw order -- with depth testing disabled (above), the
+    // three arrows are not self-occlusion-correct against each other from
+    // every possible camera angle (a real concern only when looking nearly
+    // straight down one axis, where that axis's own arrow is foreshortened
+    // to almost nothing on screen anyway); a translate gizmo needing full
+    // mutual self-occlusion between its own three handles is real, separate
+    // polish this phase's own scope (translate only, see this phase's
+    // README section) doesn't take on.
+    const GizmoAxisDraw axisDraws[3] = {
+        {GizmoAxis::kX, kGizmoAxisColorX},
+        {GizmoAxis::kY, kGizmoAxisColorY},
+        {GizmoAxis::kZ, kGizmoAxisColorZ},
+    };
+    for (const GizmoAxisDraw& axisDraw : axisDraws) {
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), gizmoOrigin);
+        // Rotates makeGizmoArrow()'s own local +X onto this axis's world
+        // direction (gizmo.hpp's gizmoAxisDirection()) -- hand-verified:
+        // rotating (1,0,0) by +90 deg about +Z gives (0,1,0); by -90 deg
+        // about +Y gives (0,0,1); kX itself needs no rotation at all.
+        switch (axisDraw.axis) {
+            case GizmoAxis::kY:
+                model = glm::rotate(model, glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+                break;
+            case GizmoAxis::kZ:
+                model = glm::rotate(model, glm::radians(-90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                break;
+            case GizmoAxis::kX:
+            case GizmoAxis::kNone:
+            default:
+                break;
+        }
+        // makeGizmoArrow()'s own default shape is unit length (shaftLength +
+        // tipLength == 1.0) along local +X -- uniform-scaling by axisLength
+        // here is what makes this frame's actual drawn arrow length agree
+        // with gizmoAxisLength()'s own value, the same one EditorUI's
+        // updateGizmo() uses to build the pickable axis segment's own
+        // extent.
+        model = glm::scale(model, glm::vec3(axisLength));
+
+        gizmoShader_->setMat4("uModel", model);
+        gizmoShader_->setVec3("uColor", axisDraw.color);
+        gizmoArrowMesh_.draw();
+    }
+
+    GL_CHECK(glEnable(GL_DEPTH_TEST));
 }
 
 void Application::renderSSRComposite(const glm::mat4& view, const glm::mat4& projection) {
@@ -3545,6 +3853,15 @@ void Application::render() {
     postProcessQuad_.bind();
     postProcessQuad_.draw();
 
+    // Phase 18e: the translate gizmo -- painted directly on top of
+    // viewportColorFramebuffer_ (still bound from the postprocess draw just
+    // above), AFTER the tonemap/bloom/selection-outline composite rather
+    // than earlier in the pipeline, since the gizmo is editor chrome, not
+    // scene content: it must never cast/receive shadows, feed SSAO, or be
+    // tonemapped/bloomed the way an actual scene object is (see
+    // renderGizmo()'s own application.hpp comment).
+    renderGizmo(view, projection);
+
     // Phase 14c: the 3D pipeline is entirely done for this frame -- its
     // final tonemapped output now lives in viewportColorFramebuffer_ (just
     // above), not the default framebuffer. Rebind the default framebuffer at
@@ -3706,11 +4023,21 @@ void Application::render() {
     // renderDockspaceShell(), then act on whatever it reported" shape
     // createRequest/saveSceneRequested/etc. already establish.
     TitleBarAction titleBarAction;
+    // Phase 18e: `view`/`projection` -- the SAME matrices this frame's own
+    // shadow/SSAO/selection-mask/gizmo passes above already used (computed
+    // once, near the top of this function, from camera_'s state as of the
+    // START of this frame) -- and `camera_.position()`, passed straight
+    // through as EditorUI's own new `cameraPosition`/`cameraView`/
+    // `cameraProjection` parameters so its gizmo hit-test (updateGizmo(),
+    // editor_ui.cpp) reasons about the exact same camera state
+    // Application::renderGizmo() just drew the gizmo's own pickable geometry
+    // with -- see that method's own header comment for why the two must
+    // agree.
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_,
         activeDirectionalLight_, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
         cameraCaptureRequested, ssaoDisabled_, ssaoDebugMode_, physicsRunning_, !window_.isDecorated(),
-        window_.isMaximized(), window_.getWindowPos(), titleBarAction);
+        window_.isMaximized(), window_.getWindowPos(), titleBarAction, camera_.position(), view, projection);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
     }

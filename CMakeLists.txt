@@ -252,6 +252,7 @@ add_executable(engine_app
     src/camera_capture.cpp
     src/editor_icons.cpp
     src/window_chrome.cpp
+    src/gizmo.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)

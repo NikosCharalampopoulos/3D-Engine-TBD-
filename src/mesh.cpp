@@ -308,4 +308,92 @@ Mesh makeUVSphere(int latSegments, int lonSegments, float radius) {
     return Mesh(vertices, indices);
 }
 
+Mesh makeGizmoArrow(float shaftLength, float shaftRadius, float tipLength, float tipRadius, int segments) {
+    // Fewer than 3 sides isn't a real cylinder/cone (degenerate or
+    // zero-area), same defensive floor makeUVSphere() applies to its own
+    // segment counts above.
+    segments = std::max(segments, 3);
+
+    constexpr float kTwoPi = 2.0f * 3.14159265358979323846f;
+
+    std::vector<Vertex> vertices;
+    std::vector<unsigned int> indices;
+
+    // --- Shaft: a cylinder from x=0 (the gizmo's own origin) to
+    // x=shaftLength. Two rings of `segments + 1` vertices (the "+1" repeats
+    // angle=0 as angle=2*pi so the last quad's texCoord.u doesn't wrap
+    // backward -- the same repeated-seam-vertex approach makeUVSphere()
+    // already uses along its own longitude direction).
+    const auto ringNormal = [](float angle) { return glm::vec3(0.0f, std::cos(angle), std::sin(angle)); };
+
+    const unsigned int shaftNearBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        const glm::vec3 normal = ringNormal(angle);
+        vertices.push_back({{0.0f, shaftRadius * normal.y, shaftRadius * normal.z}, normal, {0.0f, 0.0f}});
+    }
+    const unsigned int shaftFarBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        const glm::vec3 normal = ringNormal(angle);
+        vertices.push_back({{shaftLength, shaftRadius * normal.y, shaftRadius * normal.z}, normal, {0.0f, 1.0f}});
+    }
+    for (int i = 0; i < segments; ++i) {
+        const unsigned int a = shaftNearBase + static_cast<unsigned int>(i);
+        const unsigned int b = a + 1;
+        const unsigned int c = shaftFarBase + static_cast<unsigned int>(i);
+        const unsigned int d = c + 1;
+        indices.insert(indices.end(), {a, b, d, d, c, a});
+    }
+
+    // --- Cone base cap: a flat disk at x=shaftLength, radius tipRadius,
+    // closing off the visible gap where the (thinner) shaft meets the
+    // (wider) cone base -- a simple center-vertex fan, the same "fan from a
+    // center point" idiom the cone's own apex (below) uses.
+    const unsigned int capCenter = static_cast<unsigned int>(vertices.size());
+    vertices.push_back({{shaftLength, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.5f, 0.5f}});
+    const unsigned int capRimBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        const glm::vec3 normal = ringNormal(angle);
+        vertices.push_back(
+            {{shaftLength, tipRadius * normal.y, tipRadius * normal.z}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}});
+    }
+    for (int i = 0; i < segments; ++i) {
+        const unsigned int a = capRimBase + static_cast<unsigned int>(i);
+        const unsigned int b = a + 1;
+        indices.insert(indices.end(), {capCenter, b, a});
+    }
+
+    // --- Cone tip: a rim of `segments` base vertices at x=shaftLength
+    // (radius tipRadius) fanning up to an apex at x=shaftLength+tipLength.
+    // One apex vertex PER triangle (not a single shared apex vertex) so each
+    // triangle gets its own un-averaged normal -- the same flat-shading-via-
+    // duplicated-vertices idiom makeCube()'s own per-face corners already
+    // use.
+    const unsigned int coneRimBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        const glm::vec3 normal = ringNormal(angle);
+        vertices.push_back(
+            {{shaftLength, tipRadius * normal.y, tipRadius * normal.z}, normal, {0.0f, 0.0f}});
+    }
+    const glm::vec3 apexPos(shaftLength + tipLength, 0.0f, 0.0f);
+    const unsigned int apexBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i < segments; ++i) {
+        const float angleA = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        const float angleB = kTwoPi * static_cast<float>(i + 1) / static_cast<float>(segments);
+        const glm::vec3 midNormal = glm::normalize(ringNormal(angleA) + ringNormal(angleB));
+        vertices.push_back({apexPos, midNormal, {0.5f, 1.0f}});
+    }
+    for (int i = 0; i < segments; ++i) {
+        const unsigned int a = coneRimBase + static_cast<unsigned int>(i);
+        const unsigned int b = a + 1;
+        const unsigned int apex = apexBase + static_cast<unsigned int>(i);
+        indices.insert(indices.end(), {a, b, apex});
+    }
+
+    return Mesh(vertices, indices);
+}
+
 }  // namespace engine

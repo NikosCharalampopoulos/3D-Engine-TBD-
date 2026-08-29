@@ -281,3 +281,25 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_test(NAME window_chrome_test COMMAND window_chrome_test)
+
+# Phase 18e adds gizmo_test, testing every pure function in gizmo.hpp
+# (src/gizmo.cpp) in isolation -- same "plain executable, links only the
+# pure logic file it's testing" shape as camera_capture_test/
+# window_chrome_test above. gizmo.cpp depends on nothing beyond GLM (no
+# ecs.hpp, no GLFW/GL/ImGui at all), so this needs no live window/GL context
+# either -- which matters more here than for most of this project's other
+# pure-logic tests, since the real interactive gesture this whole feature
+# exists for (dragging a mouse across a gizmo handle) is not reproducible at
+# all under this project's headless Xvfb environment (no physical pointer
+# device) -- see gizmo_test.cpp's own header comment.
+add_executable(gizmo_test
+    gizmo_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/gizmo.cpp
+)
+target_include_directories(gizmo_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(gizmo_test PRIVATE glm::glm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(gizmo_test PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME gizmo_test COMMAND gizmo_test)

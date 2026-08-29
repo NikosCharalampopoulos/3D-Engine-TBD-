@@ -8568,6 +8568,217 @@ than a new, parallel rendering path.
     no notion of depth at all and would have drawn straight through both
     occluders.
 
+### Phase 18e: a real translate gizmo -- move the selected entity directly in the 3D view
+
+The project owner's own explicit request: **"if I could move it from inside
+the scene (not when I move using the camera with WASD and mouse)."** Before
+this phase, the ONLY way to change a selected entity's position was typing
+numbers into the Inspector's Transform `Position` `DragFloat3` (Phase 14e) --
+this engine had no mouse-picking/raycasting infrastructure at all (confirmed
+via `grep -rn` before starting, not assumed). This phase adds the standard
+Unity/Blender/Unreal translate gizmo: three colored axis handles (arrows)
+rendered at the selected entity's world position; click-drag an arm to slide
+the object along that one axis.
+
+- **Architecture: `gizmo.hpp`/`gizmo.cpp`, a pure, GL/ImGui-free math module,
+  the same shape `physics.hpp`/`camera_capture.hpp`/`window_chrome.hpp`
+  already establish.**
+  - `screenPointToWorldRay()` -- the standard "unproject two points through
+    the inverse view-projection matrix, subtract" screen-to-world-ray
+    technique. `worldPointToScreenPoint()`, its inverse, returns
+    `std::nullopt` for a point behind the camera -- the same "no meaningful
+    result this frame, not garbage" convention this project's own (since-
+    removed) `computeSelectionOutlineNDC()` established for its own `w <=
+    epsilon` guard.
+  - `closestPointsBetweenLines()` -- the standard closest-point-between-two-
+    3D-lines formula (a ray and one of the gizmo's three world-space axis
+    lines), returning `std::nullopt` rather than dividing by the near-zero
+    determinant a nearly-parallel ray/axis pair produces (looking almost
+    straight down the axis being tested) -- never NaN/Inf, never garbage.
+  - `hitTestGizmoAxes()` -- tests a ray against all three of the gizmo's own
+    finite axis segments (length scaled by `gizmoAxisLength()`, below),
+    returning whichever one the ray passes closest to within a world-space
+    pick tolerance, or `GizmoAxis::kNone` cleanly when it misses all three
+    (or every axis happens to be near-parallel to the ray).
+  - `gizmoAxisLength()`/`gizmoPickTolerance()` -- the standard "keep the
+    gizmo a roughly constant apparent screen size regardless of camera
+    distance" scale: a plain linear function of camera distance, floored so
+    a camera sitting at (or very near) the gizmo's own origin never
+    collapses it to zero.
+  - `updateGizmoDrag()` -- the whole "not dragging / dragging-axis-X/Y/Z"
+    state machine in one pure function, the identical "current state + this
+    frame's inputs -> next state" shape `decideCameraCapture()`
+    (`camera_capture.hpp`) already establishes: given the current
+    `GizmoDragState` (which axis, if any, plus the world point + entity
+    position the drag anchored to at grab time) and this frame's `mouseDown`/
+    an EDGE-triggered `mousePressedThisFrame`/`hoverAxis`/ray, produces the
+    next state and, while dragging, the entity's new position. A grab is
+    silently declined (stays not-dragging) if the ray is too parallel to the
+    axis being grabbed; a mid-drag frame that goes briefly parallel simply
+    holds the entity's last position rather than jumping to a garbage one,
+    resuming cleanly from the same anchor once the ray is no longer
+    degenerate.
+- **Rendering: procedural arrow geometry, a flat/unlit shader, drawn last.**
+  `mesh.hpp`'s new `makeGizmoArrow()` builds a thin cylindrical shaft + a
+  conical tip pointing along local +X (the same procedural-mesh idiom
+  `makeCube()`/`makeUVSphere()` already establish) -- one shared `Mesh`,
+  drawn three times per frame (`Application::renderGizmo()`) with a
+  different model matrix (rotated to point along X/Y/Z, scaled by
+  `gizmoAxisLength()`) and a different flat color each time:
+  **X = red, Y = green, Z = blue**, the standard, near-universal DCC
+  convention (Blender/Unity/Unreal all agree) -- deliberately NOT this
+  project's own teal editor accent (`kSelectionOutlineColor`): a
+  manipulation tool's whole job is "which axis am I about to drag," and
+  three maximally distinguishable colors serve that far better than a
+  theme-matched accent would. `assets/shaders/gizmo.vert`/`.frag` are a new,
+  minimal program (mirroring `selection_mask.vert`'s own "just enough to
+  place the geometry" shape) -- flat/unlit, like every real DCC tool's own
+  manipulation gizmo, not shaded against this scene's lights. Drawn directly
+  into `viewportColorFramebuffer_`, AFTER the final tonemap/bloom/selection-
+  outline postprocess composite (editor chrome, not scene content -- it must
+  never cast/receive shadows, feed SSAO, or be tonemapped/color-graded), with
+  depth testing explicitly disabled (that buffer's own depth attachment, at
+  this point in the pipeline, holds only the postprocess quad's uniform
+  near-plane depth -- leaving depth testing on would fail nearly every gizmo
+  fragment against that flat plane, not usefully self-occlude against real
+  scene geometry, none of which remains in this buffer by then). Only drawn
+  when `selectedEntity_` has a `Transform` -- no `ModelComponent` required
+  (an Empty entity is still a real, movable object) -- matching this
+  engine's established "no selection => no [feature]" convention.
+- **Interaction: lives entirely inside the Viewport panel's own
+  `Begin()`/`End()` block, the only place Dear ImGui's hover/mouse queries
+  can be scoped to that one docked panel** (the identical reason the Phase
+  16 double-click-to-capture check already lives there). `EditorUI::
+  updateGizmo()` (private, called from `renderDockspaceShell()` right after
+  the toolbar overlay, so `toolbarBgMin`/`toolbarBgMax` are known) hit-tests
+  and runs the drag, then -- unlike every other interactive feature this
+  class reports back via an out-parameter -- **mutates `registry`'s
+  Transform component directly**, the exact same pattern the Inspector's own
+  Position `DragFloat3` already establishes, just driven by a mouse drag
+  instead of a typed number.
+  - **Precedence vs. the toolbar and Phase 16 camera capture, decided
+    explicitly, not incidentally.** A new grab may only start when the mouse
+    is over the plain viewport image -- not a toolbar button, not the
+    toolbar's own translucent background rect (`toolbarBgMin`/`toolbarBgMax`,
+    the exact rect Phase 18a's own post-review fix already excludes from
+    camera capture), not some other docked panel that merely overlaps this
+    one on screen. `updateGizmo()` returns `true` on any frame the mouse is
+    hovering OR dragging a gizmo axis; `renderDockspaceShell()`'s own
+    double-click-to-capture check is skipped ENTIRELY that frame -- **the
+    gizmo wins outright**: a single click-drag on a gizmo arm can never be
+    misread as the start of a double-click camera capture, and camera
+    capture can never be entered while a gizmo drag is in progress. An
+    already-in-progress drag keeps tracking the ray regardless of hover (the
+    mouse drifting slightly outside the panel mid-drag doesn't cancel it) --
+    the same "a drag outlives hover" behavior `titleBarDragging_` already
+    has.
+- **Local vs. world space -- the same deliberate simplification
+  `transform_hierarchy.hpp`'s own Phase 14b precedent for `stepPhysics()`
+  documents, applied here.** The gizmo's own visual origin (for both
+  rendering and hit-testing) is the selected entity's actual rendered WORLD
+  position (`resolveWorldMatrix()`, the same call `renderSelectionMask()`
+  already makes for the identical reason) -- so it visually sits ON the
+  object even when parented. A drag's resulting WORLD-space delta, however,
+  is applied directly onto the entity's own LOCAL `Transform::position()`,
+  unconverted through any parent's own transform -- `gizmo.hpp` itself knows
+  nothing about ECS/`Transform`/parenting at all (that translation happens
+  entirely in `EditorUI::updateGizmo()`). For a root entity (no `Parent`
+  component -- the common case, and exactly what the project owner asked to
+  move) local position IS world position, so this is exactly correct. For a
+  parented entity with its own rotation/scale, this is a documented,
+  deliberate simplification, not a bug silently overlooked: making the gizmo
+  (or physics) fully parent-hierarchy-aware is real, separate scope neither
+  this phase nor Phase 14b takes on.
+- **Play/Edit mode and `RigidBody`: no new behavior invented.** Checked, not
+  assumed: the Inspector's own Position `DragFloat3` does nothing special for
+  an entity that also has a `RigidBody` -- it's a plain
+  `transform->setPosition(position)`, full stop. The gizmo does exactly the
+  same. If physics is running (Play mode, Phase 18b) when a drag repositions
+  a dynamic entity, the next `stepPhysics()` call simply continues simulating
+  from wherever it was moved to (gravity resumes from the new position) --
+  identical to what already happens today when the Inspector's own field is
+  dragged mid-simulation.
+- **Deliberately NOT done this phase** (documented scope, not an oversight):
+  - **Translate only.** No rotate or scale gizmo -- real, separate future
+    scope.
+  - **No click-to-select-in-viewport.** The gizmo only appears for whatever
+    is ALREADY selected via the existing Scene Hierarchy click; selecting an
+    object by clicking directly on its rendered mesh in the 3D view is a
+    separate feature this phase's own brief explicitly does not add.
+  - **No snapping/grid-alignment.** Free continuous dragging only.
+  - **No hover-highlight color change.** All three arrows always render in
+    their fixed X/Y/Z colors, whether hovered, dragged, or neither -- a
+    purely cosmetic polish item, not load-bearing for the feature to work.
+  - **No mutual self-occlusion between the three arrows.** Depth testing is
+    disabled for the whole gizmo draw (see above); the three arrows are not
+    occlusion-correct against EACH OTHER from every camera angle (only a
+    real concern nearly end-on to one axis, where that axis's own arrow is
+    already foreshortened to almost nothing on screen).
+- **Verify.**
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug`,
+    this project's real convention) produced **zero warnings** from any
+    engine source file. `ctest` reports **15/15 passing** -- the 14 pre-
+    existing targets plus this phase's own new `gizmo_test` (a broad set of
+    real, hand-computed test cases: ray generation for known screen points/camera
+    poses checked against hand-derived expected rays and their exact
+    inverse via `worldPointToScreenPoint()`; `closestPointsBetweenLines()`
+    for a perpendicular pair with a hand-computed closest approach, and for
+    a parallel pair confirmed to reject rather than divide by ~0;
+    `hitTestGizmoAxes()` correctly picking the axis a ray is aimed
+    squarely at (while a direction-parallel third axis is silently skipped,
+    not a false hit), correctly preferring a closer axis over a farther one
+    both within tolerance, and correctly reporting `kNone` for a ray that
+    misses every axis; and a full `updateGizmoDrag()` idle -> grab -> drag
+    -> drag -> release sequence with every intermediate position checked
+    against hand-derived expected values, plus the edge-triggering and
+    parallel-ray-declines-a-grab contracts each exercised on their own).
+    This is this phase's single most important verification surface: the
+    real interactive gesture (a mouse dragging across a rendered gizmo arm)
+    is not reproducible at all under this project's headless Xvfb
+    environment (no physical pointer device), so the pure math is what
+    actually proves the feature correct, not merely "it compiles."
+  - **Full wired-path proof, not just the isolated pure functions.** A new
+    `ENGINE_DEBUG_GIZMO_DRAG=<entity name>` env var feeds a scripted
+    sequence of synthetic screen-space mouse positions + mouse-down/up state
+    into `EditorUI::setDebugMouseOverride()` -- the SAME production entry
+    point (`updateGizmo()`) real ImGui mouse input drives; only the raw
+    "where is the mouse, is the button down" input is substituted, every
+    function downstream (`screenPointToWorldRay()`, `hitTestGizmoAxes()`,
+    `updateGizmoDrag()`, the resulting `Transform` mutation) is the exact
+    same unmodified code a real mouse-driven drag runs through -- the
+    identical substitution shape `ENGINE_DEBUG_SIMULATE_ESCAPE` (Phase 16)
+    already established for keyboard input. Run against `falling_cube`
+    (`ENGINE_DEBUG_GIZMO_DRAG=falling_cube ENGINE_DEBUG_SELECT=falling_cube`,
+    dragging the fixed +X axis by a scripted total of 2.0 world units): the
+    log shows `x` climbing `0.000000 -> 0.000000 (grab) -> 0.500000 ->
+    0.999999 -> 1.499999 -> 1.999999`, with `y`/`z` unchanged at every step
+    -- an exact match for the scripted delta, confined to exactly the
+    dragged axis. Repeated against the visible `scene` entity (pyramid +
+    table + box) with a longer-running capture: the log shows the identical
+    `x: 0.000000 -> ... -> 2.000001` trajectory, and a screenshot taken mid-
+    run shows the WHOLE `scene` entity visibly shifted right on screen, the
+    Inspector's own Position field reading `2.000 0.000 0.000`, and the
+    gizmo's three arrows AND the teal selection outline both correctly
+    re-rendered at the entity's new, moved position -- real, end-to-end
+    proof spanning hit-testing, the drag state machine, the `Transform`
+    mutation, and this phase's own rendering, all in the one production
+    code path.
+  - **The three colored handles, visually confirmed.** A screenshot with
+    `ENGINE_DEBUG_SELECT=scene` (on-screen, unlike `falling_cube`'s own
+    off-screen default position) shows three clearly distinguishable arrows
+    -- red along `scene`'s local +X, green along +Y, blue along +Z --
+    converging at the entity's own origin, alongside the pre-existing teal
+    silhouette outline.
+  - **No regression when nothing is selected.** A pre-Phase-18e build
+    (Phase 18d's own commit, `d49f696`, built fresh in a separate worktree)
+    and this phase's build were both run headlessly
+    (`tools/run_headless.sh`, `ENGINE_MAX_FRAMES=90`, no selection) and
+    screenshotted. `compare -metric AE` between the two PNGs reports **`0`**
+    differing pixels -- byte-for-byte pixel-identical, confirming the new
+    `renderGizmo()` call's own leading "no selection, or no `Transform` =>
+    draw nothing" guard genuinely produces zero visible difference when the
+    whole feature never engages.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

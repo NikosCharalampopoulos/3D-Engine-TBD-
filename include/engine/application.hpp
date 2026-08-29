@@ -701,6 +701,33 @@ private:
     // later.
     void renderSelectionMask(const glm::mat4& view, const glm::mat4& projection);
 
+    // Phase 18e: draws the translate gizmo's three colored axis handles
+    // (mesh.hpp's makeGizmoArrow(), reused per-axis with a rotated/scaled
+    // model matrix -- see gizmo.hpp's own header comment) at the selected
+    // entity's world position, directly into viewportColorFramebuffer_ --
+    // called from render() right after the final postprocess composite (the
+    // whole rest of the 3D pipeline is done by then; this paints on top of
+    // it) rather than earlier in the pipeline, since the gizmo is editor
+    // chrome, not scene content: it should never cast/receive shadows, feed
+    // SSAO's occlusion estimate, or be color-graded/bloomed by the tonemap
+    // pass the way an actual scene object is. Drawn with GL_DEPTH_TEST
+    // disabled (see this method's own .cpp comment for why) so it always
+    // reads on top, the same "manipulation UI, not a scene object" choice
+    // gizmo.frag's own comment documents for why this whole pass is
+    // flat/unlit. A true no-op -- draws nothing at all -- when nothing is
+    // selected or the selection has no Transform, matching this engine's
+    // established "no selection => no [feature]" convention (the old 2D
+    // outline, Phase 18d's real one).
+    //
+    // Reads `selectedEntity_` and each entity's Transform as they stood at
+    // the START of this frame -- the same one-frame latency every other
+    // per-frame read of `selectedEntity_`/a Transform already has in this
+    // class (see that member's own header comment): a drag EditorUI applies
+    // later this same frame (its own renderDockspaceShell() call, further
+    // down in render()) is what the gizmo will be drawn at NEXT frame, not
+    // this one.
+    void renderGizmo(const glm::mat4& view, const glm::mat4& projection);
+
     // Phase 13g: the SSR compositing pass -- redraws ONLY the PBR sphere
     // grid (sphereInstances_), a second time this frame, into
     // hdrFramebuffer_ (GL_LEQUAL depth test, no clear -- see this class's
@@ -1077,6 +1104,12 @@ private:
     // hidden behind some OTHER object is discarded rather than marked. See
     // renderSelectionMask()'s own comment for the full pass.
     std::shared_ptr<Shader> selectionMaskShader_;
+    // Phase 18e: the translate gizmo's own program (assets/shaders/
+    // gizmo.vert/.frag) -- a plain uModel/uView/uProjection vertex stage
+    // (mirroring selection_mask.vert's own minimal shape) paired with a
+    // flat, unlit uColor fragment stage (see gizmo.frag's own comment on why
+    // this manipulation-UI overlay is deliberately not scene-lit).
+    std::shared_ptr<Shader> gizmoShader_;
     // Phase 9: the PBR pass's own program (assets/shaders/pbr.vert/
     // pbr.frag), routed through resources_ for the same reason as every
     // other shader above. Must be constructed before sphereInstances_ below
@@ -1266,6 +1299,12 @@ private:
     // mesh.hpp's makeFullscreenQuad()) -- built once here, like groundMesh_,
     // rather than re-built every frame.
     Mesh postProcessQuad_;
+    // Phase 18e: the translate gizmo's shared arrow mesh (mesh.hpp's
+    // makeGizmoArrow()) -- one instance, drawn three times per frame (once
+    // per axis) with a different model matrix/color each time, the same
+    // "one shared Mesh, many instances" shape sphereMesh_/sphereInstances_
+    // just below already establish.
+    Mesh gizmoArrowMesh_;
     // Phase 9: the PBR sphere test-grid. One shared Mesh (every sphere is
     // geometrically identical) plus one SphereInstance (transform +
     // PBRMaterial) per sphere -- see application.cpp's kSphere* constants
@@ -1306,6 +1345,27 @@ private:
     // selecting that entity in the Inspector, though a verification run can
     // set ENGINE_DEBUG_SELECT to the same name to see both at once.
     std::optional<EntityId> physicsVerifyEntity_;
+    // Phase 18e: set from ENGINE_DEBUG_GIZMO_DRAG (see that env var's own
+    // application.cpp comment) -- std::nullopt (the default) unless it
+    // resolved to a real entity at startup. update() drives a scripted
+    // synthetic gizmo drag against this entity over a small fixed frame
+    // window (kDebugGizmoDragStartFrame et al., application.cpp) when set,
+    // and logs its Transform::position() periodically while doing so --
+    // this is the one member that both SELECTS the debug feature (non-
+    // nullopt means "run the script") and NAMES its target, unlike
+    // physicsVerifyEntity_ above (which only ever logs; ENGINE_DEBUG_FORCE_
+    // STATIC/_DYNAMIC are what actually act).
+    std::optional<EntityId> debugGizmoDragEntity_;
+    // Phase 18e: `debugGizmoDragEntity_`'s own Transform::position() as of
+    // the scripted drag's grab frame (kDebugGizmoDragStartFrame,
+    // application.cpp) -- recorded once so every later scripted step's
+    // target world point is computed relative to a FIXED anchor, not the
+    // entity's own live position, which the drag itself moves frame to
+    // frame (the identical reason GizmoDragState::startEntityPosition,
+    // gizmo.hpp, is captured once at grab time rather than re-read every
+    // frame). Meaningless (left at its default) whenever
+    // debugGizmoDragEntity_ is std::nullopt.
+    glm::vec3 debugGizmoDragStartPosition_{0.0f};
     // This engine's one actual rendered view -- still exactly what it was
     // from Phase 3 onward: a free-fly camera driven each frame by real
     // WASD/mouse input (or the scripted ENGINE_CAMERA_DEMO path), entirely
