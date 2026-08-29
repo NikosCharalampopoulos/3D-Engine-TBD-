@@ -84,15 +84,18 @@ public:
 
     const glm::vec3& position() const { return position_; }
     const glm::vec3& front() const { return front_; }
-    // Phase 14d: the selection outline's screen-space projection
-    // (Application::render()) needs the camera's own right/up axes to offset
-    // a world-space point by the selected entity's bounding-sphere radius in
-    // screen-facing directions (the "project center +/- radius along
-    // view-right/view-up" technique) -- both already computed every time
-    // updateVectors() runs, just not previously exposed since nothing needed
-    // them outside this class before this phase.
-    const glm::vec3& right() const { return right_; }
-    const glm::vec3& up() const { return up_; }
+    // Phase 14d added public right()/up() getters here for the old 2D
+    // selection-outline projection (Application::computeSelectionOutlineNDC(),
+    // since removed) to offset a world-space point along the camera's own
+    // screen-facing axes. Phase 18d's real 3D silhouette outline that
+    // replaced that mechanism has no equivalent need (it works entirely in
+    // screen space, via a rendered mask + edge detection, not by projecting
+    // hand-picked world-space points) -- removed alongside it rather than
+    // left as unused public API with no remaining caller anywhere in this
+    // engine. right_/up_ themselves (below) are still very much alive:
+    // processMovement()'s own A/D strafe still reads right_ directly every
+    // frame, and up_ still feeds getViewMatrix()'s glm::lookAt() call --
+    // this class just no longer exposes either outside itself.
     float yaw() const { return yawDeg_; }
     float pitch() const { return pitchDeg_; }
     // Phase 13c: CSM's cascade splitting needs the camera's own near plane

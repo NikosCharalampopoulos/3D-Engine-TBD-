@@ -353,21 +353,6 @@ enum class CreateEntityKind {
     kCamera,
 };
 
-// Phase 14d: the currently-selected entity's on-screen bounding box, already
-// projected into normalized device coordinates ([-1, 1] on both axes, +Y up
-// -- this engine's ordinary clip-space convention, e.g. Frustum/BoundingSphere)
-// by Application::render() (see that method's own Phase 14d comment for the
-// "project center +/- radius along the camera's own right/up axes" technique
-// used to build it) -- EditorUI does no 3D math of its own, it only maps this
-// already-computed NDC rect onto the Viewport panel's own current on-screen
-// pixel rectangle (see renderDockspaceShell()'s own Phase 14d comment).
-struct SelectionOutline {
-    float ndcMinX = 0.0f;
-    float ndcMinY = 0.0f;
-    float ndcMaxX = 0.0f;
-    float ndcMaxY = 0.0f;
-};
-
 // Phase 17d: this frame's outcome from the custom title bar (renderTitleBar(),
 // editor_ui.cpp) -- unconditionally reset to its all-false/nullopt default at
 // the top of every renderDockspaceShell() call, the identical "false/empty
@@ -450,7 +435,8 @@ public:
     // call, regardless of whether an image was drawn -- that's what
     // viewportWidth()/viewportHeight() return.
     //
-    // Phase 14d: three new parameters.
+    // Phase 14d: two new parameters (originally three -- see the Phase 18d
+    // paragraph below for why the third, `outline`, is gone).
     //   - `registry`: rebuilds the Scene panel's tree fresh every call (via
     //     scene_hierarchy.hpp's buildSceneTree() -- a handful of entities, so
     //     no reason to cache/diff this against a previous frame) instead of
@@ -460,23 +446,25 @@ public:
     //     application.hpp's own Phase 14d comment for why Application, not
     //     EditorUI, owns it) -- passed by reference so a click inside this
     //     one call can update it directly, and so Application::render()
-    //     (which builds `outline` below from this same value, earlier in the
-    //     very same render() call, before renderDockspaceShell() runs) and
-    //     a later Phase 14e Inspector panel can both read the exact same
-    //     value back.
-    //   - `outline`: nullptr when nothing is selected (no rectangle drawn --
-    //     this phase's own "no selection = no outline" default state), else
-    //     the selected entity's screen-space bounding box in NDC (see
-    //     SelectionOutline's own comment above), which this method maps onto
-    //     the Viewport panel's *current* on-screen pixel rectangle (captured
-    //     via ImGui::GetCursorScreenPos() before ImGui::Image() advances the
-    //     cursor, alongside the same ImGui::GetContentRegionAvail() the image
-    //     itself is sized to) and draws as a dashed rectangle + four small
-    //     corner brackets, via ImGui::GetWindowDrawList() so it lands in the
-    //     Viewport window's own draw list -- see this method's own .cpp
-    //     comment for why that, rather than the global foreground draw list,
-    //     is what keeps this overlay from ever bleeding into the panels
-    //     around it.
+    //     (which draws the selected entity's mesh into a Phase 18d selection
+    //     mask from this same value, earlier in the very same render() call,
+    //     before renderDockspaceShell() runs) and the Inspector panel can
+    //     both read the exact same value back.
+    //
+    // Phase 18d: the selection outline itself is no longer anything this
+    // class draws. It replaced Phase 14d's flat 2D screen-space dashed-
+    // rectangle-plus-corner-brackets gizmo (the `outline`/`SelectionOutline*`
+    // parameter this signature used to carry, and the addDashedRect()/
+    // addCornerBrackets() helpers + the draw-list block that called them,
+    // editor_ui.cpp) with a real silhouette-based 3D outline baked directly
+    // into `viewportColorTexture` itself by Application's own postprocess
+    // pass (a selection mask render + screen-space edge-detection composite
+    // -- see application.cpp's renderSelectionMask()/postprocess.frag's own
+    // Phase 18d comments) -- so by the time this method's `viewportColorTexture`
+    // argument reaches the ImGui::Image() call below, the outline is already
+    // part of the image, with nothing left for EditorUI's own draw list to
+    // add on top. Removed rather than left alongside the new mechanism as
+    // dead code, per this phase's own "replacement, not addition" brief.
     //
     // Phase 14f: return value -- CreateEntityKind::kNone every frame except
     // the one where the Scene panel's Create menu (a "+" button, opened via
@@ -636,7 +624,7 @@ public:
     // it already re-reads ssaoDisabled_/ssaoDebugMode_ after this same
     // call).
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
-                                           std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
+                                           std::optional<EntityId>& selectedEntity,
                                            std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
                                            std::optional<std::string>& textureAssignRequested,
                                            std::optional<std::string>& assetDropRequested, bool cameraCaptured,

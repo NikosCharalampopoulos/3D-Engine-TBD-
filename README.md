@@ -233,7 +233,12 @@ demo path, before `render()`:
    directional light's point of view (`renderShadowPass()`).
 2. Runs SSAO's three screen-space passes (geometry pre-pass, hemisphere-
    kernel occlusion, box blur -- `renderSSAO()`, "Phase 13f"), producing a
-   blurred occlusion texture the color pass below samples.
+   blurred occlusion texture the color pass below samples. Immediately
+   after, if an entity is selected, `renderSelectionMask()` ("Phase 18d")
+   draws just that entity's mesh into a small mask target, depth-discarding
+   against SSAO's own just-finished depth texture so a selected fragment
+   hidden behind some other object is never marked -- a no-op when nothing
+   is selected.
 3. Binds `hdrFramebuffer_` (the multisampled off-screen HDR target) and
    clears it, re-culls every point/spot light against
    `clusterLightCuller_`'s per-cluster AABBs for this frame's camera view (a
@@ -265,7 +270,11 @@ demo path, before `render()`:
 8. Resolves the final image with one fullscreen tonemap/gamma-correct/
    bloom-composite pass (`postProcessShader_` + `postProcessQuad_`) into
    `viewportColorFramebuffer_` -- a dedicated off-screen target sized to the
-   editor's Viewport panel (Phase 14c), not the default framebuffer.
+   editor's Viewport panel (Phase 14c), not the default framebuffer. This
+   same pass also composites ("Phase 18d") the selection outline: a small
+   screen-space edge-detection check against step 2's selection mask, painted
+   in the Phase 17a accent teal wherever a mask/no-mask transition is found,
+   skipped entirely when nothing is selected.
 9. Rebinds the default framebuffer at the window's own real size and clears
    it, then draws `EditorUI`'s always-on dockspace shell
    (Scene/Assets/Inspector placeholder panels, and -- since Phase 14c -- a
@@ -3808,6 +3817,16 @@ frame.
 </details>
 
 ### Phase 14d: a real Scene Hierarchy panel, click-to-select, and a viewport selection outline
+
+**Superseded in part by Phase 18d, below**: this section's own selection
+outline -- `computeSelectionOutlineNDC()`, the `SelectionOutline` struct, and
+`editor_ui.cpp`'s `addDashedRect()`/`addCornerBrackets()` -- was a flat, 2D
+screen-space rectangle with no awareness of the selected entity's actual mesh
+shape or of what else in the scene might occlude it. Phase 18d removed all of
+it and replaced it with a real, occlusion-correct 3D silhouette outline; see
+that section for the full design and why. The rest of this section -- the
+Scene Hierarchy tree itself, click-to-select, and `selectedEntity_`'s own
+ownership -- is still exactly as described below and unaffected.
 
 Fourth sub-phase of the "Phase 14: full editor UI" arc. The Scene panel's
 placeholder text ("Scene Hierarchy -- coming in Phase 14d") is replaced by a
@@ -8379,6 +8398,175 @@ ground collision already work.
   (not just captured) -- confirming the checkered cube's absence, sudden
   appearance after landing, and then static, unchanging position across a
   6-second gap once friction has run its course.
+
+### Phase 18d: a real 3D silhouette selection outline, replacing the flat 2D box
+
+The fourth and final item in the "Phase 18: editor usability + physics
+polish" arc, and the project owner's own explicit complaint: **"when I
+select something and it highlights I meant as 3D not a 2D highlight."**
+Phase 14d's selection outline (see that section's own new superseded-by note
+above) was a dashed rectangle plus corner brackets, derived purely from the
+selected entity's `BoundingSphere` projected to NDC -- a floating box around
+the object's screen-space *extent*, with no relationship to its actual
+rendered shape and no notion of depth at all. This phase replaces it with the
+standard "mask + screen-space edge detection" technique real engines use
+(Unity/Unreal's own selection outline), built entirely out of this project's
+existing screen-space post-process infrastructure (`Framebuffer`, SSAO's own
+geometry pre-pass, the final `postProcessShader_` compositing pass) rather
+than a new, parallel rendering path.
+
+- **Two passes, layered onto the existing pipeline exactly where each one's
+  own dependencies are already satisfied, not bolted on as an afterthought at
+  the end of the frame.**
+  1. **Selection mask pass** (`renderSelectionMask()`, `application.cpp`;
+     `assets/shaders/selection_mask.vert`/`.frag`) -- draws ONLY the
+     currently-selected entity's mesh (`Model::drawDepthOnly()`, the same
+     minimal-attribute draw path `renderShadowPass()`'s `shadow.vert` already
+     uses) into a new `selectionMaskFramebuffer_`, an ordinary full-viewport-
+     resolution `Framebuffer` (reusing the existing class's RGBA16F color
+     attachment rather than adding a bespoke single-channel format -- see
+     that member's own `application.hpp` comment for why; only
+     `.r` is ever read, the identical "one unused channel is an accepted,
+     harmless cost" tradeoff `ssaoRaw_`/`ssaoBlurred_` already make). A
+     fragment writes 1.0 only if it survives BOTH: (a) this target's own
+     ordinary GL depth test (self-occlusion within the selected mesh itself),
+     and (b) an explicit `discard` in `selection_mask.frag` against SSAO's
+     own `ssaoGBuffer_` depth texture (Phase 13f) -- already this frame's
+     whole opaque-scene depth, computed once regardless of selection, from
+     the exact same camera view/projection, and already reused exactly this
+     way by SSR's own ray march (`renderSSRComposite()`). Reusing it, rather
+     than building a second redundant full-scene depth pre-pass just for
+     this feature, is both free and the same "one shared scene depth every
+     screen-space pass draws from" convention SSR already established. **This
+     is what makes the outline occlusion-correct**: a selected fragment
+     farther from the camera than what's already recorded at that screen
+     pixel means some OTHER object is standing in front of it there, so it's
+     never marked selected. Runs right after `renderSSAO()` (grouped with
+     this frame's other pre-passes, alongside the shadow pass) rather than
+     after the main color pass -- it depends only on `ssaoGBuffer_`'s depth,
+     already finished by then, not on `hdrFramebuffer_`'s own scene draw, so
+     there's no ordering reason to run it any later. **A true no-op --
+     `selectionMaskFramebuffer_` isn't even cleared -- when nothing is
+     selected** (`selectedEntity_` is `std::nullopt`) or the selected entity
+     has no `ModelComponent` to draw, matching this engine's existing "no
+     selection => no outline" default exactly.
+  2. **Edge-detection outline pass** -- folded directly into the existing
+     final `postprocess.frag` compositing pass (the same fullscreen shader
+     that already tonemaps/gamma-corrects/composites bloom every frame)
+     rather than a third, separate fullscreen draw call: it's already the
+     one place each frame's fully-finished image exists as a `sampler2D`
+     right before `EditorUI`'s `ImGui::Image()` shows it, the same role
+     `uBloomBuffer`/`uSSAOMap` already fill for their own overlays. For each
+     texel outside the mask, samples its neighbors in a small fixed
+     `kSelectionOutlineRadius` (2) window and, if any neighbor IS inside the
+     mask, blends in the outline color -- a simple few-texel max-neighbor
+     check, not a full Sobel operator, since this only ever needs to answer
+     "is there a mask transition near here," not estimate an edge's exact
+     direction/strength. `uHasSelection` (0 whenever nothing was selected
+     this frame) gates the WHOLE check, checked before `uSelectionMask` is
+     ever sampled -- so a possibly-stale mask left over from a previous
+     selection can never influence a frame where nothing is currently
+     selected; see Verify below for the pixel-diff that confirms this holds.
+- **Color: the real Phase 17a accent teal, not a fresh approximation of it.**
+  A small, easy-to-miss inaccuracy in the OLD outline is fixed here, not
+  carried forward: Phase 14d's own dashed rectangle used a hand-picked
+  `IM_COL32(56, 217, 197, 255)`, visibly close to but NOT actually
+  `editor_ui.cpp`'s real theme constant (`kAccentTeal`,
+  `(0.176, 0.765, 0.698)` / `#2DC3B2`) -- that file's own comment even flagged
+  this as deliberate ("not a pixel-perfect match... this phase's brief
+  explicitly doesn't require that"). This phase's brief DOES ask for the
+  established color, so `application.cpp`'s new `kSelectionOutlineColor`
+  constant is `kAccentTeal`'s own exact value, hand-copied with a comment
+  cross-referencing it (introducing a shared cross-file theme-constants
+  header for one `glm::vec3` would be disproportionate new plumbing -- the
+  same "kept in sync by hand across a boundary" situation this engine already
+  accepts for `SSAOKernel`'s `SSAO_KERNEL_SIZE`, see `ssao.hpp`). Composited
+  AFTER tonemapping in `postprocess.frag`, not blended into the HDR scene
+  color before it: this is a flat UI accent meant to read as exactly that
+  fixed color regardless of the scene's own exposure/bloom that frame, not
+  something that should itself bloom or tonemap-compress.
+- **The old 2D mechanism removed entirely, not left stacked alongside the
+  new one.** `Application::computeSelectionOutlineNDC()` (the free function)
+  and `EditorUI::SelectionOutline` (the struct) are both gone -- along with
+  `editor_ui.cpp`'s `addDashedRect()`/`addCornerBrackets()` helpers and the
+  draw-list block that called them at the Viewport panel's own call site.
+  `EditorUI::renderDockspaceShell()`'s signature dropped its `const
+  SelectionOutline* outline` parameter entirely, rather than keeping a
+  now-always-`nullptr` argument around -- there is nothing left for
+  `EditorUI` to draw for the outline any more: it's already baked into
+  `viewportColorTexture` itself by the time that texture reaches
+  `ImGui::Image()`. `Camera::right()`/`up()` -- two getters Phase 14d added
+  purely so `computeSelectionOutlineNDC()` could offset a world-space point
+  along the camera's own screen-facing axes -- are removed too, once
+  confirmed (`grep -rn`) that nothing else in this engine ever called either
+  one; the private `right_`/`up_` members underneath them are untouched and
+  still drive `processMovement()`'s strafe and `getViewMatrix()`'s `lookAt`
+  exactly as before. `tests/`: no existing test exercised
+  `computeSelectionOutlineNDC()` (it was pure, testable math that this
+  project's own earlier review simply never added a dedicated test file for)
+  , so there was nothing to remove or replace there.
+- **Deliberately NOT done this phase** (documented, not an oversight, per
+  this phase's own scoped brief):
+  - **No outline-thickness configuration UI.** `kSelectionOutlineRadius` is a
+    fixed shader constant; a single, clean, fixed-width outline is the whole
+    deliverable.
+  - **No multi-select outline support.** `selectedEntity_` is a single
+    `std::optional<EntityId>` (confirmed by reading `application.hpp`
+    directly, not assumed) -- this engine has no multi-select UI at all
+    today, so there is exactly one entity a mask pass could ever need to
+    draw.
+  - **No animated/pulsing outline effect.** The outline color is the fixed
+    `kSelectionOutlineColor`, composited with a flat `mix()`, every frame
+    identically -- no time-varying uniform anywhere in this pass.
+- **Verify.**
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug`,
+    matching this project's own real convention) produced **zero warnings**
+    from any engine source file. `ctest` reports **14/14 passing** -- the
+    same 14 targets Phase 18c's own baseline lists, unchanged (this phase
+    added no new test file and removed none, see above).
+  - **(a) No regression when inactive.** A pre-Phase-18d build (Phase 18c's
+    own commit, `1f6c0c1`, built fresh in a separate worktree) and this
+    phase's build were both run headlessly (`tools/run_headless.sh`,
+    `ENGINE_MAX_FRAMES=90`, no selection) and screenshotted.
+    `compare -metric AE` between the two PNGs reports **`0`** differing
+    pixels -- byte-for-byte pixel-identical, confirming `uHasSelection`'s own
+    gate genuinely produces zero visible difference when this whole feature
+    never engages, exactly this phase's own "layers on top without altering
+    existing output" constraint.
+  - **(b) A real silhouette, not a rectangle.** `ENGINE_DEBUG_SELECT=scene`
+    (the multi-mesh pyramid/table/box entity, fully on-screen from the
+    default camera) was screenshotted and inspected directly. The teal
+    outline traces the pyramid's actual triangular profile, the table's
+    rectangular top edge, AND the small box sitting on top of it -- three
+    visually distinct silhouette shapes belonging to the one selected
+    entity's own multiple mesh nodes, something a single bounding-sphere
+    rectangle could never produce. `ENGINE_DEBUG_SELECT=falling_cube` (a
+    single box, mostly above the framed view at its default unmoved
+    position) shows the outline correctly tracing just the small visible
+    sliver of checkered underside poking into frame, clipped exactly at the
+    Viewport panel's own top edge -- not a rectangle extending upward past
+    where the object actually is.
+  - **(c) Occlusion correctness -- the whole reason this phase exists.**
+    Using the existing `ENGINE_DEBUG_FORCE_DYNAMIC`/`ENGINE_DEBUG_FORCE_VELOCITY`/
+    `ENGINE_DEBUG_FORCE_PLAY_MODE` hooks (Phase 18c) to slide `falling_cube`
+    (a real, `scene`-independent entity) to rest at `x=0.468, z=-1.238` --
+    behind `scene`'s own pyramid and the small box on its table from the
+    default camera's viewpoint, confirmed by reading `scene.obj`'s own vertex
+    bounds (`x:[-1.7,1.0] z:[-0.65,0.5]`) before choosing the target position,
+    not guessed -- then selecting it (`ENGINE_DEBUG_SELECT=falling_cube`) and
+    screenshotting once it settled. The result: the teal outline traces
+    `falling_cube`'s visible top, right, and lower-right edges exactly, and
+    **stops completely dead at the boundary where the small blue box (part
+    of the separate `scene` entity) and the table's own front edge cover
+    it** -- no teal line continues along, around, or through either
+    occluder, and no fragment of the outline appears anywhere on top of
+    the blue box or the table. This is a genuine cross-ENTITY occlusion case
+    (the occluder and the occludee are two different `registry_` entities,
+    not two meshes of the same selected model, which the mask FBO's own
+    ordinary depth test would have handled anyway) -- exactly the case the
+    old 2D bounding-box rectangle could never have gotten right, since it had
+    no notion of depth at all and would have drawn straight through both
+    occluders.
 
 ## Libraries used and why
 

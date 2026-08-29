@@ -90,6 +90,17 @@ const std::string kGBufferVertexShaderPath = resolveAssetPath("assets/shaders/gb
 const std::string kGBufferFragmentShaderPath = resolveAssetPath("assets/shaders/gbuffer.frag");
 const std::string kSSAOFragmentShaderPath = resolveAssetPath("assets/shaders/ssao.frag");
 const std::string kSSAOBlurFragmentShaderPath = resolveAssetPath("assets/shaders/ssao_blur.frag");
+// Phase 18d: the selection mask pass's own program -- a dedicated, minimal
+// vertex stage (selection_mask.vert, uModel/uView/uProjection only, mirroring
+// shadow.vert's own "just enough to place the geometry" shape) paired with a
+// fragment stage that discards against SSAO's own already-computed
+// ssaoGBuffer_ depth texture (see selection_mask.frag's own comment) rather
+// than reusing gbuffer.vert/.frag (which computes a view-space normal this
+// pass has no use for) or shadow.vert/.frag (whose empty fragment stage
+// writes nothing at all -- this pass needs a real color output, the mask
+// itself).
+const std::string kSelectionMaskVertexShaderPath = resolveAssetPath("assets/shaders/selection_mask.vert");
+const std::string kSelectionMaskFragmentShaderPath = resolveAssetPath("assets/shaders/selection_mask.frag");
 // Phase 9: the PBR pass's own program (see application.hpp's Phase 9 note
 // and assets/shaders/pbr.vert/pbr.frag).
 const std::string kPBRVertexShaderPath = resolveAssetPath("assets/shaders/pbr.vert");
@@ -312,6 +323,35 @@ constexpr unsigned int kSSAOMapTextureUnit = 9;
 // pre-pass).
 constexpr unsigned int kSSRColorBufferTextureUnit = 10;
 constexpr unsigned int kSSRDepthMapTextureUnit = 11;
+
+// Phase 18d: the selection mask pass's own depth-discard tolerance -- see
+// selection_mask.frag's own uDepthBias comment for exactly what this
+// absorbs (float rounding between two independent rasterizations of the
+// same triangles, this pass's own vs. ssaoGBuffer_'s gbuffer.vert/.frag).
+// Same non-linear [0,1] depth-buffer units as kSSAOBias above; a similar
+// small magnitude for a similar reason (both exist purely to swallow
+// precision noise between two passes that are supposed to agree, not to
+// meaningfully change which fragments pass), picked empirically the same
+// way -- large enough to never visibly let a selected object's own surface
+// wrongly self-occlude at grazing angles, small enough to never visibly
+// let a REAL occluder's silhouette bleed the outline through it (see this
+// phase's own README section for the headless screenshot that confirms
+// both).
+constexpr float kSelectionMaskDepthBias = 0.0015f;
+// Phase 18d: the selection outline's fixed color -- the SAME teal Phase
+// 17a's own editor theme already uses for a selected Scene-panel row/active
+// toolbar button (editor_ui.cpp's kAccentTeal, #2DC3B2 / (0.176, 0.765,
+// 0.698)), for the visual consistency this phase's own brief calls out.
+// Hand-copied here rather than shared through a common header: editor_ui.cpp
+// keeps kAccentTeal `constexpr` and file-local (inside applyEditorTheme(),
+// see that function's own comment) since nothing outside that one function
+// previously needed it -- introducing a shared theme-constants header for
+// this one cross-file value would be a disproportionate amount of new
+// plumbing for a single glm::vec3, so this constant is kept in sync by hand
+// instead, the same "kept in sync by hand across a boundary" situation this
+// engine already accepts for SSAOKernel's own SSAO_KERNEL_SIZE (see
+// ssao.hpp's own comment).
+constexpr glm::vec3 kSelectionOutlineColor{0.176f, 0.765f, 0.698f};
 
 // Phase 13f: SSAO tuning constants (see ssao.hpp/ssao.cpp and
 // assets/shaders/ssao.frag/ssao_blur.frag).
@@ -1107,7 +1147,8 @@ bool showDebugUIFromEnv() {
 // verification aid, the same "off unless explicitly requested" getenv-gated
 // shape as every other ENGINE_* flag in this file, letting a headless run
 // (no real mouse under Xvfb to click a Scene Hierarchy row with) pre-select
-// an entity at startup so the selection-outline projection can be
+// an entity at startup so the selection outline (Phase 14d's now-removed 2D
+// rectangle; Phase 18d's real 3D silhouette that replaced it) can be
 // screenshot-verified without needing real mouse input. Unlike every
 // boolean flag above, this one carries a *value* (the target entity's
 // NameComponent string, e.g. "falling_cube") rather than being a plain on/
@@ -1118,8 +1159,8 @@ bool showDebugUIFromEnv() {
 // keeping every other verification-oriented env var (ENGINE_CAMERA_DEMO,
 // ENGINE_FRUSTUM_CULL_DEMO, ENGINE_CLUSTER_DEBUG, ...) permanently available
 // rather than deleting it once a phase's own review is done -- a real,
-// reusable "prove the outline still projects correctly" tool for any later
-// phase's own regression check, not a one-off scaffold.
+// reusable "prove the selection outline still tracks the right entity" tool
+// for any later phase's own regression check, not a one-off scaffold.
 std::string debugSelectEntityNameFromEnv() {
     const char* value = std::getenv("ENGINE_DEBUG_SELECT");
     return value != nullptr ? std::string(value) : std::string();
@@ -1438,89 +1479,6 @@ std::string uniqueEntityName(EntityRegistry& registry, const std::string& baseNa
     }
 }
 
-// Phase 14d: builds the currently-selected entity's screen-space (NDC,
-// [-1,1] on both axes, +Y up) bounding-box outline -- the "project center
-// +/- radius along the camera's own view-right/view-up axes" technique this
-// phase's own brief calls out, chosen over unprojecting all 8 corners of a
-// world-space AABB for the same reason: this engine already has a per-
-// entity BoundingSphere (mesh.hpp/model.hpp), not an AABB, and a sphere's
-// "silhouette in screen space, as seen from a specific camera" is exactly
-// "the sphere's world-space center, offset by its own radius along whichever
-// two axes are perpendicular to the view direction" -- whereas an AABB's own
-// 8 corners would first need to be *derived* from this same sphere anyway
-// (there is no tighter AABB already lying around to reuse), for a shape this
-// project's own screen-space rectangle overlay doesn't actually need to be
-// any tighter than the sphere already is.
-//
-// Returns false (leaving `outOutline` unmodified) if the sphere's center, or
-// either offset point, projects behind the camera (w <= a small positive
-// epsilon after the view-projection multiply) -- an entity directly behind
-// the camera has no sane on-screen rectangle to draw, and dividing by a
-// near-zero or negative w would otherwise produce a wildly wrong (or
-// infinite/NaN) NDC rect rather than simply skipping the outline for that
-// frame, matching this phase's own "no selection => no outline" default
-// treatment for a case that's really "no MEANINGFUL on-screen outline right
-// now" instead.
-bool computeSelectionOutlineNDC(const BoundingSphere& worldSphere, const Camera& camera, const glm::mat4& view,
-                                 const glm::mat4& projection, SelectionOutline& outOutline) {
-    const glm::mat4 viewProjection = projection * view;
-
-    const auto projectToNDC = [&](const glm::vec3& worldPoint, glm::vec3& outNDC) {
-        const glm::vec4 clip = viewProjection * glm::vec4(worldPoint, 1.0f);
-        if (clip.w <= 1e-4f) {
-            return false;
-        }
-        outNDC = glm::vec3(clip) / clip.w;
-        return true;
-    };
-
-    glm::vec3 ndcCenter{};
-    glm::vec3 ndcRightPoint{};
-    glm::vec3 ndcUpPoint{};
-    if (!projectToNDC(worldSphere.center, ndcCenter) ||
-        !projectToNDC(worldSphere.center + (camera.right() * worldSphere.radius), ndcRightPoint) ||
-        !projectToNDC(worldSphere.center + (camera.up() * worldSphere.radius), ndcUpPoint)) {
-        return false;
-    }
-
-    const float halfWidth = std::abs(ndcRightPoint.x - ndcCenter.x);
-    const float halfHeight = std::abs(ndcUpPoint.y - ndcCenter.y);
-
-    // Bug-review fix (this phase's own review): the `clip.w <= 1e-4f` guard
-    // above only rejects a point that's essentially AT or behind the camera
-    // -- it does nothing for the case just short of that, where the
-    // selected entity's bounding sphere is merely very close to the camera
-    // (nothing stops the free-fly camera from flying right up to/through a
-    // selected object; there's no camera-vs-scenery collision in this
-    // engine). A small-but-still-positive `w` there is a perfectly finite
-    // divide, so ndcCenter/halfWidth/halfHeight above never become NaN/Inf
-    // -- but they CAN still come out enormous (dividing by a `w` on the
-    // order of 1e-3 can inflate a normal-sized offset into the thousands),
-    // and that finite-but-huge NDC rect would otherwise reach
-    // addDashedRect()'s per-segment loop (editor_ui.cpp) unclamped: that
-    // loop's own cost is directly proportional to the rectangle's on-screen
-    // perimeter, so an unclamped rect large enough can turn one frame's
-    // worth of outline drawing into hundreds of thousands of AddLine() calls
-    // -- a real per-frame hitch (or worse, sustained for as long as the
-    // camera stays that close), not a crash, but not "degrades gracefully"
-    // either. Dear ImGui's own window-clipping (this class's header
-    // comment) only trims what's actually RASTERIZED -- it does nothing for
-    // the CPU-side cost of first generating that many dashed-line segments
-    // -- so this clamp has to happen here, before that loop ever sees the
-    // rectangle. kMaxOutlineNdcExtent is generous relative to the actually-
-    // visible [-1, 1] NDC range (comfortably covers "camera close enough
-    // that the object fills several screens' worth of view", which still
-    // reads as a sane, if mostly off-screen, rectangle once clipped) while
-    // keeping the worst case bounded to a small, constant number of dash
-    // segments regardless of how close the camera gets.
-    constexpr float kMaxOutlineNdcExtent = 50.0f;
-    outOutline.ndcMinX = std::clamp(ndcCenter.x - halfWidth, -kMaxOutlineNdcExtent, kMaxOutlineNdcExtent);
-    outOutline.ndcMaxX = std::clamp(ndcCenter.x + halfWidth, -kMaxOutlineNdcExtent, kMaxOutlineNdcExtent);
-    outOutline.ndcMinY = std::clamp(ndcCenter.y - halfHeight, -kMaxOutlineNdcExtent, kMaxOutlineNdcExtent);
-    outOutline.ndcMaxY = std::clamp(ndcCenter.y + halfHeight, -kMaxOutlineNdcExtent, kMaxOutlineNdcExtent);
-    return true;
-}
-
 // Phase 8d: display-only helpers for renderDebugUI()'s "Input Bindings"
 // readout below -- not used anywhere rebinding actually happens (there is
 // no rebinding UI in this phase; see README.md's own Phase 8d section for
@@ -1687,6 +1645,9 @@ Application::Application(int width, int height, const std::string& title, std::u
       gbufferShader_(resources_.getShader(kGBufferVertexShaderPath, kGBufferFragmentShaderPath)),
       ssaoShader_(resources_.getShader(kPostProcessVertexShaderPath, kSSAOFragmentShaderPath)),
       ssaoBlurShader_(resources_.getShader(kPostProcessVertexShaderPath, kSSAOBlurFragmentShaderPath)),
+      // Phase 18d: the selection mask pass's own program -- see this class's
+      // own Phase 18d header comment.
+      selectionMaskShader_(resources_.getShader(kSelectionMaskVertexShaderPath, kSelectionMaskFragmentShaderPath)),
       pbrShader_(resources_.getShader(kPBRVertexShaderPath, kPBRFragmentShaderPath)),
       irradianceShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kIrradianceFragmentShaderPath)),
       prefilterShader_(resources_.getShader(kCubemapCaptureVertexShaderPath, kPrefilterFragmentShaderPath)),
@@ -1784,6 +1745,11 @@ Application::Application(int width, int height, const std::string& title, std::u
                clampedDownsampleDimension(viewportHeight_, kSSAODownsampleFactor)),
       ssaoBlurred_(clampedDownsampleDimension(viewportWidth_, kSSAODownsampleFactor),
                    clampedDownsampleDimension(viewportHeight_, kSSAODownsampleFactor)),
+      // Phase 18d: the selection mask pass's own render target -- full
+      // viewport resolution (unlike ssaoGBuffer_/ssaoRaw_/ssaoBlurred_ just
+      // above), single-sample, no special flags -- see this member's own
+      // application.hpp comment.
+      selectionMaskFramebuffer_(viewportWidth_, viewportHeight_),
       // Phase 14c: the final tonemap/postprocess pass's own render target,
       // full viewport resolution, single-sample, no special flags -- see
       // this member's own application.hpp comment.
@@ -2723,6 +2689,55 @@ void Application::renderSSAO(const glm::mat4& view, const glm::mat4& projection)
     postProcessQuad_.draw();
 }
 
+void Application::renderSelectionMask(const glm::mat4& view, const glm::mat4& projection) {
+    // Phase 18d: nothing selected, or the selected entity has no
+    // ModelComponent to draw a silhouette from -- leave
+    // selectionMaskFramebuffer_ completely untouched (still whatever it held
+    // last frame it WAS drawn into, if ever) rather than clearing it here.
+    // render()'s own uHasSelection uniform upload (postprocess.frag) is what
+    // actually stops anything from ever sampling this possibly-stale buffer
+    // in that case -- see this method's own application.hpp comment.
+    if (!selectedEntity_.has_value()) {
+        return;
+    }
+    const ModelComponent* selectedModel = registry_.getComponent<ModelComponent>(*selectedEntity_);
+    if (selectedModel == nullptr || !selectedModel->model) {
+        return;
+    }
+
+    selectionMaskFramebuffer_.bindForWriting();
+    // Cleared to 0 every frame this pass actually runs -- selection_mask.frag
+    // only ever writes 1.0 (never 0), so "0 unless explicitly marked
+    // selected-and-visible" is exactly this clear's job, the same role
+    // ssaoGBuffer_'s own clear plays for its pass just above.
+    GL_CHECK(glClearColor(0.0f, 0.0f, 0.0f, 1.0f));
+    GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+
+    selectionMaskShader_->use();
+    selectionMaskShader_->setMat4("uView", view);
+    selectionMaskShader_->setMat4("uProjection", projection);
+    // ssaoGBuffer_'s own depth texture -- already this frame's whole opaque
+    // scene depth, from this same view/projection -- is the occlusion
+    // reference selection_mask.frag discards against; see that shader's own
+    // uSceneDepth comment for why reusing it (rather than a second, redundant
+    // full-scene depth pre-pass) is both correct and free, exactly like SSR's
+    // own ray march already reuses it (renderSSRComposite() below).
+    ssaoGBuffer_.bindDepthTexture(0);
+    selectionMaskShader_->setInt("uSceneDepth", 0);
+    selectionMaskShader_->setVec2("uViewportSize",
+                                   glm::vec2(static_cast<float>(selectionMaskFramebuffer_.width()),
+                                             static_cast<float>(selectionMaskFramebuffer_.height())));
+    selectionMaskShader_->setFloat("uDepthBias", kSelectionMaskDepthBias);
+
+    // Phase 14b: the same resolved-WORLD-matrix requirement renderShadowPass()/
+    // renderSSAO() already have for a parented entity -- this mask has to
+    // land at the selected entity's actual DRAWN world position, or the
+    // resulting outline would visibly disagree with where the entity is
+    // actually rendered.
+    const glm::mat4 worldMatrix = resolveWorldMatrix(registry_, *selectedEntity_);
+    selectedModel->model->drawDepthOnly(*selectionMaskShader_, worldMatrix);
+}
+
 void Application::renderSSRComposite(const glm::mat4& view, const glm::mat4& projection) {
     // Redraws the PBR sphere grid a second time, into hdrFramebuffer_ --
     // the SAME target render()'s ordinary per-frame draw loop just finished
@@ -2873,6 +2888,10 @@ void Application::resizeViewportTargetsIfNeeded() {
     ssaoGBuffer_ = Framebuffer(ssaoWidth, ssaoHeight, /*samples=*/0, /*depthAsTexture=*/true);
     ssaoRaw_ = Framebuffer(ssaoWidth, ssaoHeight);
     ssaoBlurred_ = Framebuffer(ssaoWidth, ssaoHeight);
+    // Phase 18d: full viewport resolution, like viewportColorFramebuffer_
+    // just below -- not downsampled, see this member's own application.hpp
+    // comment.
+    selectionMaskFramebuffer_ = Framebuffer(viewportWidth_, viewportHeight_);
     viewportColorFramebuffer_ = Framebuffer(viewportWidth_, viewportHeight_);
 
     // The cluster grid's AABBs are a pure function of the projection matrix
@@ -2955,6 +2974,19 @@ void Application::render() {
     // right below rebinds both correctly before anything draws into the
     // window's own framebuffer chain.
     renderSSAO(view, projection);
+
+    // Phase 18d: the selection mask pass -- depends only on ssaoGBuffer_'s
+    // depth texture (just finished above), not on hdrFramebuffer_'s own main
+    // color pass, so it runs here, grouped with this frame's other pre-passes,
+    // rather than after the main scene draw. Reads selectedEntity_ as it
+    // stood BEFORE editorUI_.renderDockspaceShell() runs later this same
+    // call -- the same one-frame latency selectedEntity_'s own
+    // application.hpp comment already documents. Like renderSSAO() just
+    // above, leaves the last-bound FBO pointed at selectionMaskFramebuffer_
+    // (or, when this frame has no selection, doesn't touch FBO bindings at
+    // all) -- hdrFramebuffer_.bindForWriting() right below rebinds correctly
+    // either way.
+    renderSelectionMask(view, projection);
 
     // Phase 7b: the whole lit scene (+ skybox) renders into hdrFramebuffer_
     // -- a floating-point off-screen target -- instead of straight to the
@@ -3489,6 +3521,27 @@ void Application::render() {
     ssaoRaw_.bindColorTexture(2);
     postProcessShader_->setInt("uSSAOMap", 2);
     postProcessShader_->setInt("uSSAODebug", ssaoDebugMode_ ? 1 : 0);
+    // Phase 18d: the selection outline's own edge-detection composite -- see
+    // postprocess.frag's own comment. `hasSelectionOutline` mirrors
+    // renderSelectionMask()'s own "is there actually a selected entity with
+    // a Model to draw" gate exactly (this method's own Phase 18d comment
+    // above) -- when false, selectionMaskFramebuffer_ is bound anyway (unit
+    // 3 has to be bound to SOMETHING for a well-defined draw call) but
+    // uHasSelection stops postprocess.frag from ever sampling it, so its
+    // possibly-stale contents (whatever the last real selection left behind)
+    // can never influence this frame's output. This is what guarantees the
+    // "nothing selected => pixel-identical to before this feature existed"
+    // default this phase's own brief requires.
+    const bool hasSelectionOutline = selectedEntity_.has_value() &&
+                                      registry_.getComponent<ModelComponent>(*selectedEntity_) != nullptr &&
+                                      registry_.getComponent<ModelComponent>(*selectedEntity_)->model != nullptr;
+    selectionMaskFramebuffer_.bindColorTexture(3);
+    postProcessShader_->setInt("uSelectionMask", 3);
+    postProcessShader_->setVec2("uSelectionMaskTexelSize",
+                                 glm::vec2(1.0f / static_cast<float>(selectionMaskFramebuffer_.width()),
+                                           1.0f / static_cast<float>(selectionMaskFramebuffer_.height())));
+    postProcessShader_->setInt("uHasSelection", hasSelectionOutline ? 1 : 0);
+    postProcessShader_->setVec3("uSelectionOutlineColor", kSelectionOutlineColor);
     postProcessQuad_.bind();
     postProcessQuad_.draw();
 
@@ -3516,33 +3569,6 @@ void Application::render() {
         GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
     }
 
-    // Phase 14d: this frame's selection outline -- built from selectedEntity_
-    // as it stood BEFORE editorUI_.renderDockspaceShell() below runs (and
-    // could change it in response to a Scene Hierarchy click this same
-    // frame) -- see selectedEntity_'s own application.hpp comment for why
-    // that ordering means a newly-clicked selection's outline only starts
-    // showing the FOLLOWING frame, not this one. No outline at all (outline
-    // stays nullptr) when nothing is selected, the selected entity has no
-    // ModelComponent (nothing to project a bounding sphere from), or its
-    // sphere/offset points project behind the camera (see
-    // computeSelectionOutlineNDC()'s own comment) -- each is this phase's
-    // own documented "no MEANINGFUL outline this frame" case, not an error.
-    SelectionOutline outline{};
-    bool hasOutline = false;
-    if (selectedEntity_.has_value()) {
-        const ModelComponent* selectedModel = registry_.getComponent<ModelComponent>(*selectedEntity_);
-        if (selectedModel != nullptr && selectedModel->model) {
-            // Phase 14b: the same resolveWorldMatrix() the main color pass
-            // above uses for this entity's actual drawn position -- a
-            // parented entity's outline must track its resolved WORLD
-            // transform, not its raw local one, or it would visibly
-            // disagree with where the entity is actually drawn.
-            const glm::mat4 worldMatrix = resolveWorldMatrix(registry_, *selectedEntity_);
-            const BoundingSphere worldSphere = selectedModel->model->boundingSphere().transformed(worldMatrix);
-            hasOutline = computeSelectionOutlineNDC(worldSphere, camera_, view, projection, outline);
-        }
-    }
-
     // Phase 8c/14a: last thing render() does -- so every ImGui widget (both
     // editorUI_'s always-on dockspace shell and, when enabled, debugUI_'s
     // diagnostic panel) lands on top of everything else this frame drew.
@@ -3551,9 +3577,11 @@ void Application::render() {
     // editorUI_.newFrame() starts it, editorUI_.renderDockspaceShell()
     // submits the Scene/Assets/Viewport/Inspector panels -- Viewport's own
     // body now an ImGui::Image() of viewportColorFramebuffer_'s color
-    // texture (Phase 14c; see editor_ui.cpp) rather than placeholder text,
-    // plus (Phase 14d) `outline`'s dashed-rectangle overlay when hasOutline,
-    // and Scene's own body a real, click-to-select tree (Phase 14d) instead
+    // texture (Phase 14c; see editor_ui.cpp) -- already carrying (Phase 18d)
+    // the selection outline's own edge-detection composite, baked directly
+    // into that same texture by the postprocess pass above, so EditorUI has
+    // no separate overlay of its own left to draw for it any more -- and
+    // Scene's own body a real, click-to-select tree (Phase 14d) instead
     // of placeholder text -- renderDebugUI() additionally submits debugUI_'s
     // own panel content (still a no-op unless ENGINE_SHOW_DEBUG_UI/F1 have
     // enabled it -- entirely unchanged from Phase 8c/8d), and
@@ -3679,7 +3707,7 @@ void Application::render() {
     // createRequest/saveSceneRequested/etc. already establish.
     TitleBarAction titleBarAction;
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
-        viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr,
+        viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_,
         activeDirectionalLight_, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
         cameraCaptureRequested, ssaoDisabled_, ssaoDebugMode_, physicsRunning_, !window_.isDecorated(),
         window_.isMaximized(), window_.getWindowPos(), titleBarAction);

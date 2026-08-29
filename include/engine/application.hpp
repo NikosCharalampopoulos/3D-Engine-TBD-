@@ -564,12 +564,12 @@ public:
     // frame (renderDockspaceShell() takes it by reference, see that method's
     // own Phase 14d comment) but has no reason to be its long-term home, the
     // same relationship it already has with registry_ itself. Application::
-    // render() is the OTHER reader: it resolves this same entity's world-
-    // space bounding sphere and projects it into the selection-outline rect
-    // EditorUI draws (see render()'s own Phase 14d comment) -- both readers
-    // needing the same value each frame is exactly why this lives on
-    // Application, one level above either of them, rather than on whichever
-    // of the two happened to need it first.
+    // render() is the OTHER reader: it draws this same entity's mesh into
+    // the Phase 18d selection mask (renderSelectionMask()) that ultimately
+    // becomes the 3D silhouette outline EditorUI's Viewport panel shows --
+    // both readers needing the same value each frame is exactly why this
+    // lives on Application, one level above either of them, rather than on
+    // whichever of the two happened to need it first.
     //
     // Exposed via this one const getter (not a mutable reference) for a later
     // phase to consume -- concretely, Phase 14e's real Inspector panel, which
@@ -632,8 +632,9 @@ private:
     // -- move-assigns a freshly constructed Framebuffer over every one of
     // this class's viewport-sized render targets (hdrFramebuffer_/
     // hdrResolveFramebuffer_/brightFramebuffer_/pingpongFramebuffer0_/1_/
-    // ssaoGBuffer_/ssaoRaw_/ssaoBlurred_/viewportColorFramebuffer_, each at
-    // its own existing resolution ratio) and recomputes
+    // ssaoGBuffer_/ssaoRaw_/ssaoBlurred_/viewportColorFramebuffer_/
+    // selectionMaskFramebuffer_ (Phase 18d), each at its own existing
+    // resolution ratio) and recomputes
     // clusterLightCuller_'s cluster AABBs (they're a pure function of the
     // projection matrix + screen size in pixels, both of which change when
     // this happens -- see cluster_light_culler.hpp's own comment on why that
@@ -678,6 +679,27 @@ private:
     // nothing itself; render() rebinds the default framebuffer/window
     // viewport immediately afterward via hdrFramebuffer_.bindForWriting().
     void renderSSAO(const glm::mat4& view, const glm::mat4& projection);
+
+    // Phase 18d: the selection mask pass -- draws ONLY the currently-
+    // selected entity's mesh (Model::drawDepthOnly()) into
+    // selectionMaskFramebuffer_, writing 1.0 wherever a fragment survives
+    // both this target's own ordinary GL depth test (self-occlusion within
+    // the selected mesh) AND an explicit discard against SSAO's own
+    // ssaoGBuffer_ depth texture (occlusion by every OTHER object in the
+    // scene -- see selection_mask.frag's own comment for exactly why reusing
+    // that already-computed depth, rather than a second full-scene depth
+    // pre-pass, is both correct and free). A no-op -- selectionMaskFramebuffer_
+    // is left untouched, still holding whatever it held last frame -- when
+    // nothing is selected or the selected entity has no ModelComponent to
+    // draw; render()'s own uHasSelection uniform (postprocess.frag) is what
+    // actually gates postprocess.frag from ever sampling that possibly-stale
+    // buffer in that case, not a clear here. Called from render() right
+    // after renderSSAO(), the same pre-pass grouping shadow/SSAO already use
+    // -- this pass depends only on ssaoGBuffer_'s depth texture (already
+    // finished by the time renderSSAO() returns), not on hdrFramebuffer_'s
+    // own main color pass, so there is no ordering reason to run it any
+    // later.
+    void renderSelectionMask(const glm::mat4& view, const glm::mat4& projection);
 
     // Phase 13g: the SSR compositing pass -- redraws ONLY the PBR sphere
     // grid (sphereInstances_), a second time this frame, into
@@ -1048,6 +1070,13 @@ private:
     std::shared_ptr<Shader> gbufferShader_;
     std::shared_ptr<Shader> ssaoShader_;
     std::shared_ptr<Shader> ssaoBlurShader_;
+    // Phase 18d: the selection mask pass's own program (assets/shaders/
+    // selection_mask.vert/.frag) -- draws ONLY the currently-selected
+    // entity's mesh into selectionMaskFramebuffer_ (below), depth-tested
+    // against SSAO's own ssaoGBuffer_ depth texture so a selected fragment
+    // hidden behind some OTHER object is discarded rather than marked. See
+    // renderSelectionMask()'s own comment for the full pass.
+    std::shared_ptr<Shader> selectionMaskShader_;
     // Phase 9: the PBR pass's own program (assets/shaders/pbr.vert/
     // pbr.frag), routed through resources_ for the same reason as every
     // other shader above. Must be constructed before sphereInstances_ below
@@ -1175,6 +1204,22 @@ private:
     Framebuffer ssaoGBuffer_;
     Framebuffer ssaoRaw_;
     Framebuffer ssaoBlurred_;
+    // Phase 18d: the selection mask pass's own render target -- full
+    // viewport resolution (unlike ssaoGBuffer_/ssaoRaw_/ssaoBlurred_ above,
+    // which are all deliberately downsampled), single-sample, no special
+    // flags: an ordinary Framebuffer, the same "no special flags needed"
+    // shape brightFramebuffer_/pingpongFramebuffer0_/1_ already use, reused
+    // here rather than a new bespoke single-channel render-target type --
+    // only its .r channel is ever read (postprocess.frag's uSelectionMask),
+    // the same "one unused channel is an accepted, harmless cost" tradeoff
+    // ssaoRaw_/ssaoBlurred_ already make for the identical reason. Full
+    // resolution (not downsampled, unlike SSAO's own targets) because this
+    // outline's own edge-detection band (postprocess.frag's
+    // kSelectionOutlineRadius) needs to trace the selected entity's actual
+    // silhouette at screen resolution, not a blurred/blocky approximation
+    // of it -- SSAO's occlusion estimate can afford to be soft in a way a
+    // crisp selection outline can't.
+    Framebuffer selectionMaskFramebuffer_;
     // Phase 14c: the final tonemap/bloom-composite postprocess pass's own
     // render target -- what used to be a direct draw onto the default
     // framebuffer (GL_FRAMEBUFFER 0, at the window's real size) now lands
@@ -1237,17 +1282,18 @@ private:
     EntityRegistry registry_;
     // Phase 14d: see the public selectedEntity() getter above for the full
     // ownership rationale. Each render() call reads this value FIRST (to
-    // build this frame's selection outline, from whatever was clicked as of
-    // last frame) and only afterward calls editorUI_.renderDockspaceShell()
-    // (which may overwrite it in place, if this frame's own Scene Hierarchy
-    // click changed it) -- so a newly-clicked selection's outline first
-    // appears the FOLLOWING frame, not the same one, the same one-frame
-    // latency viewportWidth_/viewportHeight_ already have and for the
-    // identical underlying reason (see editor_ui.hpp's own comment on those
-    // two): the outline's 3D projection math has to run before the one
-    // ImGui frame that could change the selection even exists yet, since
-    // Dear ImGui's immediate-mode API has no way to submit the Scene
-    // panel's widgets before the 3D pass whose output they might affect.
+    // build this frame's selection mask -- Phase 18d's renderSelectionMask()
+    // -- from whatever was clicked as of last frame) and only afterward
+    // calls editorUI_.renderDockspaceShell() (which may overwrite it in
+    // place, if this frame's own Scene Hierarchy click changed it) -- so a
+    // newly-clicked selection's outline first appears the FOLLOWING frame,
+    // not the same one, the same one-frame latency viewportWidth_/
+    // viewportHeight_ already have and for the identical underlying reason
+    // (see editor_ui.hpp's own comment on those two): the selection mask
+    // pass has to run before the one ImGui frame that could change the
+    // selection even exists yet, since Dear ImGui's immediate-mode API has
+    // no way to submit the Scene panel's widgets before the 3D pass whose
+    // output they might affect.
     std::optional<EntityId> selectedEntity_;
     // Phase 14e: set from ENGINE_DEBUG_FORCE_STATIC/ENGINE_DEBUG_FORCE_DYNAMIC
     // (see application.cpp's own comment on those two env vars and

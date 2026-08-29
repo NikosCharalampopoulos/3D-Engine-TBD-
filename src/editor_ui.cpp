@@ -19,7 +19,6 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
-#include <cmath>
 #include <string>
 
 #include "engine/asset_browser.hpp"
@@ -366,71 +365,6 @@ void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& 
     }
 
     ImGui::PopID();
-}
-
-// Phase 14d: the approved mockup's dashed-rectangle-plus-corner-brackets
-// selection look (a simple 2D screen-space gizmo, deliberately NOT a fancy
-// inverted-hull silhouette shader -- see this phase's own brief). Both
-// helpers draw directly into `drawList` in already-resolved screen-pixel
-// coordinates (topLeft/bottomRight), leaving all NDC-to-panel-pixel mapping
-// to their one call site below.
-void addDashedRect(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight, ImU32 color) {
-    constexpr float kDashLength = 6.0f;
-    constexpr float kGapLength = 4.0f;
-    constexpr float kThickness = 1.5f;
-
-    auto dashedLine = [&](ImVec2 from, ImVec2 to) {
-        const ImVec2 delta(to.x - from.x, to.y - from.y);
-        const float length = std::sqrt((delta.x * delta.x) + (delta.y * delta.y));
-        if (length < 1.0f) {
-            return;
-        }
-        const ImVec2 direction(delta.x / length, delta.y / length);
-        float traveled = 0.0f;
-        bool drawing = true;
-        while (traveled < length) {
-            const float segment = std::min(drawing ? kDashLength : kGapLength, length - traveled);
-            if (drawing) {
-                const ImVec2 segmentStart(from.x + (direction.x * traveled), from.y + (direction.y * traveled));
-                const ImVec2 segmentEnd(from.x + (direction.x * (traveled + segment)),
-                                         from.y + (direction.y * (traveled + segment)));
-                drawList->AddLine(segmentStart, segmentEnd, color, kThickness);
-            }
-            traveled += segment;
-            drawing = !drawing;
-        }
-    };
-
-    dashedLine(topLeft, ImVec2(bottomRight.x, topLeft.y));
-    dashedLine(ImVec2(bottomRight.x, topLeft.y), bottomRight);
-    dashedLine(bottomRight, ImVec2(topLeft.x, bottomRight.y));
-    dashedLine(ImVec2(topLeft.x, bottomRight.y), topLeft);
-}
-
-void addCornerBrackets(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight, ImU32 color) {
-    // Each bracket's own two short, solid arms -- not dashed, so they read as
-    // a distinct "handle" accent against the dashed outline itself, matching
-    // the approved mockup's own corner-bracket look.
-    constexpr float kArmLength = 10.0f;
-    constexpr float kThickness = 2.0f;
-
-    const ImVec2 corners[4] = {
-        topLeft,
-        ImVec2(bottomRight.x, topLeft.y),
-        bottomRight,
-        ImVec2(topLeft.x, bottomRight.y),
-    };
-    // Sign of each arm's own direction along x/y, pointing INWARD from that
-    // corner (e.g. the top-left corner's arms extend right and down) so the
-    // brackets sit just inside the dashed rectangle rather than outside it.
-    const float armX[4] = {1.0f, -1.0f, -1.0f, 1.0f};
-    const float armY[4] = {1.0f, 1.0f, -1.0f, -1.0f};
-
-    for (int i = 0; i < 4; ++i) {
-        const ImVec2& corner = corners[i];
-        drawList->AddLine(corner, ImVec2(corner.x + (armX[i] * kArmLength), corner.y), color, kThickness);
-        drawList->AddLine(corner, ImVec2(corner.x, corner.y + (armY[i] * kArmLength)), color, kThickness);
-    }
 }
 
 // Phase 14f: the Scene panel's Create menu -- its own item list, shared
@@ -2037,7 +1971,6 @@ void EditorUI::renderTitleBar(bool showCustomTitleBar, bool windowMaximized, std
 
 CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                                  std::optional<EntityId>& selectedEntity,
-                                                 const SelectionOutline* outline,
                                                  std::optional<EntityId> activeDirectionalLight,
                                                  bool& saveSceneRequested,
                                                  std::optional<std::string>& textureAssignRequested,
@@ -2422,50 +2355,25 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
             cameraCaptureRequested = true;
         }
 
-        // Phase 14d: the selection outline, drawn on top of the image above
-        // via THIS SAME "Viewport" window's own draw list
-        // (ImGui::GetWindowDrawList()) -- not the global foreground draw
-        // list. Both compose on top of ImGui::Image() (a window's own draw
-        // commands are submitted, and therefore rasterized, in the order
-        // they're issued within that window, and the foreground draw list is
-        // drawn on top of every window besides), but only the WINDOW draw
-        // list is automatically clipped to this window's own visible
-        // rectangle by Dear ImGui -- the foreground list is not clipped to
-        // any one window at all, so a selection near the Viewport panel's own
-        // edge could otherwise paint a stray fragment of dashed line over
-        // whatever panel happens to be docked next to it. Confirmed by this
-        // phase's own headless screenshot (see README.md's Phase 14d
-        // section), not just assumed.
-        if (outline != nullptr && contentRegion.x > 0.0f && contentRegion.y > 0.0f) {
-            // NDC ([-1,1], +Y up) -> this panel's own screen pixels (+Y
-            // down): the standard "u/v in [0,1], then scale by the panel's
-            // own size and offset by its own screen-space origin" mapping --
-            // note the Y flip (1.0f - v), same direction (though a distinct
-            // reason) as ImGui::Image()'s own uv0/uv1 flip just above: NDC's
-            // own +Y-up convention is the opposite of ImGui's own +Y-down
-            // screen-pixel convention.
-            const auto ndcToPanelScreen = [&](float ndcX, float ndcY) {
-                const float u = (ndcX * 0.5f) + 0.5f;
-                const float v = 1.0f - ((ndcY * 0.5f) + 0.5f);
-                return ImVec2(panelScreenPos.x + (u * contentRegion.x), panelScreenPos.y + (v * contentRegion.y));
-            };
-            // outline->ndcMaxY is the NDC-space TOP edge (+Y up), which maps
-            // to the smaller screen-Y (closer to the panel's own top) --
-            // i.e. topLeft pairs ndcMinX with ndcMaxY, not ndcMinY.
-            const ImVec2 topLeft = ndcToPanelScreen(outline->ndcMinX, outline->ndcMaxY);
-            const ImVec2 bottomRight = ndcToPanelScreen(outline->ndcMaxX, outline->ndcMinY);
-
-            // Teal accent, matching the approved mockup's own selection
-            // color direction (a modern dark/teal-accented style) -- not a
-            // pixel-perfect match to any one specific hex value (this
-            // phase's brief explicitly doesn't require that), just a bright,
-            // clearly-not-part-of-the-3D-scene color against this engine's
-            // own rendered content.
-            const ImU32 accentColor = IM_COL32(56, 217, 197, 255);
-            ImDrawList* drawList = ImGui::GetWindowDrawList();
-            addDashedRect(drawList, topLeft, bottomRight, accentColor);
-            addCornerBrackets(drawList, topLeft, bottomRight, accentColor);
-        }
+        // Phase 18d: the selection outline used to be drawn here, on top of
+        // the image above, via this same "Viewport" window's own draw list
+        // (ImGui::GetWindowDrawList()) -- a flat 2D screen-space dashed
+        // rectangle + corner brackets (addDashedRect()/addCornerBrackets(),
+        // this phase's own now-removed Phase 14d helpers), built from the
+        // selected entity's bounding SPHERE alone, with no awareness of its
+        // actual mesh silhouette or of what else in the scene might occlude
+        // it. That entire mechanism -- the `outline`/`SelectionOutline*`
+        // parameter this method used to take, both helpers, and this block --
+        // is gone, replaced by a real 3D silhouette outline Application now
+        // bakes directly into `viewportColorTexture` itself (a selection mask
+        // render + screen-space edge-detection composite, see
+        // application.cpp's renderSelectionMask()/postprocess.frag's own
+        // Phase 18d comments): by the time that texture reaches the
+        // ImGui::Image() call above, the outline is already part of the
+        // rendered image, correctly hugging the selected entity's real shape
+        // and correctly hidden behind whatever else in the scene actually
+        // occludes it -- leaving nothing left for this window's own draw
+        // list to add on top.
     }
     ImGui::End();
 
