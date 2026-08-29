@@ -1147,6 +1147,67 @@ std::string debugForceDynamicEntityNameFromEnv() {
     return value != nullptr ? std::string(value) : std::string();
 }
 
+// Phase 18c: ENGINE_DEBUG_FORCE_VELOCITY=<entity name>:<vx>,<vy>,<vz>, unset
+// by default -- the debug-env-var counterpart to a scene's own "rigidBody"
+// "velocity" authoring (see scene_serialization.hpp's own comment on that
+// block) for giving an entity a real, nonzero HORIZONTAL initial velocity at
+// startup with no scene file edit needed. Ground friction (this phase's own
+// new physics.hpp behavior) only has anything to decelerate if some entity
+// actually has horizontal velocity to begin with -- nothing in
+// assets/scenes/default.json's shipped entities does -- so this closes that
+// gap the same way ENGINE_DEBUG_DROP_MODEL/_ASSIGN_TEXTURE close an
+// equivalent "nothing in the default scene exercises this" gap for their own
+// phases.
+//
+// Same colon-separated "<entity name>:<rest>" shape debugAssignTextureFromEnv()/
+// debugDropTextureFromEnv() (Phase 15f/15g) already establish -- the entity
+// name (before the FIRST ':') is resolved the same way ENGINE_DEBUG_SELECT/
+// _FORCE_STATIC/_FORCE_DYNAMIC already are, via findEntityByName(), at this
+// constructor's own call site below. `<vx>,<vy>,<vz>` (after the ':') is
+// three comma-separated floats, parsed with std::stof; a missing separator or
+// a non-numeric component is logged as a warning and the whole env var is
+// ignored -- the identical "malformed debug env var is a warning, never a
+// crash" contract debugAssignTextureFromEnv()'s own ':'-less case already
+// establishes -- rather than std::stof's own uncaught exception taking down
+// the entire run over what is, deliberately, a debug-only convenience.
+struct DebugForceVelocity {
+    std::string entityName;
+    glm::vec3 velocity{0.0f};
+};
+
+std::optional<DebugForceVelocity> debugForceVelocityFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_FORCE_VELOCITY");
+    if (value == nullptr || *value == '\0') {
+        return std::nullopt;
+    }
+    const std::string raw(value);
+    const std::size_t colon = raw.find(':');
+    if (colon == std::string::npos) {
+        LOG_WARN("ENGINE_DEBUG_FORCE_VELOCITY=\"" + raw +
+                  "\" is missing its ':' separator (expected \"<entity name>:<vx>,<vy>,<vz>\"); ignored");
+        return std::nullopt;
+    }
+    const std::string name = raw.substr(0, colon);
+    const std::string components = raw.substr(colon + 1);
+    const std::size_t comma1 = components.find(',');
+    const std::size_t comma2 = (comma1 == std::string::npos) ? std::string::npos : components.find(',', comma1 + 1);
+    if (comma1 == std::string::npos || comma2 == std::string::npos) {
+        LOG_WARN("ENGINE_DEBUG_FORCE_VELOCITY=\"" + raw +
+                  "\" does not have exactly three ','-separated components (expected "
+                  "\"<entity name>:<vx>,<vy>,<vz>\"); ignored");
+        return std::nullopt;
+    }
+    try {
+        const float vx = std::stof(components.substr(0, comma1));
+        const float vy = std::stof(components.substr(comma1 + 1, comma2 - comma1 - 1));
+        const float vz = std::stof(components.substr(comma2 + 1));
+        return DebugForceVelocity{name, glm::vec3(vx, vy, vz)};
+    } catch (const std::exception&) {
+        LOG_WARN("ENGINE_DEBUG_FORCE_VELOCITY=\"" + raw + "\" has a non-numeric velocity component; ignored");
+        return std::nullopt;
+    }
+}
+
 // Phase 14f: ENGINE_DEBUG_CREATE=<cube|sphere|plane|empty|pointlight|
 // directionallight|camera> (case-insensitive; "pointlight" added Phase 15a,
 // "directionallight" added Phase 15b, "camera" added Phase 15c), unset by
@@ -2009,6 +2070,43 @@ Application::Application(int width, int height, const std::string& title, std::u
         }
     }
 
+    // Phase 18c: ENGINE_DEBUG_FORCE_VELOCITY -- see
+    // debugForceVelocityFromEnv()'s own comment above for why this exists.
+    // Applied after FORCE_STATIC/FORCE_DYNAMIC above so it can target an
+    // entity either of those just made dynamic in this same run; ensures the
+    // target actually has a RigidBody first via setEntityStatic(...,
+    // /*makeStatic=*/false) -- the IDENTICAL production call
+    // ENGINE_DEBUG_FORCE_DYNAMIC itself uses just above (idempotent/
+    // well-defined if the entity already has one, per setEntityStatic()'s
+    // own physics.hpp contract) -- then overwrites that RigidBody's
+    // velocity directly. Also records physicsVerifyEntity_ (overwriting
+    // whichever of FORCE_STATIC/FORCE_DYNAMIC set it last, the same
+    // documented last-write-wins behavior physicsVerifyEntity_ already has),
+    // so update()'s own periodic physics-verify log (see that call site's
+    // own comment below) picks up this entity's horizontal velocity/
+    // position too, with no separate logging code needed for this env var.
+    {
+        const std::optional<DebugForceVelocity> forceVelocity = debugForceVelocityFromEnv();
+        if (forceVelocity.has_value()) {
+            const EntityId found = findEntityByName(registry_, forceVelocity->entityName);
+            if (found.valid()) {
+                setEntityStatic(registry_, found, /*makeStatic=*/false);
+                RigidBody* body = registry_.getComponent<RigidBody>(found);
+                if (body != nullptr) {
+                    body->velocity = forceVelocity->velocity;
+                    physicsVerifyEntity_ = found;
+                    LOG_INFO("ENGINE_DEBUG_FORCE_VELOCITY=\"" + forceVelocity->entityName + "\": set entity " +
+                              std::to_string(found.index()) + " velocity to (" +
+                              std::to_string(forceVelocity->velocity.x) + ", " +
+                              std::to_string(forceVelocity->velocity.y) + ", " +
+                              std::to_string(forceVelocity->velocity.z) + ")");
+                }
+            } else {
+                LOG_WARN("ENGINE_DEBUG_FORCE_VELOCITY=\"" + forceVelocity->entityName + "\" does not match any entity's name");
+            }
+        }
+    }
+
     // Phase 14f: ENGINE_DEBUG_DELETE -- see debugDeleteEntityNameFromEnv()'s
     // own comment above for why this exists. Applied last among this
     // constructor's ENGINE_DEBUG_* entity-name lookups (after CREATE/SELECT/
@@ -2372,9 +2470,27 @@ void Application::update(double deltaTime, const InputState& input) {
     if (physicsVerifyEntity_.has_value() && frameCount_ % kPhysicsVerifyLogFrameInterval == 0) {
         const Transform* transform = registry_.getComponent<Transform>(*physicsVerifyEntity_);
         if (transform != nullptr) {
-            LOG_INFO("Phase 14e physics-verify: frame " + std::to_string(frameCount_) + ", entity " +
-                      std::to_string(physicsVerifyEntity_->index()) + " y = " +
-                      std::to_string(transform->position().y));
+            // Phase 18c: also logs x/z position and the RigidBody's own
+            // horizontal (X/Z) speed, when this entity has one -- the
+            // numeric proof ENGINE_DEBUG_FORCE_VELOCITY's own comment above
+            // needs to show ground friction actually decelerating horizontal
+            // motion over time (x should move less each interval, speed
+            // should strictly decrease then hold at exactly zero), on top of
+            // the pre-existing y-only trajectory Phase 14e's
+            // ENGINE_DEBUG_FORCE_STATIC/_DYNAMIC verification already
+            // relies on -- that y-only case is completely unaffected, since
+            // this only adds fields to the same log line, changing nothing
+            // about when it fires or what it says about y.
+            std::string line = "Phase 14e physics-verify: frame " + std::to_string(frameCount_) + ", entity " +
+                                std::to_string(physicsVerifyEntity_->index()) + " y = " +
+                                std::to_string(transform->position().y);
+            const RigidBody* body = registry_.getComponent<RigidBody>(*physicsVerifyEntity_);
+            if (body != nullptr) {
+                const float horizontalSpeed = glm::length(glm::vec2(body->velocity.x, body->velocity.z));
+                line += ", x = " + std::to_string(transform->position().x) + ", z = " + std::to_string(transform->position().z) +
+                        ", horizontalSpeed = " + std::to_string(horizontalSpeed);
+            }
+            LOG_INFO(line);
         }
     }
 

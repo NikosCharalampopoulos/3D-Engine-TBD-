@@ -8188,6 +8188,198 @@ that real distinction and gates `stepPhysics()` behind it.
   real mouse click landing on the Play button pixel-for-pixel (Xvfb has no
   real pointer device to click with at all).
 
+### Phase 18c: ground friction + terminal velocity -- polishing the physics feel
+
+The third item in the "Phase 18: editor usability + physics polish" arc,
+and the project owner's own explicit complaint that started it: **"the
+gravity is awkward, definitely needs friction and other things to
+polish it."** Phase 8e's `stepPhysics()` (`physics.hpp`/`physics.cpp`) has
+always done exactly two things: integrate gravity, and snap a falling
+entity to rest on the ground plane. It has never done anything to an
+entity's HORIZONTAL (X/Z) velocity -- a scene's own `rigidBody` `"velocity"`
+block (`scene_serialization.hpp`) can legitimately hand an entity nonzero
+X/Z speed, and once that entity lands, nothing has ever slowed it back
+down: it would slide forever at a constant speed, the exact unnatural
+behavior the project owner's complaint names. This phase adds the two
+smallest, most load-bearing fixes to that feel -- ground friction and a
+fall-speed clamp -- without touching anything else about how gravity or
+ground collision already work.
+
+- **Ground friction: `kGroundFriction` (`physics.hpp`), 4.9 world-units/
+  second^2.** While an entity is resting on the ground THIS step (i.e. the
+  exact pre-existing `if (position.y <= restY)` branch that already snaps
+  it to rest and zeroes `velocity.y` -- see `physics.cpp`), its horizontal
+  velocity is now ALSO decelerated toward zero, at this rate, every step.
+  `4.9` is `kGravityAcceleration * 0.5f` -- real kinetic friction is
+  (coefficient of friction) times (gravitational acceleration), independent
+  of the sliding object's own mass (the identical "every body behaves the
+  same regardless of how heavy it is" property `kGravityAcceleration`
+  itself already has, and the same reason `RigidBody` has no mass field --
+  see that struct's own header comment); a coefficient of ~0.5 is a
+  middle-of-the-road, moderately grippy dry surface (rubber-on-concrete
+  sits higher, ~0.7-1.0; polished wood/metal sits lower, ~0.2-0.4), chosen
+  so a brisk 3 world-units/second slide settles to a full stop in roughly
+  half a second -- fast enough to visibly read as "friction is acting," not
+  a near-imperceptible crawl, but not the old instant, unnatural dead-stop
+  either.
+- **Clamped, not exponential -- friction can never overshoot past zero and
+  reverse the direction of motion.** The naive `velocity *= factor` shape
+  (multiplicative decay) only ever asymptotically approaches zero and
+  technically never truly stops. `stepPhysics()` instead computes the
+  horizontal speed as one resultant vector (`glm::length(vec3(velocity.x,
+  0, velocity.z))`), reduces it by `kGroundFriction * deltaTime`, clamped
+  with `std::max`-shaped logic so the reduction can never exceed the speed
+  it's applied to, then rescales `velocity.x`/`velocity.z` down to that new
+  speed together -- so a diagonal slide decelerates at the same RATE as an
+  axis-aligned slide of the same total speed (real friction opposes the
+  actual direction of sliding motion, not each axis independently, which a
+  naive per-axis `velocity.x -= friction*dt; velocity.z -= friction*dt`
+  would get wrong -- a diagonal slide would lose speed roughly `sqrt(2)`
+  times too fast). Once the resultant speed reaches exactly zero, it STAYS
+  there -- confirmed by `tests/physics_test.cpp`'s own new cases below across
+  many further steps, never dipping negative/reversed.
+- **Terminal velocity: `kTerminalFallSpeed` (`physics.hpp`), 40.0
+  world-units/second.** Applied as a hard clamp on `RigidBody::velocity.y`
+  every step, right after gravity is (conditionally) applied and before
+  that velocity is integrated into position -- and applied UNCONDITIONALLY,
+  regardless of `RigidBody::useGravity`, since a scene-authored initial
+  `"velocity"` could hand an entity an already-huge downward speed with
+  gravity disabled, and this clamp needs to bound that too, not just
+  gravity's own contribution. A real falling object doesn't accelerate
+  forever -- air resistance grows with speed until it exactly balances
+  gravity, at which point the object falls at a constant "terminal
+  velocity" (a real skydiver reaches roughly 50-55 m/s). This engine has no
+  drag force of its own to model that continuously (see "Deliberately NOT
+  done" below), so a hard clamp is a deliberately simplified stand-in:
+  `40.0` sits comfortably below a real skydiver's terminal velocity while
+  staying far above anything this engine's own shipped demo content
+  actually reaches before landing (`falling_cube` falls 1.5-2.5 world units
+  and lands under 6 world-units/second -- see `physics_test.cpp`'s own
+  hand-computed free-fall expectations) -- so this clamp is provably inert
+  for every scene this engine ships today, and only engages for a
+  deliberately extreme case.
+- **Only ever clamps a downward `velocity.y`.** An upward `velocity.y`
+  (e.g. a scene-authored upward launch) is left completely untouched --
+  "terminal fall speed" only describes how fast something can be FALLING,
+  never how fast it can rise.
+- **`tests/physics_test.cpp`: six new cases, matching this file's own
+  established hand-computed-recurrence style, none of the seven pre-existing
+  cases touched.**
+  - Ground friction decelerates measurably and reaches exactly zero, then
+    stays there. An entity starting already at rest height with 3.0
+    world-units/second of horizontal velocity: after 10 steps its speed is
+    checked against the exact same clamped-friction recurrence
+    `stepPhysics()` itself follows (still `> 0` and `< 3.0` -- measurably
+    decelerating, not yet stopped); after 60 more steps (well past the
+    ~36.7 steps hand-computed to fully consume 3.0 world-units/second) it's
+    exactly `0.0`; a further 60 steps confirm it stays exactly `0.0` on
+    EVERY one of those steps, never dipping negative.
+  - Friction decelerates the RESULTANT horizontal vector, not each axis
+    independently: a diagonal slide (equal X/Z speed, same total speed as
+    an axis-aligned case) is checked to lose speed at the identical
+    per-step rate, with X and Z staying equal to each other throughout.
+  - Terminal velocity, two cases: an extreme `-1000` initial `velocity.y`
+    is clamped to exactly `-kTerminalFallSpeed` on the very first step; and
+    ordinary gravity accumulated over 400 uninterrupted steps (comfortably
+    past the ~244.7 steps hand-computed for gravity alone to reach the
+    clamp) never once exceeds `-kTerminalFallSpeed`, settling at exactly
+    that value.
+  - All seven Phase 8e/14e cases (still-falling, settled-at-rest,
+    Collider-less free-fall, `useGravity=false`, and every
+    `setEntityStatic()` transition) re-run unmodified and still pass --
+    `kTerminalFallSpeed`/`kGroundFriction` are both far outside the range
+    those scenarios ever reach, so neither new behavior perturbs them.
+- **Headless verification, via a new `ENGINE_DEBUG_FORCE_VELOCITY=<entity
+  name>:<vx>,<vy>,<vz>` env var -- the exact same "debug env var calls the
+  exact same production function a real interaction would" precedent every
+  other `ENGINE_DEBUG_*` var in this file already establishes.** Nothing in
+  `assets/scenes/default.json`'s shipped entities has any horizontal
+  velocity to begin with, so proving friction actually decelerates
+  something over time needed a way to give one some -- the identical gap
+  `ENGINE_DEBUG_DROP_MODEL`/`_ASSIGN_TEXTURE` each closed for their own
+  phase. Same colon-separated shape `ENGINE_DEBUG_ASSIGN_TEXTURE`/
+  `_DROP_TEXTURE` already establish (Phase 15f/15g): the entity name is
+  resolved via `findEntityByName()` exactly like `ENGINE_DEBUG_SELECT`/
+  `_FORCE_STATIC`/`_FORCE_DYNAMIC` already are, then `setEntityStatic(...,
+  makeStatic=false)` -- the SAME production call `ENGINE_DEBUG_FORCE_DYNAMIC`
+  itself uses -- ensures a `RigidBody` exists before this overwrites its
+  `velocity` directly. Also records `physicsVerifyEntity_` (Phase 14e), so
+  the pre-existing periodic physics-verify log (`update()`) needed only ONE
+  addition -- now also logging `x`/`z` position and horizontal speed
+  whenever the verified entity has a `RigidBody` -- to cover this phase's
+  own verification need too, with zero new logging call sites and zero
+  change to the pre-existing y-only case Phase 14e's own verification still
+  relies on.
+  - `ENGINE_DEBUG_FORCE_DYNAMIC=falling_cube
+    ENGINE_DEBUG_FORCE_VELOCITY="falling_cube:2.0,0.0,0.0"
+    ENGINE_DEBUG_FORCE_PLAY_MODE=1`, `ENGINE_MAX_FRAMES=170`: `falling_cube`
+    (starts `y=2.5`, given `velocity=(2.0, 0.0, 0.0)`) logs **`horizontalSpeed
+    = 2.000000` on every frame while still airborne** (frames 0-40, `x`
+    climbing linearly `0.000085 -> 1.333419` -- friction only applies once
+    resting on the ground, so airborne motion is completely unaffected, as
+    designed), then, once it lands (`y` reaches exactly `0.240000` =
+    `kGroundY (-0.01) + Collider::halfExtent (0.25)`, the same rest-height
+    formula every prior phase already documents) horizontal speed **strictly
+    decreases every logged frame: `1.183333 -> 0.366666 -> 0.000000`**, `x`
+    stalling at exactly **`1.758418`** from frame 70 onward -- and stays at
+    `horizontalSpeed = 0.000000`, `x = 1.758418` on every one of the
+    remaining 9 logged checkpoints through frame 160 (90 further simulated
+    frames), never resuming motion or reversing direction. Zero `[ERROR]`
+    lines logged.
+  - Screenshots at three fixed wall-clock offsets in the same run (`xwd` +
+    `convert`, same mechanism `tools/run_headless.sh` itself uses,
+    triggered at fixed delays instead of its own content-stabilized
+    polling so each one lands at a specific point along the trajectory):
+    **3s in** (still airborne, `y` well above rest) -- `falling_cube` is not
+    yet visible, identical to every prior phase's "still above the framed
+    view" baseline. **8s in** (just landed and still mid-slide per the log
+    above) -- a green/orange-checkered cube is now clearly visible resting
+    beside the platform, next to the red PBR sphere. **14s in** (long after
+    the log shows `horizontalSpeed` reached exactly `0.0`) -- the SAME
+    checkered cube, in the SAME position as the 8s screenshot, pixel-for-
+    pixel indistinguishable placement -- visual confirmation that it
+    actually stopped and stayed stopped, rather than having merely slowed
+    down and continued drifting off-frame.
+- **Deliberately NOT done this phase** (documented, not an oversight):
+  - **No entity-vs-entity collision.** Still completely out of scope, same
+    as every phase since 8e -- this phase's friction and terminal-velocity
+    clamp are both still purely PER-ENTITY computations (`RigidBody`'s own
+    velocity against a fixed ground plane), nothing about one entity
+    reasoning about another.
+  - **No bounce/restitution.** An object hitting the ground still snaps to
+    rest and zeroes `velocity.y` exactly as it always has -- confirmed
+    unchanged by every pre-existing `physics_test.cpp` case above still
+    passing byte-for-byte. This phase only ever touches horizontal
+    velocity in the ground-resting branch and the vertical clamp before
+    integration; the landing/rest resolution itself is untouched.
+  - **No air resistance modeled as a continuous, speed-dependent drag
+    force.** `kTerminalFallSpeed` is a hard clamp precisely because a real
+    drag force (proportional to velocity or velocity-squared, requiring its
+    own coefficient, its own per-step force computation, and interacting
+    with gravity as a second real force rather than a simple ceiling) is
+    real, separate, substantially larger scope than this phase's own "fix
+    the two most obviously-missing behaviors" brief calls for. A clamp
+    achieves the externally-visible property that matters (falls don't
+    accelerate to absurd speeds) with none of that complexity.
+  - **No mass field.** Neither new constant needs one: `kGroundFriction`
+    (a deceleration rate, like `kGravityAcceleration`) and
+    `kTerminalFallSpeed` (a flat ceiling) both apply identically regardless
+    of an entity's own "weight" -- there still isn't a single place in this
+    engine that would ever read a mass field if one existed, the same
+    "speculative, nothing-consumes-it field this codebase's own established
+    style avoids" `RigidBody`'s own header comment already documents.
+- **Verify.** A full clean rebuild (`-DCMAKE_BUILD_TYPE=Debug`, matching
+  this project's own real convention, from scratch) produced **zero
+  warnings** from any engine source file, `physics.cpp`/`application.cpp`
+  included. `ctest` reports **14/14 passing** -- the same 14 targets Phase
+  18b's own baseline lists, `physics_test` now carrying six additional
+  Phase 18c cases (13 total) alongside its seven pre-existing ones,
+  unmodified. The headless run above logged zero `[ERROR]` lines across
+  170 simulated frames and produced three screenshots, actually inspected
+  (not just captured) -- confirming the checkered cube's absence, sudden
+  appearance after landing, and then static, unchanging position across a
+  6-second gap once friction has run its course.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
