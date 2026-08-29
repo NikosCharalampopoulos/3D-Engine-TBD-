@@ -45,6 +45,16 @@
 // ImGui::Begin()/End() with a single ImGui::TextWrapped() placeholder line
 // inside, exactly as Phase 14a left them.
 //
+// Phase 17c update: the Viewport panel now DOES have a toolbar row
+// (renderViewportToolbar(), editor_ui.cpp) -- but "Play/Pause/Restart" is
+// still an accurate description of what it does NOT provide: its Play/
+// Pause buttons (and its grid/undo buttons) are shown, matching a reference
+// mockup, but BeginDisabled()'d -- this engine still has no real
+// play/pause/restart simulation-state concept anywhere, only two of the
+// toolbar's six buttons (lighting/texture-mode) are genuinely wired to
+// real, working Application state. See README.md's own Phase 17c section
+// for the full honest breakdown of which is which and why.
+//
 // Phase 14c: the Viewport panel is no longer placeholder text -- it now
 // displays Application's own viewport-sized render target via
 // ImGui::Image() (see renderDockspaceShell()'s new parameter below and
@@ -497,12 +507,37 @@ public:
     // what owns window_/camera_, so, like every other out-parameter this
     // method already has, this only ever reports the user's intent for
     // Application to act on right after this call returns.
+    // Phase 17c: two more trailing parameters, both plain `bool&` -- the
+    // Viewport panel's own new toolbar row (editor_ui.cpp's own
+    // renderViewportToolbar()) reads/writes them directly, exactly the same
+    // "EditorUI mutates Application's own state through a reference, no
+    // getter/setter round-trip" shape `selectedEntity`/`cameraCaptureRequested`
+    // above already use. `ssaoDisabled`/`ssaoDebugMode` are Application's own
+    // ssaoDisabled_/ssaoDebugMode_ (application.hpp, Phase 13f) -- the SAME
+    // two members the F1 debug overlay's own "Render Passes" checkboxes
+    // already bind by address (Application::renderDebugUI(),
+    // application.cpp), now ALSO toggleable from this second, always-visible
+    // toolbar surface. Unlike `cameraCaptured`/`cameraCaptureRequested`
+    // above (a read-only snapshot plus a separate "what was requested"
+    // out-flag, because Application needs to gate window_/camera_ state
+    // changes on its own side of the render()/run() boundary -- see that
+    // pair's own Phase 16 comment), these two need no such split: EditorUI
+    // performing the toggle immediately, in place, is already the entire
+    // effect a click on either button has (Application::render() re-reads
+    // them next frame exactly the way it already re-reads them after the F1
+    // overlay's own Checkbox() calls -- see application.cpp's own Phase 8c
+    // comment on why those were already "live-toggleable with no further
+    // plumbing"). `editor_icons.hpp`'s own ToolbarButton/
+    // toolbarButtonIconGlyph() comment records why only these two of the
+    // toolbar's six buttons have a real flag to bind to at all; the other
+    // four (grid/undo/play/pause) are shown but BeginDisabled()'d, needing
+    // no Application state to read/write in the first place.
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity, const SelectionOutline* outline,
                                            std::optional<EntityId> activeDirectionalLight, bool& saveSceneRequested,
                                            std::optional<std::string>& textureAssignRequested,
                                            std::optional<std::string>& assetDropRequested, bool cameraCaptured,
-                                           bool& cameraCaptureRequested);
+                                           bool& cameraCaptureRequested, bool& ssaoDisabled, bool& ssaoDebugMode);
 
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()

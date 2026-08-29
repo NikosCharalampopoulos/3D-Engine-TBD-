@@ -296,7 +296,9 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        input_action_map.cpp, physics.cpp, editor_ui.cpp --
                        extended Phase 15f with the Material Inspector's real
                        "Browse..." texture picker, extended again Phase 17a
-                       with applyEditorTheme(),
+                       with applyEditorTheme(), extended again Phase 17c with
+                       the Viewport toolbar row (renderViewportToolbar()/
+                       toolbarIconButton()),
                        light.cpp -- Phase 15a, extended Phase 15b with
                        DirectionalLight/resolveActiveDirectionalLight(),
                        scene_hierarchy.cpp -- Phase 14d, asset_browser.cpp --
@@ -308,7 +310,8 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        Phase 16's new decideCameraCapture(), editor_icons.cpp
                        -- Phase 17b's new sceneNodeIconGlyph()/
                        assetNodeIconGlyph(), the pure GL/ImGui-free half of
-                       icon-font glyph selection)
+                       icon-font glyph selection, extended Phase 17c with
+                       toolbarButtonIconGlyph())
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -340,7 +343,10 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        precedent once more; scene_hierarchy.hpp's own
                        SceneTreeNode also gains four new hasModel/
                        hasPointLight/hasDirectionalLight/hasCamera flags this
-                       phase)
+                       phase; editor_icons.hpp extended Phase 17c with four
+                       more codepoint constants (kIconGrid/kIconUndo/
+                       kIconPlay/kIconPause) plus ToolbarButton/
+                       toolbarButtonIconGlyph())
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -360,7 +366,9 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        15e finally gives it a real in-editor writer, though
                        its own checked-in content is unchanged by this phase),
                        fonts/editor-icons.ttf -- Phase 17b's new hand-subsetted
-                       Font Awesome Free icon font (2,160 bytes, 6 glyphs) +
+                       Font Awesome Free icon font (2,160 bytes, 6 glyphs),
+                       re-subsetted Phase 17c to 2,916 bytes/10 glyphs (four
+                       more codepoints for the new Viewport toolbar row) +
                        LICENSE-font-awesome.txt (its own upstream license text)
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
 tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
@@ -380,8 +388,10 @@ tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
                        material_override_test.cpp (Phase 15f),
                        asset_drop_test.cpp (Phase 15g),
                        camera_capture_test.cpp (Phase 16),
-                       editor_icons_test.cpp (Phase 17b) + its own
-                       CMakeLists.txt (no longer just the Phase 0 placeholder)
+                       editor_icons_test.cpp (Phase 17b, extended Phase 17c
+                       with ToolbarButton/toolbarButtonIconGlyph() coverage)
+                       + its own CMakeLists.txt (no longer just the Phase 0
+                       placeholder)
 ```
 
 A single executable target (`engine_app`) is built for now. A future phase
@@ -6979,6 +6989,298 @@ trees up to it.
     designed glyph, not a corrupt/placeholder one" confirmation, independent
     of the Scene panel's own five.
 
+### Phase 17c: toolbar
+
+The third item in the "Phase 17: visual design" arc, and the first built in
+this arc's own lettered order rather than out of it (17a landed before 17b
+chronologically but after it in letter order, for reasons that phase's own
+section explains; 17c needed no such reordering -- both 17a's theme and
+17b's icon-font infrastructure were already in place). The project owner
+supplied a reference mockup showing a toolbar row docked at the top of the
+Viewport panel: six icon buttons -- a grid toggle, a sun/lighting toggle, an
+image/texture toggle, an undo arrow, and a play button plus a separate
+pause button (shown highlighted/active in teal). This phase builds that
+row.
+
+- **The real problem this phase's own brief named up front: most of these
+  icons have no real, already-built feature behind them.** Before writing
+  a single button, this phase searched the WHOLE codebase (not just
+  recalled prior phases' own summaries) for a viewport ground-plane grid
+  overlay, an edit-history/undo-stack, and a play/pause/restart
+  simulation-state concept. **None of the three exist anywhere in this
+  engine, confirmed directly**: every other hit for "grid" is the unrelated
+  PBR sphere test-grid (Phase 9) or the cluster-light-culling grid (Phase
+  13a) -- a different "grid" entirely, nothing to do with a viewport
+  overlay; "undo"/"redo" turn up nowhere except `transform_hierarchy.hpp`'s
+  own unrelated Phase 14f aside ("there is no 'undo' in this editor" --
+  cited as the REASON Phase 14f chose orphan-to-root over cascading
+  delete, not a feature that exists); "play"/"pause"/"restart" turn up
+  nowhere except `editor_ui.hpp`'s own long-standing Phase 14a comment
+  ("no real inspector..., no Play/Pause/Restart or other toolbar/menu-bar
+  chrome"), which this phase's own header-comment update (below) records as
+  still substantially true. This engine's physics/rendering simply run
+  continuously from the moment `engine_app` starts -- there is no
+  "stopped"/"running" state anywhere to toggle at all.
+- **What IS real: `Application::ssaoDisabled_`/`ssaoDebugMode_` (Phase
+  13f)** -- plain `bool` members `Application::render()` already re-reads
+  every frame, already toggleable from the F1 debug overlay's own "Render
+  Passes" checkboxes (`Application::renderDebugUI()`, Phase 8c/13f: `ImGui::
+  Checkbox("Disable SSAO (ENGINE_SSAO_DISABLE)", &ssaoDisabled_)` and
+  `ImGui::Checkbox("SSAO debug view: raw occlusion buffer",
+  &ssaoDebugMode_)`). Two of this toolbar's six buttons are wired to these
+  exact members -- not a parallel copy of the state, the SAME
+  `Application`-owned `bool`s, now exposed through a SECOND, always-visible
+  UI surface in addition to (not instead of) the F1 overlay:
+  - **The "sun" button -> `ssaoDisabled_`, mapped honestly, not forced.**
+    Screen-space AMBIENT OCCLUSION is fundamentally a LIGHTING technique
+    (it darkens ambient/indirect light in creases and contact points), so a
+    button that toggles it fits the mockup's own "lighting toggle" slot on
+    its own merits, not because it was the only spare flag available.
+    Clicking it flips `ssaoDisabled_`; the button reads "active" (drawn in
+    the accent teal) exactly when SSAO is currently disabled -- the
+    ordinary toggle-button convention of "highlighted = the alternate state
+    is engaged," not "highlighted = the default."
+  - **The "image" button -> `ssaoDebugMode_`, mapped just as honestly.**
+    Toggling it swaps the Viewport panel's own rendered picture between the
+    ordinary shaded scene and `ssaoRaw_`'s raw occlusion buffer shown
+    directly (`postprocess.frag`'s Phase 13f `uSSAODebug` uniform) -- a
+    literal "which IMAGE is on screen" toggle, exactly what an "image/
+    texture toggle" icon should mean, confirmed visually (see Verify below:
+    the whole Viewport genuinely turns into a grayscale ambient-occlusion
+    render when this button is active, not a no-op).
+  - `ssrDisabled_`/`clusterDebugMode_` (the other two Phase 13 render-pass
+    flags) are deliberately NOT wired to a toolbar button this phase --
+    the mockup shows six buttons, not eight, and this phase doesn't grow
+    the row past what the mockup calls for just because more real flags
+    happen to exist. Both stay exactly as toggleable as they already were,
+    via the F1 debug overlay alone.
+- **What is NOT real: grid, undo, play, pause -- shown per the mockup, but
+  `BeginDisabled()`'d with an explanatory tooltip.** The exact same
+  precedent this codebase already established for this exact situation:
+  Phase 14f's own Create-menu `disabledCreateMenuItem()` lambda (no longer
+  in `editor_ui.cpp` -- Phase 15a/15b/15c made all three of its own
+  Point-Light/Directional-Light/Camera items real, one by one -- but this
+  section, like that one, records the honest state at the time it was
+  written) showed "Point Light"/"Directional Light"/"Camera" per an
+  approved mockup while `BeginDisabled()`'ing each with a tooltip
+  explaining exactly what real, separate scope was missing, rather than
+  either half-building a fake feature or silently dropping a menu item the
+  mockup showed. This phase's own `toolbarIconButton()` helper
+  (`editor_ui.cpp`) reproduces that same shape for a plain `ImGui::Button()`
+  instead of a `MenuItem()`: `BeginDisabled()`/`EndDisabled()` around the
+  button, `ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)` (the
+  flag that lets a hover still register on a disabled item at all) gating
+  an `ImGui::SetTooltip()` naming exactly what's missing -- "this engine has
+  no ground-plane grid-drawing code anywhere today," "no edit-history/
+  undo-stack concept," "no play/pause/restart simulation-state concept...
+  physics simply runs continuously once the app starts." Every button, real
+  or disabled, gets a tooltip -- an icon-only row with no visible text
+  label anywhere is exactly the UI shape a tooltip is load-bearing for, not
+  a courtesy reserved for the disabled half.
+- **The pause button is drawn highlighted (accent teal) despite being
+  disabled -- deliberately, matching the mockup's own visual exactly,
+  without pretending that highlight means anything real.** The reference
+  mockup shows Pause, specifically, in the same highlighted state Play/
+  grid/undo are not shown in. This phase reproduces that pixel-level
+  detail (`toolbarIconButton("pause", kIconPause, /*active=*/true,
+  /*enabled=*/false, ...)`) rather than either dropping the mockup's own
+  visual choice or, worse, inventing a real `isPaused_` flag whose only
+  purpose would be to make one screenshot match a picture -- the tooltip
+  text says so explicitly ("shown highlighted to match the reference
+  mockup's own default state, not because this engine actually tracks a
+  paused/running flag").
+- **The active/teal "toggled on" style is read back LIVE from `ImGuiStyle`,
+  not a second hardcoded color literal.** `applyEditorTheme()` (Phase 17a)
+  already sets `ImGuiCol_ButtonActive` to the accent teal, with a comment
+  explicitly calling that role out as "matches the mockup's highlighted/
+  active toolbar button." Rather than declaring a second `kAccentTeal`
+  constant in a second location that could silently drift from the first,
+  `toolbarIconButton()`'s `active=true` path does
+  `ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors
+  [ImGuiCol_ButtonActive])` -- using that entry for precisely the purpose
+  its own Phase 17a comment already named, guaranteed to track any future
+  palette tweak automatically instead of needing a second edit.
+- **Where the row lives, and why it changes a Phase 16 interaction check.**
+  `renderViewportToolbar()` (new, `editor_ui.cpp`'s existing anonymous
+  namespace) is called as the very FIRST thing inside the Viewport panel's
+  `Begin()`/`End()` block (`renderDockspaceShell()`), before the panel's
+  content-region size is captured -- so it reads as chrome docked to the
+  TOP of the 3D view (matching the mockup's own placement: inside/above the
+  viewport, not a separate always-visible top-level bar the way the Phase
+  15e File menu is), and the 3D image below is correctly sized to whatever
+  vertical space is left under it. This is this panel's first-ever content
+  besides the plain `ImGui::Image()` -- which matters for Phase 16's own
+  double-click-to-capture-the-camera check, also in this same block:
+  `ImGui::IsWindowHovered()` answers "is the mouse over this WINDOW," not
+  "over empty space in it," so without a further guard, double-clicking a
+  toolbar BUTTON would ALSO satisfy that check and spuriously request
+  camera capture on top of whatever the button click already did -- a real
+  interaction bug this phase's own research caught before it shipped, not
+  a hypothetical. Fixed with one added condition,
+  `!ImGui::IsAnyItemHovered()` (true exactly when the mouse is over some
+  ImGui item -- a toolbar button included -- false over the plain image
+  backdrop), checked AFTER `renderViewportToolbar()` has already submitted
+  this frame's buttons so it needs no knowledge of the toolbar's own
+  layout/button count to correctly exclude just that row.
+- **The pure half: `ToolbarButton`/`toolbarButtonIconGlyph()`
+  (`editor_icons.hpp`/`.cpp`), tested in isolation.** The same "small,
+  standalone decision, unit-tested with no live GL context/ImGui frame/font
+  atlas at all" shape `sceneNodeIconGlyph()`/`assetNodeIconGlyph()` (Phase
+  17b) already establish -- given one of the toolbar's six buttons (a new
+  `enum class ToolbarButton`), which codepoint does its icon draw.
+  `kLighting`/`kTextureMode` deliberately return `kIconDirectionalLight`/
+  `kIconTexture` verbatim -- the SAME constants a Scene row with a
+  DirectionalLight / an Assets row under `assets/textures/` already draw --
+  rather than a second, visually-near-duplicate "toolbar sun"/"toolbar
+  image" codepoint, so the vendored font subset (below) only needed FOUR
+  new glyphs, not six, for a six-button row. `tests/editor_icons_test.cpp`
+  gained six new assertions (one per `ToolbarButton` enumerator), including
+  two that specifically pin `kLighting`/`kTextureMode` to the REUSED
+  constants -- a future edit that accidentally gave either its own new
+  codepoint instead of reusing the tree-row one would fail exactly those
+  two lines. This is genuinely the only pure logic this phase's own UI
+  wiring has to extract: unlike `sceneNodeIconGlyph()`'s real
+  multi-flag precedence problem, a toolbar button's identity IS its whole
+  input (no combination of "which buttons are present" to resolve between)
+  -- but it's still a real "given X, produce exactly one Y" contract worth
+  isolating from the ImGui-facing code that calls it, the same reasoning
+  Phase 17b's own README section already gives for
+  `assetNodeIconGlyph()`'s simpler, `isDirectory`-first switch.
+- **The icon font: four new codepoints, re-subsetted into the SAME vendored
+  file, from the SAME upstream release.** Phase 17b's own `pyftsubset`
+  command re-run against the identical upstream `fa-solid-900.ttf` (Font
+  Awesome Free 6.7.2, Solid, tag `6.7.2` -- the same file that produced the
+  original six-glyph subset, not a re-download), with four more codepoints
+  added to `--unicodes`:
+  ```
+  python3 -m fontTools.subset fa-solid-900.ttf \
+    --unicodes=F07B,F1B2,F0EB,F185,F030,F03E,F00A,F0E2,F04B,F04C \
+    --glyph-names --layout-features='' --no-hinting --desubroutinize \
+    --output-file=editor-icons.ttf
+  ```
+  `F00A` ("table-cells", the classic grid-of-squares glyph), `F0E2`
+  ("arrow-rotate-left", Font Awesome's own "undo" glyph), `F04B` ("play"),
+  `F04C` ("pause") -- `editor_icons.hpp`'s own new `kIconGrid`/`kIconUndo`/
+  `kIconPlay`/`kIconPause` constants, one each. `F185`/`F03E` (sun/image)
+  were already in the original six-codepoint list and needed no new subset
+  entry at all -- see `ToolbarButton`'s own comment above for why the
+  toolbar reuses them rather than requesting a second copy. The result --
+  checked into `assets/fonts/editor-icons.ttf`, replacing Phase 17b's own
+  2,160-byte file -- is **2,916 bytes, 11 glyphs** (the ten named
+  codepoints plus the mandatory `.notdef`), still a small fraction of the
+  ~426 KB upstream release file. `editor_ui.cpp`'s own `kIconGlyphRanges`
+  array (the `EditorUI` constructor's font-atlas merge, Phase 17b) grew
+  four more one-codepoint `{lo, hi}` pairs, built FROM the same
+  `editor_icons.hpp` constants as before -- exactly the "one more
+  codepoint each time, no rearchitecting the merge mechanism itself" path
+  Phase 17b's own "Deliberately general, not hardcoded to tree rows"
+  section said a future toolbar phase would take.
+  **Verified both ways, not just assumed**: an offline Pillow render of
+  each of the four new codepoints against the freshly-subsetted font
+  confirmed well-formed, correctly-shaped glyphs (a 3x3 grid, a
+  counter-clockwise undo arrow, a play triangle, two pause bars) before
+  this file was ever checked in; a SECOND offline render of the ORIGINAL
+  six codepoints against the SAME freshly-subsetted file confirmed all six
+  still render exactly as before (folder/cube/lightbulb/sun/camera/image,
+  no regressions) -- both checks independent of, and prior to, the
+  in-engine headless screenshot proof below.
+- **Deliberately NOT done this phase** (the same "smallest correct
+  increment" discipline every earlier phase's own list already follows): a
+  real viewport grid overlay, a real undo/redo stack, or real play/pause/
+  restart simulation state (see this section's own opening paragraph for
+  why -- each is genuinely separate, substantial scope, not a corner cut);
+  wiring `ssrDisabled_`/`clusterDebugMode_` to a toolbar button (the
+  mockup shows six buttons, not eight -- see above); the custom window
+  chrome/borderless rounded outer window border (Phase 17d, separate --
+  untouched by this phase, same as 17a/17b's own scope notes already say);
+  and a configurable/rearrangeable toolbar (this is one fixed row in one
+  fixed order, matching this project's own repeated "no speculative
+  configurability nothing asks for" precedent -- Phase 17a's own theme-
+  picker call, Phase 15d's own drag-and-drop call, made the identical
+  judgment for the identical reason).
+- **Verify**: a rebuild (including a forced recompile of every touched
+  file -- `editor_ui.cpp`/`editor_icons.cpp`/`application.cpp`/
+  `editor_icons_test.cpp` -- to rule out a stale cached object hiding a
+  warning) produced **zero new warnings** under `-Wall -Wextra`. `ctest`
+  reports **13/13** -- unchanged from Phase 17b's own baseline count,
+  since `editor_icons_test` (already an existing target) is EXTENDED with
+  six new `ToolbarButton` assertions rather than needing a new target of
+  its own.
+
+  Three `tools/run_headless.sh` runs (`ENGINE_MAX_FRAMES=60`): a plain
+  baseline, one with `ENGINE_SSAO_DISABLE=1`, one with
+  `ENGINE_SSAO_DEBUG=1`. All three logged **zero** `[ERROR]` lines and the
+  same clustered-lighting occupancy every prior phase's own baseline has
+  recorded (2151/2304 clusters occupied, avg 3.576476 lights/occupied
+  cluster -- the same small run-to-run llvmpipe noise Phase 15c's own
+  review already characterized), confirming this phase's changes (a Dear
+  ImGui toolbar plus two direct `bool&` re-bindings of already-existing
+  state) touch nothing in the rendering/lighting pipeline itself beyond
+  the two flags it's honestly documented as touching.
+
+  **How the two real buttons were proven to actually toggle their
+  underlying flag, and why no new `ENGINE_DEBUG_*` var was added for
+  it**: this phase's own brief offered a choice -- add a new debug var to
+  headlessly exercise a real click on a toolbar button, OR rely on the
+  existing `ENGINE_SSAO_DISABLE`/`ENGINE_SSAO_DEBUG` env vars, since they
+  set the EXACT SAME `Application::ssaoDisabled_`/`ssaoDebugMode_` members
+  the toolbar buttons now also read/write. **The second option was taken.**
+  A new debug var simulating a click would only ever prove "this code path,
+  when driven by an env var instead of a mouse, flips the same bool" --
+  strictly weaker evidence than what the existing vars already give: a
+  screenshot with `ENGINE_SSAO_DISABLE=1` set shows the "lighting" toolbar
+  button rendered in the active/teal state (confirmed -- see the crop
+  below), and a screenshot with `ENGINE_SSAO_DEBUG=1` set shows the
+  "texture-mode" button ALSO rendered active/teal AND the entire Viewport
+  panel genuinely showing the raw grayscale SSAO occlusion buffer instead
+  of the normal shaded scene -- direct visual proof that the toolbar's own
+  `active` styling and Application's real rendering behavior are reading
+  the identical underlying state, without needing to fabricate a mouse
+  click at all. (This engine's headless harness genuinely has no way to
+  simulate an actual mouse click on an ImGui widget -- the same honest
+  limitation Phase 17a's own Verify section already recorded for the
+  Create-menu/Material "Browse..." popups.)
+
+  Inspected as screenshots, all three confirming real glyphs render (not
+  tofu/missing-glyph boxes) at their correct positions, left to right
+  exactly matching the mockup's own ordering:
+  - **Baseline**: grid (3x3 squares), sun/lighting (a sunburst, NOT
+    highlighted -- SSAO on, the default), image/texture-mode (a picture
+    icon, NOT highlighted -- SSAO debug view off, the default), undo (a
+    counter-clockwise arrow), play (a triangle), pause (two vertical bars,
+    highlighted teal per the mockup's own visual -- see this section's own
+    "pause button" paragraph above for why that's still `BeginDisabled()`'d
+    despite the highlight).
+  - **`ENGINE_SSAO_DISABLE=1`**: identical row, except the "lighting"
+    button is now ALSO rendered highlighted/teal -- the toolbar's own
+    active-state read of `ssaoDisabled_` tracking the env-var-set value
+    correctly.
+  - **`ENGINE_SSAO_DEBUG=1`**: identical row, except the "texture-mode"
+    button is now ALSO rendered highlighted/teal, and (see above) the
+    Viewport's own rendered picture is visibly the raw occlusion buffer,
+    not the normal scene -- both the toolbar's own active-state read AND
+    the real rendering effect confirmed from the SAME screenshot.
+
+  The four disabled buttons (grid/undo/play/pause) render visibly dimmed
+  relative to the two real, enabled buttons in every screenshot -- Dear
+  ImGui's own `BeginDisabled()` contract (a `style.DisabledAlpha`,
+  default 0.60, multiplier applied to every color an item under it draws
+  with) applied automatically, the identical mechanism Phase 14f's own
+  Point-Light/Directional-Light/Camera items rendered dimmed with before
+  Phase 15a/15b/15c made each real in turn. **One honest caveat, the same
+  shape as Phase 17a's own popup caveat**: this headless harness has no
+  cursor to hover with, so the disabled buttons' own tooltip TEXT was
+  never itself captured in a screenshot -- what IS verified is that the
+  code path producing it (`BeginDisabled()` +
+  `IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)` +
+  `SetTooltip()`) is the exact, already-proven-correct pattern this
+  codebase's own Phase 14f Create-menu items used for two full phases
+  (15a/15b's own build) before anyone could interactively confirm THEIR
+  tooltips either, and that every disabled button's own `enabled=false`
+  genuinely prevents `ImGui::Button()` from ever reporting a click (Dear
+  ImGui's own documented `BeginDisabled()` contract, not a second guard
+  this phase's own code adds on top).
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -6990,7 +7292,7 @@ trees up to it.
 | **Assimp** | CMake `FetchContent` (git, tag `v5.4.3`) | De facto standard asset-import library; loads Phase 5's OBJ/glTF scenes via one well-known API instead of hand-rolling per-format parsers. Importer scope narrowed to just OBJ + glTF (see "Phase 5" above) to keep build time/scope down. |
 | **nlohmann/json** | CMake `FetchContent` (git, tag `v3.11.3`) | Single-header, MIT-licensed JSON library; Phase 8b's scene file format (see "Phase 8b" above) -- fetched the same way as GLFW/GLM/Assimp (an ordinary tagged git dependency), not hand-vendored like GLAD/stb_image below (see "Phase 8b"'s own writeup on why that precedent doesn't apply to a JSON library). |
 | **Dear ImGui** | CMake `FetchContent` (git, tag `v1.92.9b`), built as a first-party `imgui` static library target (see "Phase 8c" above) | Phase 8c's debug overlay (entity inspector, render-pass toggles, frame stats) -- the de facto standard immediate-mode debug UI library for real-time engines/tools; ships no CMake build of its own by design, so this project compiles its core sources + GLFW/OpenGL3 backend files directly, the same "small first-party target" shape `glad` below already uses. |
-| **Font Awesome Free 6.7.2 (Solid)** | Vendored, hand-subsetted to 6 glyphs (2,160 bytes) in `assets/fonts/editor-icons.ttf`, from an offline-downloaded upstream release file (see "Phase 17b" above) | Scene Hierarchy/Assets Browser row icons (folder/mesh/point-light/directional-light/camera/texture) -- OFL 1.1 licensed (fonts), permissive/redistribution-friendly; vendored rather than `FetchContent`'d since the upstream repo is large and a subsetting step is needed either way (see "Phase 17b"'s own writeup for the full reasoning). |
+| **Font Awesome Free 6.7.2 (Solid)** | Vendored, hand-subsetted to 10 glyphs (2,916 bytes) in `assets/fonts/editor-icons.ttf`, from the same offline-downloaded upstream release file Phase 17b first subsetted (re-subsetted with 4 more codepoints by Phase 17c -- see that section above) | Scene Hierarchy/Assets Browser row icons (folder/mesh/point-light/directional-light/camera/texture, Phase 17b) plus the Viewport toolbar's own grid/undo/play/pause icons (Phase 17c -- its other two buttons reuse the directional-light/texture glyphs above verbatim) -- OFL 1.1 licensed (fonts), permissive/redistribution-friendly; vendored rather than `FetchContent`'d since the upstream repo is large and a subsetting step is needed either way (see "Phase 17b"'s own writeup for the full reasoning). |
 
 ### GL loader: why hand-written instead of a generated GLAD
 

@@ -100,6 +100,30 @@ constexpr char32_t kIconDirectionalLight = 0xF185;  // Font Awesome "sun"
 constexpr char32_t kIconCamera = 0xF030;            // Font Awesome "camera"
 constexpr char32_t kIconTexture = 0xF03E;           // Font Awesome "image"
 
+// Phase 17c: four MORE codepoints, added to the SAME vendored subset/atlas
+// exactly the way this header's own "Deliberately general, not hardcoded to
+// tree rows" comment above (Phase 17b) said a future toolbar phase would --
+// one more named char32_t constant each, appended to editor_ui.cpp's own
+// kIconGlyphRanges array, re-subsetted into the SAME assets/fonts/
+// editor-icons.ttf file alongside the original six above (see README.md's
+// own Phase 17c section for the exact re-subsetting command and the
+// before/after glyph-count proof that the original six still render
+// unchanged). These four are for the Viewport toolbar row a reference
+// mockup shows (README.md's own Phase 17c section) -- grid/lighting/
+// texture-mode/undo/play/pause -- but that row only needs FOUR new glyphs,
+// not six: its "lighting" button and its "texture-mode" button reuse
+// kIconDirectionalLight/kIconTexture above VERBATIM (see
+// ToolbarButton/toolbarButtonIconGlyph()'s own comment below for why) rather
+// than vendoring a second, visually near-identical sun/image glyph under a
+// new codepoint for no reason -- the same "don't grow the atlas for a
+// glyph this engine would never draw distinctly" discipline Phase 17b's own
+// header comment above already applied to the full ~1,400-glyph upstream
+// range.
+constexpr char32_t kIconGrid = 0xF00A;   // Font Awesome "table-cells" (classic 2x2/3x3 grid icon)
+constexpr char32_t kIconUndo = 0xF0E2;   // Font Awesome "arrow-rotate-left" (the family's "undo" glyph)
+constexpr char32_t kIconPlay = 0xF04B;   // Font Awesome "play"
+constexpr char32_t kIconPause = 0xF04C;  // Font Awesome "pause"
+
 // Given one Scene Hierarchy row's own component flags (see
 // scene_hierarchy.hpp's own SceneTreeNode fields -- set once, in
 // buildSceneTree(), from the same registry.getComponent<T>() checks every
@@ -151,6 +175,49 @@ char32_t sceneNodeIconGlyph(bool hasModel, bool hasPointLight, bool hasDirection
 // asset_browser.cpp's own unreadable-entry handling already models,
 // applied here instead of an assert/crash.
 char32_t assetNodeIconGlyph(bool isDirectory, AssetDropCategory category);
+
+// Phase 17c: the Viewport toolbar row's six buttons, left-to-right per the
+// reference mockup (README.md's own Phase 17c section) -- a grid toggle, a
+// lighting toggle, a texture-mode toggle, an undo button, and a play/pause
+// pair. Named as an enum (not six separate bool parameters the way
+// sceneNodeIconGlyph() above takes flags) because, unlike a Scene row's
+// component flags, a toolbar button's identity IS the whole input -- there
+// is no combination of "which buttons are present" to resolve precedence
+// between, just "given this ONE button, which glyph." kNone deliberately
+// does not exist: every toolbar button this engine draws names itself here
+// explicitly, so a future button added to the row without also adding an
+// enumerator here fails to compile at its own toolbarButtonIconGlyph() call
+// site instead of silently drawing a leftover/wrong glyph.
+enum class ToolbarButton {
+    kGrid,
+    kLighting,
+    kTextureMode,
+    kUndo,
+    kPlay,
+    kPause,
+};
+
+// Given one Viewport-toolbar button, returns which codepoint it draws.
+// Exhaustive `switch`, no `default:` -- the identical "let -Wswitch (this
+// project builds with -Wextra) catch a future ToolbarButton enumerator this
+// function forgot to handle" discipline assetNodeIconGlyph() above already
+// establishes, rather than a default case that would silently swallow that
+// mistake.
+//
+// kLighting and kTextureMode deliberately return kIconDirectionalLight/
+// kIconTexture -- the SAME two constants a Scene row with a
+// DirectionalLight/an Assets row under assets/textures/ already draws --
+// not a second, newly-vendored "toolbar sun"/"toolbar image" glyph. Both
+// toolbar concepts really are the identical idea a tree row already uses
+// that glyph for (kLighting toggles screen-space ambient occlusion, a
+// LIGHTING technique -- Application::ssaoDisabled_, see
+// editor_ui.cpp's own Phase 17c comment; kTextureMode toggles showing the
+// raw SSAO occlusion buffer as the Viewport's own rendered picture instead
+// of the normal shaded scene -- Application::ssaoDebugMode_, a literal
+// "swap which IMAGE is on screen" toggle), so reusing the constant is more
+// honest than inventing a visually-near-duplicate second glyph purely so
+// each ToolbarButton enumerator would map to its own unique constant name.
+char32_t toolbarButtonIconGlyph(ToolbarButton button);
 
 }  // namespace engine
 

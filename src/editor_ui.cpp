@@ -1175,6 +1175,174 @@ void applyEditorTheme() {
     style.ItemSpacing   = ImVec2(8.0f, 8.0f);
 }
 
+// Phase 17c: one Viewport-toolbar icon button -- a small shared helper
+// rather than six near-identical ImGui::Button()/BeginDisabled()/
+// SetTooltip() call sites, the same "extract once a widget+tooltip pattern
+// repeats enough to warrant it" instinct Phase 14f's own
+// disabledCreateMenuItem() lambda already established for the Create menu's
+// Point Light/Directional Light/Camera items (that lambda no longer exists
+// in this file -- Phase 15a/15b/15c made all three of its own items real,
+// one by one -- but README.md's own Phase 14f section still records its
+// exact original shape, which this helper's disabled branch below
+// reproduces almost verbatim).
+//
+// `active`: true pushes ImGuiCol_Button to the CURRENT ImGuiStyle's own
+// ImGuiCol_ButtonActive entry -- read back LIVE from ImGuiStyle rather than
+// a second hardcoded accent-teal literal declared here, so this can never
+// silently drift from whatever applyEditorTheme() (above) actually set that
+// role to; applyEditorTheme() itself already documents ImGuiCol_ButtonActive
+// as "matches the mockup's highlighted/active toolbar button" (see this
+// file's own Phase 17a comment), so reading it back is not a repurposing,
+// it's using that entry for precisely the role its own comment already
+// names. false leaves the button its ordinary un-pushed color.
+//
+// `enabled`: false wraps the button in BeginDisabled()/EndDisabled() --
+// this project's own established "shown per the approved mockup, but
+// BeginDisabled()'d with an explanatory tooltip, because the real feature
+// needs separate, larger scope" precedent. ImGuiHoveredFlags_
+// AllowWhenDisabled is what lets IsItemHovered() still report a hover on a
+// disabled item at all -- Dear ImGui's own default HoveredFlags do not, by
+// design, since a disabled item is not normally meant to respond to the
+// mouse in any way, tooltip included.
+//
+// `tooltip` is shown on hover either way, enabled or disabled -- an
+// icon-only row (no visible text label anywhere) is exactly the kind of UI
+// a tooltip is load-bearing for, not just a courtesy for the disabled
+// half.
+//
+// Returns true the one frame this button was actually clicked. Always
+// false while `enabled` is false -- BeginDisabled() itself already makes
+// Button() report no click for a disabled item (Dear ImGui's own
+// contract), not a second guard this helper adds on top.
+bool toolbarIconButton(const char* strId, char32_t glyph, bool active, bool enabled, const char* tooltip) {
+    const std::string label = iconGlyphUtf8(glyph) + "##" + strId;
+
+    if (active) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+    }
+    if (!enabled) {
+        ImGui::BeginDisabled();
+    }
+    const bool clicked = ImGui::Button(label.c_str());
+    if (!enabled) {
+        ImGui::EndDisabled();
+    }
+    if (active) {
+        ImGui::PopStyleColor();
+    }
+
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tooltip);
+    }
+
+    return clicked;
+}
+
+// Phase 17c: the Viewport panel's own toolbar row -- six icon buttons
+// (grid/lighting/texture-mode/undo/play/pause, left-to-right per the
+// reference mockup -- see README.md's own Phase 17c section), called as the
+// very first thing inside the Viewport panel's Begin()/End() block (see
+// renderDockspaceShell() below), so it reads as chrome docked to the TOP of
+// the 3D view itself -- not a separate always-visible top-level bar the way
+// the File menu (Phase 15e) is.
+//
+// Two of the six are REAL, wired to the exact same Application-owned bool
+// members the F1 debug overlay's own "Render Passes" checkboxes already
+// bind BY ADDRESS (Application::renderDebugUI(), application.cpp) --
+// `ssaoDisabled`/`ssaoDebugMode` arrive here BY REFERENCE from
+// renderDockspaceShell()'s own new parameters of the same name, so a click
+// on either button mutates the identical runtime state the F1 overlay's own
+// checkbox already reads/writes, not a second, parallel copy of it -- the
+// same "EditorUI mutates Application's own state directly through a
+// reference" shape `selectedEntity`/`cameraCaptureRequested` already
+// establish elsewhere in this same function.
+//
+// The other four -- grid, undo, play, pause -- are shown (matching the
+// mockup) but BeginDisabled()'d with an explanatory tooltip: this engine
+// has no viewport ground-plane grid overlay, no undo/redo history, and no
+// play/pause/restart simulation-state concept anywhere today. Verified, not
+// assumed, by a whole-codebase search this phase's own README section
+// records the results of -- every other hit for "grid" is the unrelated PBR
+// sphere test-grid/cluster-culling grid (Phase 9/13a), and "undo"/"play"/
+// "pause" turn up nowhere at all except editor_ui.hpp's own long-standing
+// Phase 14a comment ("no real inspector..., no Play/Pause/Restart or other
+// toolbar/menu-bar chrome") and transform_hierarchy.hpp's unrelated "there
+// is no 'undo' in this editor" aside. Each would be real, separate,
+// substantial scope this phase's own brief explicitly declines to
+// half-build -- the identical judgment call Phase 14f's own Create-menu
+// Point Light/Directional Light/Camera items already made (see README.md's
+// own Phase 14f section).
+//
+// `pause` is additionally drawn in the active/teal state (`active=true`,
+// unconditionally) -- matching the mockup's own pause button, shown
+// highlighted -- while STILL `enabled=false`: this phase reproduces the
+// mockup's visual exactly, without pretending a highlighted-but-inert
+// button means this engine has some real "currently paused" state behind
+// it (it does not -- see above).
+void renderViewportToolbar(bool& ssaoDisabled, bool& ssaoDebugMode) {
+    toolbarIconButton("grid", kIconGrid, /*active=*/false, /*enabled=*/false,
+                       "Viewport grid overlay -- not implemented yet. This engine has no ground-plane "
+                       "grid-drawing code anywhere today; a real one is separate, later scope.");
+
+    ImGui::SameLine();
+    // SSAO is fundamentally a LIGHTING technique (screen-space AMBIENT
+    // OCCLUSION -- it darkens ambient/indirect light in creases and contact
+    // points), so this "sun" button toggling ssaoDisabled is a real
+    // rendering-mode concept honestly mapped to the mockup's own "lighting
+    // toggle" slot, not a cosmetic reuse of the glyph for something
+    // unrelated. `active` reads true when SSAO is currently DISABLED (the
+    // non-default, "you toggled this" state) -- the same "highlighted = the
+    // alternate state is currently engaged" reading a toggle button
+    // ordinarily has, not "highlighted = the normal default."
+    if (toolbarIconButton(
+            "lighting", kIconDirectionalLight, /*active=*/ssaoDisabled, /*enabled=*/true,
+            ssaoDisabled
+                ? "Lighting: SSAO disabled (click to re-enable ambient occlusion). Same "
+                  "Application::ssaoDisabled_ the F1 debug overlay's \"Disable SSAO\" checkbox already controls."
+                : "Lighting: SSAO enabled (click to disable ambient occlusion). Same Application::ssaoDisabled_ "
+                  "the F1 debug overlay's \"Disable SSAO\" checkbox already controls.")) {
+        ssaoDisabled = !ssaoDisabled;
+    }
+
+    ImGui::SameLine();
+    // The "image/texture-mode" slot maps to ssaoDebugMode -- toggling it
+    // swaps the Viewport's own rendered picture between the ordinary shaded
+    // scene and the raw SSAO occlusion buffer shown directly
+    // (postprocess.frag's own Phase 13f uSSAODebug uniform, application.cpp)
+    // -- a literal "which IMAGE is the Viewport showing" toggle, honestly
+    // mapped rather than forced.
+    if (toolbarIconButton(
+            "texturemode", kIconTexture, /*active=*/ssaoDebugMode, /*enabled=*/true,
+            ssaoDebugMode
+                ? "Texture mode: showing the raw SSAO occlusion buffer (click to return to the normal shaded "
+                  "view). Same Application::ssaoDebugMode_ the F1 debug overlay's \"SSAO debug view\" checkbox "
+                  "already controls."
+                : "Texture mode: click to show the raw SSAO occlusion buffer instead of the normal shaded view. "
+                  "Same Application::ssaoDebugMode_ the F1 debug overlay's \"SSAO debug view\" checkbox already "
+                  "controls.")) {
+        ssaoDebugMode = !ssaoDebugMode;
+    }
+
+    ImGui::SameLine();
+    toolbarIconButton("undo", kIconUndo, /*active=*/false, /*enabled=*/false,
+                       "Undo -- not implemented yet. This engine has no edit-history/undo-stack concept "
+                       "anywhere today; a real one is separate, later scope.");
+
+    ImGui::SameLine();
+    toolbarIconButton("play", kIconPlay, /*active=*/false, /*enabled=*/false,
+                       "Play -- not implemented yet. This engine has no play/pause/restart simulation-state "
+                       "concept -- physics simply runs continuously once the app starts; a real start/stop "
+                       "concept is separate, later scope.");
+
+    ImGui::SameLine();
+    toolbarIconButton("pause", kIconPause, /*active=*/true, /*enabled=*/false,
+                       "Pause -- not implemented yet (shown highlighted to match the reference mockup's own "
+                       "default state, not because this engine actually tracks a paused/running flag). Same "
+                       "missing simulation-state concept as \"Play\" above.");
+
+    ImGui::Separator();
+}
+
 }  // namespace
 
 EditorUI::EditorUI(GLFWwindow* window) {
@@ -1262,6 +1430,15 @@ EditorUI::EditorUI(GLFWwindow* window) {
     // (c) it keeps this code correct if this project's ImGui version, or
     // rendering backend, ever changes to one where RendererHasTextures is
     // false.
+    // Phase 17c: four more one-codepoint pairs appended below, exactly the
+    // way this array's own Phase 17b comment above anticipated ("a future
+    // phase adds one more named char32_t constant... appends it to
+    // editor_ui.cpp's own kIconGlyphRanges array") -- kIconGrid/kIconUndo/
+    // kIconPlay/kIconPause, for the new Viewport toolbar row
+    // (renderViewportToolbar(), above). No entries added for the toolbar's
+    // "lighting"/"texture-mode" buttons -- they reuse kIconDirectionalLight/
+    // kIconTexture verbatim (see ToolbarButton/toolbarButtonIconGlyph()'s
+    // own editor_icons.hpp comment), both already listed below.
     static constexpr ImWchar kIconGlyphRanges[] = {
         static_cast<ImWchar>(kIconCamera),            static_cast<ImWchar>(kIconCamera),
         static_cast<ImWchar>(kIconTexture),           static_cast<ImWchar>(kIconTexture),
@@ -1269,6 +1446,10 @@ EditorUI::EditorUI(GLFWwindow* window) {
         static_cast<ImWchar>(kIconPointLight),        static_cast<ImWchar>(kIconPointLight),
         static_cast<ImWchar>(kIconDirectionalLight),  static_cast<ImWchar>(kIconDirectionalLight),
         static_cast<ImWchar>(kIconMesh),              static_cast<ImWchar>(kIconMesh),
+        static_cast<ImWchar>(kIconGrid),              static_cast<ImWchar>(kIconGrid),
+        static_cast<ImWchar>(kIconUndo),              static_cast<ImWchar>(kIconUndo),
+        static_cast<ImWchar>(kIconPlay),              static_cast<ImWchar>(kIconPlay),
+        static_cast<ImWchar>(kIconPause),             static_cast<ImWchar>(kIconPause),
         0,
     };
 
@@ -1381,7 +1562,8 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
                                                  bool& saveSceneRequested,
                                                  std::optional<std::string>& textureAssignRequested,
                                                  std::optional<std::string>& assetDropRequested,
-                                                 bool cameraCaptured, bool& cameraCaptureRequested) {
+                                                 bool cameraCaptured, bool& cameraCaptureRequested,
+                                                 bool& ssaoDisabled, bool& ssaoDebugMode) {
     // Phase 16: the identical "false every frame except the one where the
     // real thing actually happened" reset saveSceneRequested/
     // textureAssignRequested/assetDropRequested below already follow.
@@ -1528,6 +1710,16 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
 
     ImGui::Begin("Viewport");
     {
+        // Phase 17c: the toolbar row -- drawn FIRST, before anything else
+        // this panel submits, so it reads as chrome docked to the TOP of
+        // the 3D view (see renderViewportToolbar()'s own header comment
+        // above for what each of its six buttons does/why). Its own
+        // ImGui::Button() calls are this Viewport panel's first-ever
+        // widgets besides the plain ImGui::Image() below -- see the
+        // `!ImGui::IsAnyItemHovered()` addition to the double-click check
+        // just below for the one interaction consequence that has.
+        renderViewportToolbar(ssaoDisabled, ssaoDebugMode);
+
         // Phase 16: the camera-capture trigger -- a double-click anywhere in
         // this panel's own content region, gated to only fire while NOT
         // already captured (see this class's own renderDockspaceShell()
@@ -1550,7 +1742,29 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // to it doesn't matter for correctness, but checking it first here
         // keeps this whole block read top-to-bottom as "first, did the user
         // just ask to start flying; then, draw what they're flying over."
-        if (!cameraCaptured && ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        //
+        // Phase 17c: `!ImGui::IsAnyItemHovered()` is new -- before this
+        // phase, the Viewport panel's only content was the plain
+        // ImGui::Image() below (never itself double-clickable as a
+        // "control," just the backdrop this check treats as "empty
+        // space"), so there was no widget a double-click COULD land on
+        // besides that backdrop. The toolbar above changes that: without
+        // this guard, double-clicking a toolbar BUTTON would satisfy
+        // IsWindowHovered() exactly the same as double-clicking empty
+        // viewport space would (IsWindowHovered() answers "is the mouse
+        // over this WINDOW," not "over empty space in it" -- see this
+        // comment's own note above), spuriously ALSO requesting camera
+        // capture on top of whatever that button click already did.
+        // IsAnyItemHovered() reports whether Dear ImGui currently considers
+        // ANY item hovered (imgui.cpp's own definition:
+        // `g.HoveredId != 0`), which is true for a toolbar button the mouse
+        // is over and false over the plain image backdrop -- reading it
+        // here, AFTER renderViewportToolbar() has already submitted this
+        // frame's buttons, correctly excludes exactly the toolbar's own
+        // row without needing this check to know anything about the
+        // toolbar's specific layout/button count.
+        if (!cameraCaptured && !ImGui::IsAnyItemHovered() && ImGui::IsWindowHovered() &&
+            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             cameraCaptureRequested = true;
         }
 

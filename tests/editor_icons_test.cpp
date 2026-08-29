@@ -8,6 +8,10 @@
 // literal test inputs below -- nothing here calls that function itself) and
 // needs no live GL context/GPU/Dear ImGui frame/font atlas whatsoever.
 //
+// Phase 17c: extended with toolbarButtonIconGlyph() coverage (bottom of this
+// file) -- the Viewport toolbar row's own pure glyph-selection function,
+// same isolation, same zero new dependency.
+//
 // This is exactly "given a Scene Hierarchy row's component flags, or an
 // Assets Browser row's directory-ness + category, which one codepoint
 // should its icon draw" -- the whole pure half of this phase's design --
@@ -74,6 +78,26 @@ int main() {
     // directory row gets, rather than an assert/crash on an input that
     // should be impossible.
     assert(assetNodeIconGlyph(false, AssetDropCategory::kUnrecognized) == engine::kIconFolder);
+
+    // --- toolbarButtonIconGlyph() (Phase 17c) -------------------------------
+
+    using engine::ToolbarButton;
+    using engine::toolbarButtonIconGlyph;
+
+    // The four genuinely-new-this-phase glyphs.
+    assert(toolbarButtonIconGlyph(ToolbarButton::kGrid) == engine::kIconGrid);
+    assert(toolbarButtonIconGlyph(ToolbarButton::kUndo) == engine::kIconUndo);
+    assert(toolbarButtonIconGlyph(ToolbarButton::kPlay) == engine::kIconPlay);
+    assert(toolbarButtonIconGlyph(ToolbarButton::kPause) == engine::kIconPause);
+
+    // kLighting/kTextureMode deliberately reuse the SAME constants a Scene
+    // row with a DirectionalLight / an Assets row under assets/textures/
+    // already draws -- see this function's own header comment for why. A
+    // future edit that accidentally gave either of these its own new
+    // constant instead of reusing kIconDirectionalLight/kIconTexture would
+    // fail exactly these two lines.
+    assert(toolbarButtonIconGlyph(ToolbarButton::kLighting) == engine::kIconDirectionalLight);
+    assert(toolbarButtonIconGlyph(ToolbarButton::kTextureMode) == engine::kIconTexture);
 
     std::cout << "editor_icons_test: all checks passed" << std::endl;
     return 0;

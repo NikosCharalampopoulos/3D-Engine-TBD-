@@ -5,6 +5,10 @@
 // asset_drop.cpp already has for the identical reason: tests/
 // editor_icons_test.cpp links this file (plus asset_drop.cpp, for
 // AssetDropCategory) alone.
+//
+// Phase 17c: toolbarButtonIconGlyph() (bottom of this file) is the identical
+// shape, added for the Viewport toolbar row's own icon selection -- still no
+// new dependency (ToolbarButton is defined in this same header).
 
 #include "engine/editor_icons.hpp"
 
@@ -48,6 +52,27 @@ char32_t assetNodeIconGlyph(bool isDirectory, AssetDropCategory category) {
             return kIconFolder;
     }
     return kIconFolder;  // Unreachable: every enumerator is handled above.
+}
+
+char32_t toolbarButtonIconGlyph(ToolbarButton button) {
+    // See this function's own header comment for why kLighting/kTextureMode
+    // return the SAME constants a Scene/Assets tree row already draws,
+    // rather than a second, newly-vendored glyph.
+    switch (button) {
+        case ToolbarButton::kGrid:
+            return kIconGrid;
+        case ToolbarButton::kLighting:
+            return kIconDirectionalLight;
+        case ToolbarButton::kTextureMode:
+            return kIconTexture;
+        case ToolbarButton::kUndo:
+            return kIconUndo;
+        case ToolbarButton::kPlay:
+            return kIconPlay;
+        case ToolbarButton::kPause:
+            return kIconPause;
+    }
+    return kIconGrid;  // Unreachable: every enumerator is handled above.
 }
 
 }  // namespace engine

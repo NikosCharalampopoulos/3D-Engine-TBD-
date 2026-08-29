@@ -3467,10 +3467,21 @@ void Application::render() {
     // rather than being handled in this same call the way
     // saveSceneRequested/textureAssignRequested/assetDropRequested are.
     bool cameraCaptureRequested = false;
+    // Phase 17c: `ssaoDisabled_`/`ssaoDebugMode_` passed by reference below
+    // -- the Viewport panel's own new toolbar row (editor_ui.cpp's
+    // renderViewportToolbar()) reads/writes these two members directly, the
+    // SAME state renderDebugUI()'s own F1-overlay "Render Passes" checkboxes
+    // already bind by address (see this method's own Phase 8c comment) --
+    // not a second, parallel toggle that could disagree with the debug
+    // overlay's. See editor_ui.hpp's own Phase 17c comment on
+    // renderDockspaceShell() for why these two, specifically, are passed
+    // straight through rather than routed via an out-parameter-plus-later-
+    // handling pair the way saveSceneRequested/textureAssignRequested above
+    // are.
     const CreateEntityKind createRequest = editorUI_.renderDockspaceShell(
         viewportColorFramebuffer_.colorTextureId(), registry_, selectedEntity_, hasOutline ? &outline : nullptr,
         activeDirectionalLight_, saveSceneRequested, textureAssignRequested, assetDropRequested, cameraCaptured_,
-        cameraCaptureRequested);
+        cameraCaptureRequested, ssaoDisabled_, ssaoDebugMode_);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
     }
