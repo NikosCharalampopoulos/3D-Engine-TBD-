@@ -960,6 +960,221 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
     }
 }
 
+// Phase 17a: the first item in the "Phase 17: visual design" arc's own
+// LETTERED order to actually build (Phase 17b's icon font landed first, out
+// of order, per that phase's own README section -- see this project's
+// established "document the out-of-order landing, don't pretend it happened
+// in sequence" precedent, e.g. Phase 15e's schema note). This phase is
+// EXPLICITLY scoped to ImGui's own internal panel styling only -- the color
+// palette, corner rounding, border treatment, and spacing every ImGui::
+// Begin()'d panel/popup picks up automatically because ImGuiStyle is one
+// global struct, not per-window state. It does NOT touch: the OS window's
+// own title bar/border (that is borderless-window platform work, a much
+// bigger separate Phase 17d), the toolbar row (Phase 17c, reuses this
+// phase's colors once it exists), or any panel's actual rendering logic
+// (renderInspectorPanel() etc. above are all completely unchanged by this
+// function -- they inherit new colors purely because ImGui::Text()/
+// ImGui::Button()/etc. always read the CURRENT ImGuiStyle, never a value
+// baked in at the call site).
+//
+// Base + override, not "every ImGuiCol_ from scratch": ImGui::
+// StyleColorsDark() (called immediately before this function, in EditorUI's
+// constructor below) already gives every one of ImGuiStyle's ~50 Colors[]
+// entries a coherent, battle-tested dark-theme value. Re-deriving all of
+// them by hand here would both be far more code than this phase's actual
+// visual delta justifies, and risk silently drifting some entry this phase
+// never intended to touch. So this function runs strictly AFTER
+// StyleColorsDark() and only overrides the specific entries that need to
+// shift toward the reference mockup's dark/teal look; everything else
+// (Text, PlotLines/PlotHistogram -- this engine draws no ImGui plots,
+// Table* -- no ImGui tables anywhere in this codebase, TreeLines -- this
+// engine's TreeNodeEx() calls never pass ImGuiTreeNodeFlags_DrawLines*,
+// NavWindowing*/UnsavedMarker -- no multi-viewport Ctrl+Tab switcher or
+// unsaved-document markers exist here) is left exactly as StyleColorsDark()
+// set it, deliberately, rather than touched for its own sake.
+//
+// The one accent color, and where it came from: every "this is the
+// highlighted/active thing" role below (a pressed button, a selected tree
+// row, an active slider grab, a focused tab, a drag-drop target...) reuses
+// the SAME teal, `kAccentTeal` below, rather than inventing a slightly
+// different teal per widget family the way an unsystematic pass easily
+// could. Its exact value -- RGB(45, 195, 178), hex #2DC3B2 -- was picked by
+// sampling the reference mockup image directly (a small Python/Pillow
+// script averaging a clean, JPEG-artifact-free patch of the mockup's
+// "Use Gravity" toggle-on knob, the single most saturated, least
+// gradient-blended teal swatch anywhere in that image -- the app-icon
+// square and the toolbar's highlighted button are both visibly the same
+// hue but rendered with a gradient/lower saturation that would have made a
+// noisier reference point). `kAccentTealMuted` below is a SECOND directly-
+// sampled value, not a formula-derived tint: it is the mockup's own
+// selected-Scene-row background (`falling_cube`, RGB(28, 52, 54)) sampled
+// the same way, used verbatim for `ImGuiCol_Header`/`ImGuiCol_TabSelected`
+// (Dear ImGui's real "this row/tab is the selected one, at rest" colors --
+// see imgui.h's own ImGuiCol_ enum comments) precisely because that IS what
+// produced this exact pixel value in the mockup in the first place.
+// Hover/active variants of both are DERIVED (linear lerp toward white/black
+// by a fixed 15%) rather than independently eyeballed, so a hover state can
+// never accidentally end up a visibly different hue from the color it is
+// hovering over.
+//
+// Honest caveat this function's own README.md section (Phase 17a) repeats:
+// this container's screenshot capture is software-rendered/llvmpipe, lower
+// fidelity than the project owner's real Windows/GPU-accelerated build --
+// close-to, not pixel-identical-to, the mockup is the actual bar this
+// function is held to.
+void applyEditorTheme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* colors = style.Colors;
+
+    // The one accent teal, in its four roles (see header comment above).
+    // Values are plain 0..1 floats (ImVec4's own convention -- imgui.h),
+    // not 0..255 ints, so each is annotated with the 0..255 value it maps
+    // from/to for anyone cross-checking against the mockup with a color
+    // picker later.
+    constexpr ImVec4 kAccentTeal        (0.176f, 0.765f, 0.698f, 1.00f);  // #2DC3B2 (45,195,178) - sampled
+    constexpr ImVec4 kAccentTealHovered (0.300f, 0.800f, 0.740f, 1.00f);  // kAccentTeal lerped 15% toward white
+    constexpr ImVec4 kAccentTealActive  (0.150f, 0.650f, 0.590f, 1.00f);  // kAccentTeal lerped 15% toward black
+    constexpr ImVec4 kAccentTealMuted       (0.110f, 0.204f, 0.212f, 1.00f);  // #1C3436 (28,52,54) - sampled (mockup's own selected-row bg)
+    constexpr ImVec4 kAccentTealMutedHovered(0.140f, 0.280f, 0.290f, 1.00f);  // a lighter hover shade of kAccentTealMuted --
+                                                                              // eyeballed, not a strict 15% lerp like
+                                                                              // kAccentTealHovered/kAccentTealActive above
+    constexpr ImVec4 kAccentTealMutedActive (0.160f, 0.360f, 0.350f, 1.00f);  // a further step brighter, for the rarer mouse-held-down instant
+
+    // Neutral dark backgrounds -- also sampled from the mockup (a flat
+    // charcoal-navy, not pure black, with a second, slightly darker shade
+    // for the menu bar/status bar/scrollbar track it uses for those
+    // narrower always-on-screen strips).
+    constexpr ImVec4 kBgPanel  (0.094f, 0.106f, 0.141f, 1.00f);  // #181B24 (24,27,36) - sampled panel/window background
+    constexpr ImVec4 kBgSunken (0.059f, 0.071f, 0.090f, 1.00f);  // #0F1217 (15,18,23) - sampled menu-bar/status-bar background
+    constexpr ImVec4 kBgField          (0.130f, 0.150f, 0.180f, 1.00f);  // one step lighter than kBgPanel -- reads as a distinct input box
+    constexpr ImVec4 kBgFieldHovered   (0.160f, 0.200f, 0.220f, 1.00f);
+    constexpr ImVec4 kBgControl        (0.160f, 0.190f, 0.220f, 1.00f);  // ordinary (non-accented) button/control resting color
+    constexpr ImVec4 kBgControlHovered (0.220f, 0.260f, 0.290f, 1.00f);
+    constexpr ImVec4 kBorderSubtle(0.250f, 0.280f, 0.320f, 0.50f);  // low-alpha separator/border line, not a hard edge
+
+    colors[ImGuiCol_Text]         = ImVec4(0.86f, 0.87f, 0.89f, 1.00f);  // off-white, not pure white -- matches the mockup's label color
+    colors[ImGuiCol_TextDisabled] = ImVec4(0.45f, 0.47f, 0.50f, 1.00f);
+    colors[ImGuiCol_TextLink]     = kAccentTeal;  // no hyperlink text exists in this engine today, but stays consistent if one ever does
+
+    colors[ImGuiCol_WindowBg] = kBgPanel;
+    colors[ImGuiCol_ChildBg]  = kBgPanel;  // flat -- children (e.g. the texture-picker popup's scroll list) don't visually nest a shade darker
+    colors[ImGuiCol_PopupBg]  = ImVec4(0.086f, 0.098f, 0.129f, 0.98f);  // a touch darker + near-opaque so a floating popup reads as "above" its panel
+
+    colors[ImGuiCol_Border]       = kBorderSubtle;
+    colors[ImGuiCol_TitleBg]          = kBgSunken;
+    colors[ImGuiCol_TitleBgActive]    = kBgSunken;  // this engine's dockspace has no un-focused-vs-focused title distinction worth drawing differently
+    colors[ImGuiCol_TitleBgCollapsed] = ImVec4(kBgSunken.x, kBgSunken.y, kBgSunken.z, 0.75f);
+    colors[ImGuiCol_MenuBarBg]        = kBgSunken;
+
+    colors[ImGuiCol_FrameBg]        = kBgField;
+    colors[ImGuiCol_FrameBgHovered] = kBgFieldHovered;
+    colors[ImGuiCol_FrameBgActive]  = kAccentTealMuted;  // a field being actively dragged/typed into picks up the accent, not just a brighter neutral
+
+    colors[ImGuiCol_ScrollbarBg]          = kBgSunken;
+    colors[ImGuiCol_ScrollbarGrab]        = kBgControlHovered;
+    colors[ImGuiCol_ScrollbarGrabHovered] = kAccentTealMuted;
+    colors[ImGuiCol_ScrollbarGrabActive]  = kAccentTeal;
+
+    colors[ImGuiCol_CheckMark]          = kAccentTeal;
+    colors[ImGuiCol_CheckboxSelectedBg] = kAccentTealMuted;  // closest real Dear ImGui state to the mockup's teal-filled toggle switch (see Physics panel's Checkbox() calls) -- a real custom toggle-switch widget is not this phase's scope
+    colors[ImGuiCol_SliderGrab]         = kAccentTealActive;  // resting grab: accent dimmed a step, so it doesn't fight the full-brightness Active state below
+    colors[ImGuiCol_SliderGrabActive]   = kAccentTealHovered;  // brighter than resting while the grab is actually being dragged -- the clearest "you're mid-drag" cue
+
+    colors[ImGuiCol_Button]       = kBgControl;
+    colors[ImGuiCol_ButtonHovered] = kBgControlHovered;
+    colors[ImGuiCol_ButtonActive]  = kAccentTeal;  // this phase's brief calls this one out explicitly -- matches the mockup's highlighted/active toolbar button
+
+    // Header* drives CollapsingHeader/TreeNode/Selectable/MenuItem -- in
+    // particular, a SELECTED-but-not-hovered Scene/Assets tree row (the
+    // common case: mouse elsewhere, one entity selected) draws with plain
+    // ImGuiCol_Header, exactly the mockup's own `falling_cube` row this
+    // function's own kAccentTealMuted was sampled FROM -- so this one line
+    // reproduces that pixel, not just something close to it.
+    colors[ImGuiCol_Header]        = kAccentTealMuted;
+    colors[ImGuiCol_HeaderHovered] = kAccentTealMutedHovered;
+    colors[ImGuiCol_HeaderActive]  = kAccentTealMutedActive;
+
+    colors[ImGuiCol_Separator]        = kBorderSubtle;
+    colors[ImGuiCol_SeparatorHovered] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.60f);
+    colors[ImGuiCol_SeparatorActive]  = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.90f);
+
+    colors[ImGuiCol_ResizeGrip]        = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.25f);
+    colors[ImGuiCol_ResizeGripHovered] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.55f);
+    colors[ImGuiCol_ResizeGripActive]  = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.85f);
+
+    // Tab* mirrors the Header* family's own reasoning one level up (a docked
+    // panel sharing a dock node with another one, e.g. if a future run ever
+    // tab-groups two of Scene/Assets/Viewport/Inspector): unselected tabs
+    // stay a plain dark neutral, the selected tab picks up the same sampled
+    // muted teal a selected TREE ROW uses, and TabSelectedOverline -- a thin
+    // top-edge accent line Dear ImGui draws only on the focused, selected
+    // tab -- gets the FULL bright accent, a small but real place a
+    // full-saturation teal ends up visible even though this phase's actual
+    // default layout (buildInitialLayout()) never puts two panels in one
+    // tabbed dock node today.
+    colors[ImGuiCol_Tab]                    = kBgSunken;
+    colors[ImGuiCol_TabHovered]             = kAccentTealMutedHovered;
+    colors[ImGuiCol_TabSelected]            = kAccentTealMuted;
+    colors[ImGuiCol_TabSelectedOverline]    = kAccentTeal;
+    colors[ImGuiCol_TabDimmed]              = kBgSunken;
+    colors[ImGuiCol_TabDimmedSelected]      = kAccentTealMuted;
+    colors[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.60f);
+
+    colors[ImGuiCol_DockingPreview] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.55f);
+    colors[ImGuiCol_DockingEmptyBg] = kBgPanel;
+
+    colors[ImGuiCol_TextSelectedBg] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.35f);
+
+    // Phase 15g's own drag-and-drop (Assets tree -> Viewport) is the one
+    // place this engine already draws these two colors every run that
+    // actually drags an asset -- worth getting right, not leaving at
+    // StyleColorsDark()'s generic yellow-orange.
+    colors[ImGuiCol_DragDropTarget]   = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.90f);
+    colors[ImGuiCol_DragDropTargetBg] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.15f);
+
+    colors[ImGuiCol_NavCursor] = kAccentTeal;  // keyboard/gamepad nav highlight rect -- imgui.h notes ImGuiCol_NavHighlight is just this entry's pre-1.91.4 name
+
+    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);  // StyleColorsDark()'s own default here is a LIGHT gray dim, which would look wrong behind a dark theme's modal popups
+
+    // Rounding: two families, matching the mockup's own visual hierarchy --
+    // a slightly larger radius for "outer container" corners (a whole
+    // panel, a popup) than for "control" corners (a button, an input field,
+    // a scrollbar grab, a tab) sitting inside one, the same size
+    // relationship the mockup's own panels-vs-buttons rounding shows at a
+    // glance. ChildRounding sits between the two: a child region (e.g. the
+    // texture-picker's scrolling list) reads as a sub-panel, not a full
+    // outer window.
+    style.WindowRounding    = 8.0f;
+    style.PopupRounding     = 8.0f;
+    style.ChildRounding     = 6.0f;
+    style.TabRounding       = 6.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.FrameRounding     = 4.0f;
+    style.GrabRounding      = 4.0f;
+
+    // Border treatment: the mockup's panels/input fields read as flat,
+    // borderless shapes distinguished by FILL color (WindowBg vs FrameBg
+    // above), not by a drawn edge -- so windows/children/frames all get
+    // BorderSize 0. Popups are the one exception: PopupBorderSize stays at
+    // its StyleColorsDark() default of 1.0f, a deliberate keep-not-a-miss --
+    // a popup floats OVER a panel with the exact same fill color family
+    // (kBgPanel-ish), so without SOME edge it would have no visible
+    // boundary against whatever panel is behind it. This applies equally to
+    // the Phase 14f Create-menu popup and the Phase 15f Material "Browse..."
+    // popup -- neither's own rendering code needed a single line changed.
+    style.WindowBorderSize = 0.0f;
+    style.ChildBorderSize  = 0.0f;
+    style.FrameBorderSize  = 0.0f;
+
+    // Spacing: a bit more breathing room than StyleColorsDark()'s own
+    // defaults (WindowPadding 8x8, FramePadding 4x3, ItemSpacing 8x4),
+    // matching how much more generously spaced the mockup's own Properties
+    // panel rows/toolbar buttons look next to Dear ImGui's stock density.
+    style.WindowPadding = ImVec2(10.0f, 10.0f);
+    style.FramePadding  = ImVec2(8.0f, 5.0f);
+    style.ItemSpacing   = ImVec2(8.0f, 8.0f);
+}
+
 }  // namespace
 
 EditorUI::EditorUI(GLFWwindow* window) {
@@ -986,6 +1201,17 @@ EditorUI::EditorUI(GLFWwindow* window) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     ImGui::StyleColorsDark();
+
+    // Phase 17a: the dark/teal editor theme (colors + rounding + spacing --
+    // see applyEditorTheme()'s own header comment above for the full "why"
+    // and the mockup-sampled color values). Must run AFTER StyleColorsDark()
+    // (it overrides specific entries on top of that baseline, not instead
+    // of it) and can run at any point before the first ImGui::NewFrame() --
+    // placed immediately after StyleColorsDark() rather than after the font
+    // setup below purely because that keeps every ImGuiStyle-related call in
+    // this constructor contiguous; font atlas configuration and style
+    // configuration are independent of each other either way.
+    applyEditorTheme();
 
     // Phase 17b: this engine's first EXPLICIT font-atlas configuration.
     // Before this phase, io.Fonts held zero fonts of its own anywhere in

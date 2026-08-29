@@ -295,7 +295,8 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        MaterialOverride (de)serialization, debug_ui.cpp,
                        input_action_map.cpp, physics.cpp, editor_ui.cpp --
                        extended Phase 15f with the Material Inspector's real
-                       "Browse..." texture picker,
+                       "Browse..." texture picker, extended again Phase 17a
+                       with applyEditorTheme(),
                        light.cpp -- Phase 15a, extended Phase 15b with
                        DirectionalLight/resolveActiveDirectionalLight(),
                        scene_hierarchy.cpp -- Phase 14d, asset_browser.cpp --
@@ -6501,6 +6502,218 @@ brief called out explicitly, not an oversight.
      A reviewer with access to a real Windows/Linux desktop build is the
      only way to close this specific gap -- exactly the situation this whole
      phase exists because of in the first place.
+
+### Phase 17a: base theme
+
+The second item in the "Phase 17: visual design" arc to be BUILT, but the
+first in that arc's own LETTERED order -- placed here, ahead of Phase 17b's
+own section below, to match the arc's real order, even though 17b's icon
+font landed first, chronologically, in this repository (the project owner
+asked for that work out of sequence explicitly; see Phase 17b's own section
+below for its own account of that). Nothing in that already-built 17b needed
+to change for this phase to land -- as 17b's own section already anticipated
+("A future Phase 17a should feel free to restyle around this phase's icons;
+this phase does not restyle around a 17a that doesn't exist yet"), the icon
+glyphs it merged into the shared `ImFont` are plain glyphs with no color of
+their own; they render in whatever `ImGuiCol_Text` currently is, so they
+simply inherit this phase's new (still off-white, barely changed) text color
+along with every other glyph in every panel. 17b's own section is otherwise
+left completely untouched by this phase -- its factual claims (no theme
+existed, `StyleColorsDark()`'s stock palette was unchanged) were all
+accurate as of when it was written, and README.md's own "update, don't
+erase" precedent for a comment that's since gone stale doesn't apply here:
+nothing 17b said is stale, it is just no longer describing the engine's
+*current* state, which is exactly what this new section is for.
+
+The project owner supplied a reference mockup image of a target "Engine
+Studio" editor look: dark background, a teal/cyan accent color, rounded
+panel corners, a clean grouped Properties panel, a top toolbar row, and a
+File/Edit/Objects/View/Window menu bar. This phase's own scope is
+deliberately narrow -- ONLY the base ImGui color palette and panel styling
+(rounding, spacing, border treatment) the mockup implies, extracted by eye
+from the image and applied globally. Explicitly NOT this phase: the toolbar
+row itself (Phase 17c, a separate, later item -- will reuse this phase's
+colors once built), the menu bar beyond what already exists (Phase 15e's
+minimal File menu is structurally untouched -- it just inherits the new
+colors the same passive way every other `ImGui::` call in this codebase
+does), and any custom window chrome/borderless rounded OUTER window border
+(Phase 17d -- real platform-level borderless-window work, much bigger scope,
+and this phase's own `ImGuiStyle` changes have zero effect on the OS
+window's actual title bar/border, which Dear ImGui never draws or controls
+in the first place -- only `EditorUI`'s own `ImGui::Begin()`'d panels are
+"windows" as far as this phase or `ImGuiStyle` are concerned).
+
+- **Where it lives: `applyEditorTheme()`, a new function in `editor_ui.cpp`'s
+  existing anonymous namespace** (the same namespace `collectTextureFiles()`/
+  `renderInspectorPanel()`/etc. already live in), called once from
+  `EditorUI`'s constructor immediately after the `ImGui::StyleColorsDark()`
+  call already there (Phase 14a's own original setup -- before this phase,
+  that one line was the entire extent of this engine's ImGui style
+  configuration; no earlier phase had ever touched `ImGuiStyle` beyond
+  it). A small standalone function rather than inlining ~50 lines directly
+  into the constructor, matching this codebase's own "extract a named,
+  documented function once the logic is substantial enough to deserve one"
+  precedent (`light.hpp`'s `resolveActiveDirectionalLight()`,
+  `asset_drop.hpp`'s `classifyAssetDropPath()`, etc.) -- this one just isn't
+  unit-testable the way those are (see Verify below for why).
+- **Base + override, not "every `ImGuiCol_` from scratch."**
+  `ImGui::StyleColorsDark()` already gives every one of `ImGuiStyle`'s
+  `Colors[ImGuiCol_COUNT]` entries (checked against the actual vendored
+  `build/_deps/imgui-src/imgui.h` `ImGuiCol_` enum and `ImGuiStyle` struct,
+  not assumed from memory -- this vendored `v1.92.9b-docking` build has
+  already renamed several entries a memory-recalled field list would get
+  wrong, e.g. `ImGuiCol_TabActive` -> `ImGuiCol_TabSelected`,
+  `ImGuiCol_NavHighlight` -> `ImGuiCol_NavCursor`, both noted in the header
+  as "[renamed in ...]" aliases this codebase deliberately does NOT use) a
+  coherent, battle-tested dark baseline. `applyEditorTheme()` runs strictly
+  AFTER that call and overrides only the specific entries that need to shift
+  toward the mockup's dark/teal look -- `ImGuiCol_PlotLines`/
+  `ImGuiCol_PlotHistogram` (this engine draws no ImGui plots anywhere),
+  every `ImGuiCol_Table*` (no ImGui tables exist in this codebase),
+  `ImGuiCol_TreeLines` (this engine's `TreeNodeEx()` calls never pass
+  `ImGuiTreeNodeFlags_DrawLines*`), and `ImGuiCol_NavWindowingHighlight`/
+  `ImGuiCol_NavWindowingDimBg`/`ImGuiCol_UnsavedMarker` (no multi-viewport
+  Ctrl+Tab window switcher or unsaved-document markers exist here) are all
+  left exactly as `StyleColorsDark()` set them, deliberately, rather than
+  touched for their own sake.
+- **One accent teal, sampled directly from the mockup, reused everywhere.**
+  Every "this is the highlighted/active thing" role Dear ImGui exposes (a
+  pressed/active button, a selected tree row, an active slider grab, a
+  focused tab's overline, a scrollbar grab being dragged, a drag-drop
+  target...) reuses the exact same base hue rather than an unsystematic pass
+  inventing a slightly different teal per widget family. Its value --
+  **RGB(45, 195, 178), hex `#2DC3B2`** -- was picked with a small offline
+  Python/Pillow script that scanned the mockup image for the most saturated,
+  cleanest (least gradient-blended, least JPEG-artifact-noisy) teal-hued
+  patch anywhere in it, which turned out to be the "Use Gravity" toggle's
+  ON-state knob; the app-icon square and the toolbar's own highlighted
+  button are both visibly the same hue in the mockup but rendered with a
+  gradient/lower saturation that would have made a noisier sample point. A
+  second value, **RGB(28, 52, 54), hex `#1C3436`**, was sampled the same way
+  from the mockup's own selected-Scene-row background (the highlighted
+  `falling_cube` row) and used verbatim for `ImGuiCol_Header`/
+  `ImGuiCol_TabSelected` -- Dear ImGui's real "this row/tab is the selected
+  one, at rest" colors (per `imgui.h`'s own `ImGuiCol_` enum comments) --
+  precisely because sampling that exact mockup pixel and feeding it back
+  into the color that produces the same kind of pixel is the most direct
+  route from "what the mockup shows" to "what this engine now draws," not a
+  coincidence. Most hover/pressed variants of both values are DERIVED (a
+  fixed 15% linear lerp toward white or black, computed once and left as a
+  literal in the source rather than computed at runtime) rather than
+  independently eyeballed, so a hover state can never end up a visibly
+  different hue than the color it's hovering over -- the one exception,
+  `kAccentTealMutedHovered` (editor_ui.cpp), is a hand-picked lighter shade
+  rather than a strict 15% lerp, caught and documented as such by this
+  phase's own bug-review rather than silently left inconsistent with its
+  neighbors' derivation. The panel background
+  colors (`#181B24`/`#0F1217`) were sampled the identical way, from a flat
+  region of the mockup's own Scene/Properties panel background and its
+  menu-bar/status-bar strip respectively.
+- **Rounding/spacing/border treatment**, all checked against the real
+  vendored `ImGuiStyle` struct's actual field names (not guessed): two
+  rounding families -- a larger 8px radius for outer containers
+  (`WindowRounding`/`PopupRounding`) and a smaller 4-6px radius for controls
+  sitting inside one (`FrameRounding`/`GrabRounding` at 4px,
+  `ChildRounding`/`TabRounding`/`ScrollbarRounding` at 6px) -- matching the
+  size relationship the mockup's own panels-vs-buttons rounding shows at a
+  glance. `WindowBorderSize`/`ChildBorderSize`/`FrameBorderSize` are all set
+  to `0.0f`: the mockup's panels and input fields read as flat, borderless
+  shapes distinguished by FILL color, not a drawn edge. `PopupBorderSize` is
+  the one deliberate exception, left at `StyleColorsDark()`'s own `1.0f`
+  default: a popup floats OVER a panel sharing the same background-color
+  family, so without some edge it would have no visible boundary against
+  whatever panel is behind it -- this applies equally to the already-working
+  Phase 14f Create-menu popup and the Phase 15f Material "Browse..." popup,
+  neither of which needed a single line of its own rendering code touched.
+  `WindowPadding`/`FramePadding`/`ItemSpacing` are all nudged up from
+  `StyleColorsDark()`'s own defaults (8x8 / 4x3 / 8x4) to (10x10 / 8x5 /
+  8x8), matching how much more generously spaced the mockup's own Properties
+  panel rows and buttons look next to Dear ImGui's stock density.
+- **Applies to every panel automatically, with zero changes to any panel's
+  own rendering code.** `ImGuiStyle` is one global struct, not per-window
+  state -- every `ImGui::Begin()`'d window (Scene/Assets/Viewport/Inspector,
+  every one of them), the Phase 14f Create-menu popup, the Phase 15f
+  Material "Browse..." texture-picker popup, and the Phase 15e File menu all
+  pick up the new palette/rounding/spacing the instant `applyEditorTheme()`
+  runs, once, at startup -- none of `renderInspectorPanel()`/
+  `renderSceneTreeNode()`/`renderAssetTreeNode()`/etc. above needed a single
+  line changed, because `ImGui::Text()`/`ImGui::Button()`/`ImGui::
+  TreeNodeEx()`/etc. always read the CURRENT `ImGuiStyle` at draw time, not
+  a value baked in at some earlier call site.
+- **Deliberately NOT done this phase** (same "smallest correct increment"
+  discipline as every earlier phase's own list): the toolbar row itself
+  (Phase 17c -- grid/lighting/texture/play-pause buttons, none of which
+  exist yet); the custom window chrome / borderless rounded OUTER window
+  border (Phase 17d -- real OS-level platform work `ImGuiStyle` cannot touch
+  at all); any change to what a panel actually shows or does (this is a
+  restyle, not a feature -- every widget call in `editor_ui.cpp` is
+  byte-for-byte unchanged); and a user-facing theme picker / settings UI --
+  this is one fixed, hardcoded theme, matching this project's own repeated
+  "no speculative configurability nothing asks for" precedent (Phase 15d's
+  own Asset Browser writeup already made the identical call about a
+  drag-and-drop feature nobody had asked for yet).
+- **Verify**: a `-Wall -Wextra` rebuild (including a forced recompile of
+  just `editor_ui.cpp`, to rule out a stale cached object hiding a warning)
+  produced **zero new warnings** -- the one real risk this phase's own brief
+  flagged (a stray unused `constexpr ImVec4` among the several intermediate
+  hover/active color constants `applyEditorTheme()` defines) was caught
+  exactly that way during development and fixed by giving every declared
+  color constant a real call site, rather than by suppressing the warning.
+  `ctest` reports **13/13**, unchanged from Phase 17b's own baseline -- this
+  phase touches zero files any existing test links against, so this was
+  expected, not something the fix above accidentally clawed back. This
+  phase has **no meaningful GL-free unit test of its own**, unlike almost
+  every other phase in this codebase: `applyEditorTheme()` is a direct
+  sequence of `ImGuiStyle&`/`ImVec4` field assignments with no branching, no
+  computed decision, and no pure input-to-output mapping worth isolating the
+  way `sceneNodeIconGlyph()`/`classifyAssetDropPath()`/etc. are -- there is
+  no "given X, produce Y" contract here to assert against, only "does the
+  global struct end up holding literal value Z," which a unit test would
+  just be re-stating the source line back at itself. Noted honestly here
+  rather than inventing a test that would add file count without adding
+  real coverage.
+
+  Two `tools/run_headless.sh` runs (`ENGINE_MAX_FRAMES=60`): a baseline with
+  no debug env vars, and a second with `ENGINE_DEBUG_CREATE=pointlight` +
+  `ENGINE_DEBUG_SELECT="Point Light"` to populate the Inspector panel with
+  real content (Transform/Material/Physics sections, matching the reference
+  mockup's own populated-Inspector shot). Both logged **zero** `[ERROR]`
+  lines and the same clustered-lighting occupancy every prior phase's own
+  baseline has recorded (2136 -> 2153/2304 clusters occupied, avg 3.565543
+  -> ~3.579192 lights/occupied cluster, the same small run-to-run llvmpipe
+  noise Phase 15c's own review already characterized) -- confirming this
+  phase's changes (ImGui style only) touch nothing in the rendering/lighting
+  pipeline itself, exactly as expected for a pass that never calls a single
+  `gl*` function.
+
+  Visually, both screenshots show the dark charcoal-navy background, the
+  teal accent color, and rounded panel/tab corners all genuinely present and
+  reasonably close to the reference mockup's intent: the "Point Light" row
+  in the second screenshot's Scene panel highlights in the sampled muted
+  teal (`#1C3436`) exactly the way the mockup's own selected `falling_cube`
+  row does, and each docked panel's tab header (Scene / Viewport /
+  Inspector) renders filled in that same muted teal -- a second, independent
+  place the one consistent accent shows up beyond just the row highlight.
+  No malformed color (no fully-transparent panel, no NaN-looking flash, no
+  jarring out-of-family hue) and no out-of-range rounding artifact (no
+  self-intersecting or degenerate rounded corner) is visible in either
+  capture.
+
+  **Honest caveats, stated plainly rather than overclaimed**: this
+  container's screenshot capture is software-rendered (Xvfb + llvmpipe),
+  visibly lower-fidelity than the project owner's real Windows/GPU-
+  accelerated build will look -- close-to, not pixel-identical-to, the
+  mockup is the actual bar these screenshots were held to, and final
+  judgment on how well the teal/rounding read still needs the project
+  owner's own eyes on a real build. Separately, this harness has no way to
+  simulate the mouse clicks needed to actually OPEN the Create-menu popup or
+  the Material "Browse..." texture-picker popup (`ENGINE_DEBUG_CREATE`
+  creates an entity directly, bypassing the popup UI entirely) -- both
+  inherit the exact same global `ImGuiStyle` as everything screenshotted
+  above (there is no code path for them to inherit anything else), but
+  neither was independently screenshotted open this phase, so that specific
+  claim rests on the mechanism being global/uniform rather than on a direct
+  visual check of those two popups themselves.
 
 ### Phase 17b: icon font
 
