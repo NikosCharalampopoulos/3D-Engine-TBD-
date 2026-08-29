@@ -5,12 +5,23 @@
 // executable, links only the pure logic file it's testing" shape as
 // transform_hierarchy_test/physics_test (see those files' own header
 // comments) -- scene_hierarchy.cpp depends only on ecs.hpp/transform.hpp/
-// transform_hierarchy.hpp, none of which touch GL/ImGui/Window, so this
-// needs no live window/GL context/GPU/Dear ImGui frame either.
+// transform_hierarchy.hpp/light.hpp/camera_component.hpp, none of which
+// touch GL/ImGui/Window, so this needs no live window/GL context/GPU/Dear
+// ImGui frame either, and (light.hpp/camera_component.hpp being header-only
+// as far as SceneTreeNode's own flag-setting needs -- see
+// scene_hierarchy.cpp's own Phase 17b comment) no new link dependency in
+// this test's own CMakeLists.txt entry.
+//
+// Phase 17b extends this file (not a new test binary) with coverage for
+// SceneTreeNode's four new hasModel/hasPointLight/hasDirectionalLight/
+// hasCamera flags -- see the "Component-presence flags" block near the
+// bottom.
 
 #include "engine/scene_hierarchy.hpp"
 
+#include "engine/camera_component.hpp"
 #include "engine/ecs.hpp"
+#include "engine/light.hpp"
 #include "engine/transform.hpp"
 #include "engine/transform_hierarchy.hpp"
 
@@ -252,6 +263,87 @@ int main() {
         expectTrue(tree.size() > 1,
                    "a chain deeper than kMaxParentChainDepth is split across more than one top-level forest entry "
                    "(the depth guard actually engaged, not just happened to not matter)");
+    }
+
+    // --- Component-presence flags (Phase 17b) -------------------------------
+    // One entity per component kind editor_icons.hpp's sceneNodeIconGlyph()
+    // distinguishes, plus a genuinely empty one -- proves buildSceneTree()
+    // itself sets each flag correctly from the registry, independent of
+    // sceneNodeIconGlyph()'s own precedence logic (covered separately,
+    // tests/editor_icons_test.cpp).
+    {
+        engine::EntityRegistry registry;
+
+        const engine::EntityId modelEntity = registry.create();
+        registry.addComponent<engine::Transform>(modelEntity);
+        registry.addComponent<engine::NameComponent>(modelEntity, engine::NameComponent{"model_entity"});
+        registry.addComponent<engine::ModelComponent>(modelEntity, engine::ModelComponent{});
+
+        const engine::EntityId pointLightEntity = registry.create();
+        registry.addComponent<engine::Transform>(pointLightEntity);
+        registry.addComponent<engine::NameComponent>(pointLightEntity, engine::NameComponent{"point_light_entity"});
+        registry.addComponent<engine::PointLight>(pointLightEntity, engine::PointLight{});
+
+        const engine::EntityId directionalLightEntity = registry.create();
+        registry.addComponent<engine::Transform>(directionalLightEntity);
+        registry.addComponent<engine::NameComponent>(directionalLightEntity,
+                                                       engine::NameComponent{"directional_light_entity"});
+        registry.addComponent<engine::DirectionalLight>(directionalLightEntity, engine::DirectionalLight{});
+
+        const engine::EntityId cameraEntity = registry.create();
+        registry.addComponent<engine::Transform>(cameraEntity);
+        registry.addComponent<engine::NameComponent>(cameraEntity, engine::NameComponent{"camera_entity"});
+        registry.addComponent<engine::CameraComponent>(cameraEntity, engine::CameraComponent{});
+
+        const engine::EntityId emptyEntity = registry.create();
+        registry.addComponent<engine::Transform>(emptyEntity);
+        registry.addComponent<engine::NameComponent>(emptyEntity, engine::NameComponent{"empty_entity"});
+        // Deliberately no component beyond Transform/NameComponent -- Phase
+        // 14f's own "Empty" Create-menu kind.
+
+        const std::vector<engine::SceneTreeNode> tree = engine::buildSceneTree(registry);
+        expectTrue(tree.size() == 5, "five independent root-level entities produce five forest entries");
+
+        const engine::SceneTreeNode* modelNode = findRoot(tree, "model_entity");
+        expectTrue(modelNode != nullptr, "\"model_entity\" appears in the forest");
+        if (modelNode != nullptr) {
+            expectTrue(modelNode->hasModel, "a ModelComponent entity sets hasModel");
+            expectTrue(!modelNode->hasPointLight && !modelNode->hasDirectionalLight && !modelNode->hasCamera,
+                       "a ModelComponent-only entity sets no other flag");
+        }
+
+        const engine::SceneTreeNode* pointLightNode = findRoot(tree, "point_light_entity");
+        expectTrue(pointLightNode != nullptr, "\"point_light_entity\" appears in the forest");
+        if (pointLightNode != nullptr) {
+            expectTrue(pointLightNode->hasPointLight, "a PointLight entity sets hasPointLight");
+            expectTrue(!pointLightNode->hasModel && !pointLightNode->hasDirectionalLight && !pointLightNode->hasCamera,
+                       "a PointLight-only entity sets no other flag");
+        }
+
+        const engine::SceneTreeNode* directionalLightNode = findRoot(tree, "directional_light_entity");
+        expectTrue(directionalLightNode != nullptr, "\"directional_light_entity\" appears in the forest");
+        if (directionalLightNode != nullptr) {
+            expectTrue(directionalLightNode->hasDirectionalLight, "a DirectionalLight entity sets hasDirectionalLight");
+            expectTrue(!directionalLightNode->hasModel && !directionalLightNode->hasPointLight &&
+                           !directionalLightNode->hasCamera,
+                       "a DirectionalLight-only entity sets no other flag");
+        }
+
+        const engine::SceneTreeNode* cameraNode = findRoot(tree, "camera_entity");
+        expectTrue(cameraNode != nullptr, "\"camera_entity\" appears in the forest");
+        if (cameraNode != nullptr) {
+            expectTrue(cameraNode->hasCamera, "a CameraComponent entity sets hasCamera");
+            expectTrue(!cameraNode->hasModel && !cameraNode->hasPointLight && !cameraNode->hasDirectionalLight,
+                       "a CameraComponent-only entity sets no other flag");
+        }
+
+        const engine::SceneTreeNode* emptyNode = findRoot(tree, "empty_entity");
+        expectTrue(emptyNode != nullptr, "\"empty_entity\" appears in the forest");
+        if (emptyNode != nullptr) {
+            expectTrue(!emptyNode->hasModel && !emptyNode->hasPointLight && !emptyNode->hasDirectionalLight &&
+                           !emptyNode->hasCamera,
+                       "an entity with no icon-relevant component sets none of the four flags");
+        }
     }
 
     if (failures == 0) {

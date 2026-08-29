@@ -1,11 +1,23 @@
 #include "engine/scene_hierarchy.hpp"
 
+#include "engine/camera_component.hpp"
+#include "engine/light.hpp"
 #include "engine/transform.hpp"
 #include "engine/transform_hierarchy.hpp"
 
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
+
+// Phase 17b: camera_component.hpp/light.hpp are both header-only-as-far-as-
+// this-file-needs -- SceneTreeNode's own hasModel/hasPointLight/
+// hasDirectionalLight/hasCamera flags below (see scene_hierarchy.hpp's own
+// Phase 17b comment) are set from plain registry.getComponent<T>() != nullptr
+// checks, which only needs each T's own type definition, not any function
+// light.cpp/camera_component.hpp's own .cpp-less design provides -- so this
+// adds no new LINK dependency, and tests/CMakeLists.txt's own
+// scene_hierarchy_test target (which links src/scene_hierarchy.cpp alone,
+// no src/light.cpp) needs no change to keep building.
 
 namespace engine {
 
@@ -113,6 +125,17 @@ std::vector<SceneTreeNode> buildSceneTree(EntityRegistry& registry) {
             SceneTreeNode node;
             node.id = id;
             node.name = nameOrFallback(registry, id);
+            // Phase 17b: see this struct's own header comment (scene_hierarchy.hpp)
+            // for why these four checks live here rather than in
+            // editor_ui.cpp's row-drawing code -- registry is already in
+            // scope for this exact call, and getComponent<T>() is the same
+            // safe-on-any-id lookup every other per-entity UI in this
+            // engine already uses (never UB on a stale/componentless id --
+            // see ecs.hpp's own EntityId comment).
+            node.hasModel = registry.getComponent<ModelComponent>(id) != nullptr;
+            node.hasPointLight = registry.getComponent<PointLight>(id) != nullptr;
+            node.hasDirectionalLight = registry.getComponent<DirectionalLight>(id) != nullptr;
+            node.hasCamera = registry.getComponent<CameraComponent>(id) != nullptr;
 
             const auto it = childrenOf.find(id.index());
             if (it != childrenOf.end()) {

@@ -250,6 +250,7 @@ add_executable(engine_app
     src/material_override.cpp
     src/asset_drop.cpp
     src/camera_capture.cpp
+    src/editor_icons.cpp
 )
 
 target_include_directories(engine_app PRIVATE include)
@@ -280,6 +281,12 @@ endif()
 # double-clicking it in a file browser, a multi-config generator's
 # Debug/Release subfolder, etc.) instead of only working when launched from
 # the source tree root.
+#
+# Phase 17b's new assets/fonts/editor-icons.ttf (see editor_ui.cpp's own
+# EditorUI constructor comment) needs no change here at all -- copy_directory
+# already recurses through every subdirectory assets/ has, fonts/ included,
+# the same way it already picked up assets/textures/skybox/ and
+# assets/textures/hdri/ without this command ever needing to name them.
 add_custom_command(TARGET engine_app POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:engine_app>/assets"

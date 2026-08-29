@@ -56,9 +56,32 @@ namespace engine {
 // One row of the Scene Hierarchy tree. Owns its children by value (mirrors
 // model.hpp's own ModelNode -- a tree built once per call, walked top-down,
 // never needing parent pointers).
+//
+// Phase 17b: the four hasX bools below are new -- editor_ui.cpp's
+// renderSceneTreeNode() needs to know, per row, which of Font Awesome's
+// mesh/lightbulb/sun/camera glyphs (if any) to draw next to that row's
+// label (see editor_icons.hpp's own sceneNodeIconGlyph(), which these four
+// flags feed directly). Computed once here, in buildSceneTree(), rather
+// than re-checked every frame from inside the ImGui-facing row-drawing code
+// -- the same "this file already has registry access and already visits
+// every entity once per build" reasoning `name` itself is resolved with
+// (nameOrFallback(), scene_hierarchy.cpp), just applied to component
+// presence instead of a display name. Plain bools, not (say) a single
+// "kind" enum: an entity can in principle carry more than one of these
+// flags at once (see editor_icons.hpp's own precedence comment for why
+// that's not actually reachable through any Create-menu path today but
+// isn't schema-forbidden either) -- an enum would have to either lose that
+// information or grow its own combinatorial cases, where sceneNodeIconGlyph()
+// deciding the precedence from four independent bools is simpler and keeps
+// this struct itself from needing to know anything about icon precedence at
+// all.
 struct SceneTreeNode {
     EntityId id;
     std::string name;
+    bool hasModel = false;
+    bool hasPointLight = false;
+    bool hasDirectionalLight = false;
+    bool hasCamera = false;
     std::vector<SceneTreeNode> children;
 };
 

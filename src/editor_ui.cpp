@@ -23,7 +23,9 @@
 #include <string>
 
 #include "engine/asset_browser.hpp"
+#include "engine/asset_drop.hpp"
 #include "engine/camera_component.hpp"
+#include "engine/editor_icons.hpp"
 #include "engine/light.hpp"
 #include "engine/log.hpp"
 #include "engine/material.hpp"
@@ -139,6 +141,34 @@ void renderTextureBrowsePopup(const std::vector<AssetTreeNode>& assetTree,
     ImGui::EndPopup();
 }
 
+// Phase 17b: encodes one Unicode codepoint as a raw UTF-8 byte sequence, so
+// it can be prepended directly onto an ImGui row label string. Every
+// codepoint editor_icons.hpp actually names (Font Awesome Free Solid's own
+// Private Use Area glyphs, 0xF030-0xF1B2) falls in the three-byte UTF-8
+// range (0x0800-0xFFFF) -- this deliberately does NOT handle the one- or
+// two-byte cases, or surrogate pairs for codepoints above 0xFFFF, since
+// nothing in this engine ever calls it with anything outside that range;
+// widening it "to be general" for inputs that can't occur would be exactly
+// the kind of speculative generality this codebase's own established style
+// avoids (see e.g. ecs.hpp's own EntityId "no generation counter until a
+// real need exists" comment for the same instinct). Dear ImGui's own
+// TextUnformatted()/TreeNodeEx() etc. all take raw UTF-8 and decode it back
+// to a codepoint internally (ImTextCharFromUtf8(), imgui.cpp) to look the
+// glyph up in whichever merged ImFont source actually has it -- see this
+// file's own EditorUI constructor comment for the font-atlas merge that
+// makes that lookup succeed. A small local helper rather than reaching for
+// <codecvt> (deprecated since C++17, this project's own language target) --
+// three-byte UTF-8 encoding is a handful of bit shifts, not enough logic to
+// justify either a new dependency or std library machinery two revisions
+// deprecated.
+std::string iconGlyphUtf8(char32_t codepoint) {
+    std::string out;
+    out.push_back(static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F)));
+    out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    return out;
+}
+
 // Phase 14d: recursively renders one Scene-Hierarchy row (and, if expanded,
 // its own children) as an ImGui::TreeNodeEx() -- real parent/child nesting
 // via ImGui's own tree indentation, matching this engine's own choice of
@@ -150,17 +180,23 @@ void renderTextureBrowsePopup(const std::vector<AssetTreeNode>& assetTree,
 // id-stack-based widget identity is concerned, without the visible label
 // itself growing a stray "##123" suffix.
 //
-// No icon glyphs (folder/mesh/light/camera, per the approved mockup): Dear
-// ImGui's default font (no custom font atlas is built anywhere in this
-// engine) only carries the ASCII/Latin-1 glyph range, nowhere near the
-// Unicode private-use/symbol code points an icon font would need -- adding
-// one is real, separate scope (a new vendored font asset + atlas
-// configuration) this phase's brief doesn't ask for. Indentation, the
+// Icon glyphs (folder/mesh/light/camera, per the approved mockup) -- CLOSED
+// Phase 17b. Until this phase, Dear ImGui's default font (no custom font
+// atlas was built anywhere in this engine) only carried the ASCII/Latin-1
+// glyph range, nowhere near the Unicode private-use/symbol code points an
+// icon font needs -- adding one was real, separate scope this project
+// deliberately deferred through the whole Phase 14/15/16 arc (see
+// README.md's own Phase 17b section for why icon-font work landed before
+// 17a's base theme pass, out of this arc's own lettered order). This
+// function now prepends one Font Awesome Solid glyph -- resolved by
+// editor_icons.hpp's own sceneNodeIconGlyph() from this node's own
+// hasModel/hasPointLight/hasDirectionalLight/hasCamera flags (set once, in
+// buildSceneTree() -- scene_hierarchy.cpp) -- to the row's own label text,
+// UTF-8-encoded by this file's own iconGlyphUtf8() above. Indentation, the
 // tree-node's own expand/collapse arrow, and ImGuiTreeNodeFlags_Selected's
-// highlight are what carry "this is a group vs. a leaf" and "this row is
-// selected" instead -- functionally equivalent to the mockup's own icons/
-// highlight for this phase's purpose (real tree + click-to-select), just
-// without the pixel-identical iconography.
+// highlight still carry "this is a group vs. a leaf"/"this row is
+// selected" exactly as before -- the icon is additive, not a replacement
+// for any of that.
 void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& selectedEntity) {
     ImGui::PushID(static_cast<int>(node.id.index()));
 
@@ -178,7 +214,15 @@ void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& sel
         flags |= ImGuiTreeNodeFlags_Selected;
     }
 
-    const bool opened = ImGui::TreeNodeEx(node.name.c_str(), flags);
+    // Phase 17b: "<icon>  <name>" -- one space-padded icon glyph ahead of
+    // the existing label text, not a separate ImGui::Image()/column. This
+    // is still exactly one TreeNodeEx() call/one selectable row, so
+    // IsItemClicked() below (and everything else this function already
+    // does) needs no change at all to keep working with the icon folded in.
+    const char32_t icon =
+        sceneNodeIconGlyph(node.hasModel, node.hasPointLight, node.hasDirectionalLight, node.hasCamera);
+    const std::string label = iconGlyphUtf8(icon) + "  " + node.name;
+    const bool opened = ImGui::TreeNodeEx(label.c_str(), flags);
     // IsItemClicked() covers a click anywhere on this row's own label/
     // background (not the expand arrow specifically, which TreeNodeEx()
     // already handles internally for open/close) -- exactly "click this row
@@ -200,8 +244,11 @@ void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& sel
 // Phase 15d: the Assets panel's own row-drawing helper -- deliberately mirrors
 // renderSceneTreeNode() above almost line for line (same TreeNodeEx() flag
 // set, same "click anywhere on the row selects it" IsItemClicked() check,
-// same no-icon-glyphs reasoning that helper's own comment already gives in
-// full), just walking asset_browser.hpp's AssetTreeNode forest instead of
+// same "<icon>  <name>" label-prefixing icons Phase 17b gave that helper --
+// see this function's own body below for the one real difference: an asset
+// row's icon comes from classifyAssetDropPath(), not a SceneTreeNode's own
+// precomputed flags, since AssetTreeNode carries no such flags of its own),
+// just walking asset_browser.hpp's AssetTreeNode forest instead of
 // scene_hierarchy.hpp's SceneTreeNode one, and keying selection by
 // `node.relativePath` (a stable string identity for a filesystem row)
 // instead of an EntityId. Kept as its own separate function rather than
@@ -243,7 +290,24 @@ void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& 
         flags |= ImGuiTreeNodeFlags_Selected;
     }
 
-    const bool opened = ImGui::TreeNodeEx(node.name.c_str(), flags);
+    // Phase 17b: the row's own icon. `assetPath` -- "assets/" +
+    // node.relativePath -- is the SAME string classifyAssetDropPath()
+    // already expects (AssetTreeNode::relativePath's own "relative to
+    // assets/ itself" convention -- see this function's own Phase 15g
+    // comment below for the identical prefixing on the drag payload), so
+    // this reuses that one function rather than re-deriving "model or
+    // texture" from the path a second, possibly-drifting way.
+    // classifyAssetDropPath()'s own result is irrelevant for a directory
+    // row (editor_icons.hpp's own assetNodeIconGlyph() checks isDirectory
+    // FIRST and returns the folder icon outright), but it's still computed
+    // unconditionally here rather than only for files -- branching on
+    // node.isDirectory to skip it would save one cheap string classify call
+    // at the cost of a second, separate code path this function does not
+    // otherwise need.
+    const std::string assetPath = "assets/" + node.relativePath;
+    const char32_t icon = assetNodeIconGlyph(node.isDirectory, classifyAssetDropPath(assetPath));
+    const std::string label = iconGlyphUtf8(icon) + "  " + node.name;
+    const bool opened = ImGui::TreeNodeEx(label.c_str(), flags);
     if (ImGui::IsItemClicked()) {
         selectedAssetPath = node.relativePath;
     }
@@ -267,21 +331,23 @@ void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& 
     // follows for createRequest/textureAssignRequested.
     //
     // The payload itself is one flat, null-terminated path string --
-    // "assets/" + node.relativePath, matching AssetTreeNode::relativePath's
-    // OWN "relative to assets/ itself" convention prefixed the identical way
-    // renderTextureBrowsePopup()'s own "assets/" + file->relativePath already
-    // is (this file's own Phase 15f comment) -- not a small POD struct
-    // bundling path+category+isDirectory: SetDragDropPayload() copies its
-    // `data` argument by raw byte value (imgui.cpp), so anything containing a
-    // std::string/std::vector (owning heap memory) would be unsafe to hand it
-    // this way; a flat char buffer has no such hazard, and the one piece of
-    // information a drop target actually needs -- WHICH asset -- is fully
-    // captured by the path alone (category is re-derived from it, not
-    // shipped alongside it, so there's no second field that could ever drift
-    // out of sync with the path itself).
+    // `assetPath` above (already "assets/" + node.relativePath, computed
+    // once for this function's own Phase 17b icon lookup and reused here
+    // rather than rebuilding an identical string a second time), matching
+    // AssetTreeNode::relativePath's OWN "relative to assets/ itself"
+    // convention the identical way renderTextureBrowsePopup()'s own
+    // "assets/" + file->relativePath already is (this file's own Phase 15f
+    // comment) -- not a small POD struct bundling path+category+isDirectory:
+    // SetDragDropPayload() copies its `data` argument by raw byte value
+    // (imgui.cpp), so anything containing a std::string/std::vector (owning
+    // heap memory) would be unsafe to hand it this way; a flat char buffer
+    // has no such hazard, and the one piece of information a drop target
+    // actually needs -- WHICH asset -- is fully captured by the path alone
+    // (category is re-derived from it, not shipped alongside it, so there's
+    // no second field that could ever drift out of sync with the path
+    // itself).
     if (ImGui::BeginDragDropSource()) {
-        const std::string payloadPath = "assets/" + node.relativePath;
-        ImGui::SetDragDropPayload(kAssetDragDropPayloadType, payloadPath.c_str(), payloadPath.size() + 1);
+        ImGui::SetDragDropPayload(kAssetDragDropPayloadType, assetPath.c_str(), assetPath.size() + 1);
         // The default drag preview tooltip (Dear ImGui's own "..." fallback
         // -- imgui.h's own BeginDragDropSource() comment) isn't very useful;
         // this is the identical "just the row's own visible label" preview
@@ -920,6 +986,92 @@ EditorUI::EditorUI(GLFWwindow* window) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     ImGui::StyleColorsDark();
+
+    // Phase 17b: this engine's first EXPLICIT font-atlas configuration.
+    // Before this phase, io.Fonts held zero fonts of its own anywhere in
+    // this codebase -- ImFontAtlasBuildMain() (imgui_draw.cpp) auto-calls
+    // AddFontDefault() itself the first time the atlas is ever built if
+    // nothing else already has (`if (atlas->Sources.Size == 0)
+    // atlas->AddFontDefault();`) -- so every row's text has, until now,
+    // always silently been that implicit fallback. Calling AddFontDefault()
+    // here explicitly does two things at once: it gives MergeMode (below)
+    // an existing ImFont to merge into (MergeMode's own contract --
+    // imgui.h -- is "merge into PREVIOUS ImFont... make sure that a font
+    // has already been added before"), and it makes this constructor --
+    // not an implicit, easy-to-miss library fallback -- the one place this
+    // engine's whole font setup actually lives, the natural spot a future
+    // toolbar-icon phase (see editor_icons.hpp's own "Deliberately
+    // general, not hardcoded to tree rows" comment) extends instead of
+    // hunting for.
+    io.Fonts->AddFontDefault();
+
+    // A narrow, explicit glyph-ranges array covering exactly the six
+    // codepoints editor_icons.hpp names -- each its own one-codepoint
+    // {lo, hi} pair, zero-terminated per ImFontConfig::GlyphRanges' own
+    // documented contract (imgui.h) -- built FROM those constants (see
+    // editor_icons.hpp's own header comment for why the codepoints
+    // themselves live there, not here) so this array can never list a
+    // codepoint the row-drawing code doesn't also know about, or vice
+    // versa. `static`: GlyphRanges' own contract is "THE ARRAY DATA NEEDS
+    // TO PERSIST AS LONG AS THE FONT IS ALIVE" (imgui.h) -- a local
+    // automatic-storage array would dangle the moment this constructor
+    // returns, silently corrupting every later glyph lookup against it.
+    //
+    // Researched against the actual vendored ImGui, not assumed (the same
+    // discipline Phase 16's own GLFW-cursor/ImGui-hover research applied):
+    // this project's vendored v1.92.9b-docking build sets
+    // ImGuiBackendFlags_RendererHasTextures (imgui_impl_opengl3.cpp's own
+    // Init()), which routes font baking through a DYNAMIC per-glyph-on-
+    // demand path (ImFontAtlasBuildMain(), imgui_draw.cpp) that bakes
+    // whichever codepoint a draw call actually requests, from whichever
+    // merged source actually has it -- GlyphRanges itself is only consulted
+    // by the LEGACY eager-preload-everything path
+    // (ImFontAtlasBuildLegacyPreloadAllGlyphRanges()), which is skipped
+    // entirely once RendererHasTextures is true. So on THIS build, this
+    // array's real effect is close to redundant -- the vendored subset
+    // font below physically contains only these six glyphs anyway, dynamic
+    // baking or not -- but it's still passed explicitly because (a) it's
+    // the documented, standard MergeMode idiom every Dear ImGui icon-font
+    // integration uses regardless of backend, (b) it costs nothing, and
+    // (c) it keeps this code correct if this project's ImGui version, or
+    // rendering backend, ever changes to one where RendererHasTextures is
+    // false.
+    static constexpr ImWchar kIconGlyphRanges[] = {
+        static_cast<ImWchar>(kIconCamera),            static_cast<ImWchar>(kIconCamera),
+        static_cast<ImWchar>(kIconTexture),           static_cast<ImWchar>(kIconTexture),
+        static_cast<ImWchar>(kIconFolder),            static_cast<ImWchar>(kIconFolder),
+        static_cast<ImWchar>(kIconPointLight),        static_cast<ImWchar>(kIconPointLight),
+        static_cast<ImWchar>(kIconDirectionalLight),  static_cast<ImWchar>(kIconDirectionalLight),
+        static_cast<ImWchar>(kIconMesh),              static_cast<ImWchar>(kIconMesh),
+        0,
+    };
+
+    // MergeMode = true targets the AddFontDefault() ImFont just added above
+    // (Fonts.back(), per MergeMode's own implementation -- imgui_draw.cpp's
+    // ImFontAtlas::AddFont()) -- no ImGui::PushFont() anywhere in this
+    // file's row-drawing code, since the icon glyphs live IN the one
+    // default ImFont every row already draws with. SizePixels is left at
+    // its ImFontConfig default (0.0f, "implicit reference size") rather
+    // than a fixed pixel size -- matching AddFontDefault()'s own implicit
+    // sizing keeps the icon glyphs auto-scaling in lockstep with the base
+    // UI font instead of needing this constructor to hardcode/maintain a
+    // second size constant that could drift out of sync with it.
+    ImFontConfig iconFontConfig;
+    iconFontConfig.MergeMode = true;
+    const std::string iconFontPath = resolveAssetPath("assets/fonts/editor-icons.ttf");
+    ImFont* iconFont =
+        io.Fonts->AddFontFromFileTTF(iconFontPath.c_str(), 0.0f, &iconFontConfig, kIconGlyphRanges);
+    if (iconFont == nullptr) {
+        // Missing/corrupt font file (e.g. a checkout that somehow lost
+        // assets/fonts/) degrades to "rows draw with no icon glyph" -- the
+        // exact pre-Phase-17b look -- rather than crashing the whole
+        // engine over a cosmetic asset, the same "a cosmetic asset failure
+        // is a LOG_WARN, not a fatal error" instinct asset_browser.cpp's
+        // own unreadable-entry handling already established for the
+        // Assets panel itself.
+        LOG_WARN("Editor UI: failed to load icon font \"" + iconFontPath +
+                  "\" -- Scene Hierarchy/Assets Browser rows will render without icon glyphs");
+    }
 
     // install_callbacks = true: see this class's own header comment on why
     // there can only be one ImGui context's worth of GLFW callbacks active

@@ -304,7 +304,10 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        resolveDiffuseTextureOverride(), asset_drop.cpp --
                        Phase 15g's new classifyAssetDropPath()/
                        modelBaseNameFromAssetPath(), camera_capture.cpp --
-                       Phase 16's new decideCameraCapture())
+                       Phase 16's new decideCameraCapture(), editor_icons.cpp
+                       -- Phase 17b's new sceneNodeIconGlyph()/
+                       assetNodeIconGlyph(), the pure GL/ImGui-free half of
+                       icon-font glyph selection)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
@@ -329,7 +332,14 @@ include/engine/        Public engine .h/.hpp headers (window, application, log,
                        modelBaseNameFromAssetPath(), the pure GL/ImGui-free
                        half of drag-and-drop, camera_capture -- Phase 16's new
                        CameraCaptureDecision/decideCameraCapture(), the pure
-                       GL/Window/ImGui-free half of camera input capture)
+                       GL/Window/ImGui-free half of camera input capture,
+                       editor_icons -- Phase 17b's new icon codepoint
+                       constants/sceneNodeIconGlyph()/assetNodeIconGlyph(),
+                       same "own header, genuinely different kind of thing"
+                       precedent once more; scene_hierarchy.hpp's own
+                       SceneTreeNode also gains four new hasModel/
+                       hasPointLight/hasDirectionalLight/hasCamera flags this
+                       phase)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -347,7 +357,10 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        object), scenes/default.json -- Phase 8b's serialized
                        scene (Phase 8e adds its "falling_cube" entity; Phase
                        15e finally gives it a real in-editor writer, though
-                       its own checked-in content is unchanged by this phase)
+                       its own checked-in content is unchanged by this phase),
+                       fonts/editor-icons.ttf -- Phase 17b's new hand-subsetted
+                       Font Awesome Free icon font (2,160 bytes, 6 glyphs) +
+                       LICENSE-font-awesome.txt (its own upstream license text)
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
 tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
                        15e with PointLight/DirectionalLight/CameraComponent
@@ -357,14 +370,16 @@ tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
                        input_action_map_test.cpp (Phase 8d),
                        physics_test.cpp (Phase 8e), ecs_test.cpp (Phase 14f),
                        transform_hierarchy_test.cpp (Phase 14b),
-                       scene_hierarchy_test.cpp (Phase 14d),
+                       scene_hierarchy_test.cpp (Phase 14d, extended Phase 17b
+                       with component-presence-flag coverage),
                        light_test.cpp (Phase 15a, extended Phase 15b with
                        resolveActiveDirectionalLight() coverage),
                        camera_component_test.cpp (Phase 15c),
                        asset_browser_test.cpp (Phase 15d),
                        material_override_test.cpp (Phase 15f),
                        asset_drop_test.cpp (Phase 15g),
-                       camera_capture_test.cpp (Phase 16) + its own
+                       camera_capture_test.cpp (Phase 16),
+                       editor_icons_test.cpp (Phase 17b) + its own
                        CMakeLists.txt (no longer just the Phase 0 placeholder)
 ```
 
@@ -6487,6 +6502,270 @@ brief called out explicitly, not an oversight.
      only way to close this specific gap -- exactly the situation this whole
      phase exists because of in the first place.
 
+### Phase 17b: icon font
+
+The first item in a new "Phase 17: visual design" arc -- and, deliberately,
+NOT started in that arc's own lettered order. The project owner asked for
+this icon-font work ahead of Phase 17a (a base ImGui color/rounding theme
+pass) explicitly, out of sequence -- so 17a has not been built yet as of
+this phase, and nothing here assumes any part of it: no theme colors, no
+rounding tokens, no styling beyond what this phase's own icons need to
+render legibly on Dear ImGui's stock `StyleColorsDark()` palette (unchanged
+by this phase). A future Phase 17a should feel free to restyle around this
+phase's icons; this phase does not restyle around a 17a that doesn't exist
+yet.
+
+The gap this phase closes was named explicitly, in writing, back in Phase
+14d: `editor_ui.cpp`'s `renderSceneTreeNode()` has carried a "No icon
+glyphs" comment since the day it was written, explaining that Dear ImGui's
+default font only carries the ASCII/Latin-1 glyph range and that adding an
+icon font was real, separate scope Phase 14d's own brief didn't ask for.
+Phase 15d's `renderAssetTreeNode()` inherited the identical gap the day it
+was written, for the identical reason. Every Scene Hierarchy and Assets
+Browser row has been plain, icon-less text through the entire Phase 14/15/16
+arc as a result -- unlike a real Unity/Blender-style editor, where a
+folder/mesh/light/camera icon is the first thing that tells a row's kind
+apart at a glance. This phase finally builds that icon font and wires both
+trees up to it.
+
+- **The font: Font Awesome Free 6.7.2, Solid style, hand-subsetted to six
+  glyphs.** Checked against this project's own established dependency bar
+  (the same permissive-license standard `CMakeLists.txt`'s own
+  `FetchContent` fetches and `external/stb`'s vendored `stb_image.h` already
+  meet): Font Awesome Free's FONT files (as opposed to its SVG/JS icon
+  artwork, which is separately CC BY 4.0 and irrelevant here) are licensed
+  under the SIL Open Font License 1.1 -- permissive, redistribution-friendly,
+  the same family of license as every other checked-in/fetched dependency
+  this project already carries. The upstream release file
+  (`webfonts/fa-solid-900.ttf`, tag `6.7.2`) is ~426 KB and contains roughly
+  1,400 glyphs; this phase's own brief is explicit that merging that whole
+  range would be real, separate, unjustified atlas-memory and vendored-file-
+  size cost for icons this engine would never draw -- "a small, focused icon
+  set covering just what's actually needed... is enough." So the upstream
+  file was subsetted, offline, with `fonttools`'
+  (`pip install fonttools`) `pyftsubset`, down to exactly the six codepoints
+  this phase's two trees need:
+  ```
+  python3 -m fontTools.subset fa-solid-900.ttf \
+    --unicodes=F07B,F1B2,F0EB,F185,F030,F03E \
+    --glyph-names --layout-features='' --no-hinting --desubroutinize \
+    --output-file=editor-icons.ttf
+  ```
+  The result -- checked into `assets/fonts/editor-icons.ttf` -- is **2,160
+  bytes** (7 glyphs: the six named codepoints plus the mandatory `.notdef`),
+  roughly 0.5% of the upstream file's size. `assets/fonts/
+  LICENSE-font-awesome.txt` carries Font Awesome Free's own full, unmodified
+  license text (OFL 1.1 for the font itself, CC BY 4.0 for icon artwork, MIT
+  for code) alongside it -- the OFL's own condition 2 ("Original or Modified
+  Versions... may be bundled... provided that each copy contains the above
+  copyright notice and this license... as stand-alone text files") is what
+  that file satisfies; this project's own subset is a Modified Version under
+  that license (a strict subset of glyphs, nothing added/changed), which the
+  OFL explicitly permits redistributing under the same license, unrenamed
+  (this project never calls its own file "Font Awesome" -- only
+  `editor-icons.ttf`, sidestepping the OFL's Reserved-Font-Name restriction
+  on *that* name entirely).
+- **Where it lives, and why `assets/fonts/` rather than `external/`.** This
+  project's own README "Directory layout" section already draws the line
+  this phase follows: `external/` holds vendored *library source* (GLAD's
+  generated-shape `.c`/`.h`, stb_image's single header) that gets *compiled*
+  into the binary; `assets/` holds runtime *content* the engine *loads by
+  path* at startup (shaders, textures, models, scenes) via
+  `paths.hpp`'s `resolveAssetPath()` and `CMakeLists.txt`'s existing
+  `copy_directory` POST_BUILD step. A font file is loaded by path at
+  startup (`io.Fonts->AddFontFromFileTTF(resolveAssetPath("assets/fonts/
+  editor-icons.ttf"), ...)`) exactly the way a texture or shader is -- it is
+  content, not compiled library source -- so `assets/fonts/` is the correct
+  home, not a new `external/` subdirectory. This also means the existing
+  POST_BUILD `copy_directory` step needed **zero changes**: it already
+  recurses through every subdirectory `assets/` has, `fonts/` included, the
+  same way it already carries `assets/textures/skybox/` and `assets/
+  textures/hdri/` without ever needing to name them individually.
+- **Vendored file, not `FetchContent`'d -- the one real judgment call this
+  phase's brief asked for.** `FetchContent`ing Font Awesome Free's own
+  upstream git repository (rather than hand-subsetting a downloaded release
+  file, as above) was the other option this phase's brief named, and was
+  rejected: that repository is large (icon SVGs, JS, multiple font families,
+  build tooling -- a `git clone` pulls all of it, `FetchContent` has no
+  built-in sparse-checkout), and even a successful full fetch would still
+  need this exact same offline `pyftsubset` step afterward to reach a
+  reasonably-sized file -- `FetchContent` would add real configure-time cost
+  (network + a much bigger clone) for zero benefit over vendoring the
+  already-tiny 2,160-byte result directly, unlike GLFW/GLM/Assimp/nlohmann_
+  json/Dear ImGui above, each of which IS built from its own fetched source
+  every configure (a real, load-bearing reason to fetch, not just historical
+  habit). This is the same reasoning `external/glad/`'s own README writeup
+  gives for vendoring instead of generating: fetch only when the fetch
+  itself does real, repeated work a vendored copy can't; vendor when the
+  artifact is small, stable, and the fetch would just be overhead around it.
+  Network access itself was verified working in this environment before
+  committing to either option (a `curl` against `raw.githubusercontent.com`
+  succeeded) -- vendoring was chosen on its own merits, not because fetching
+  was unavailable.
+- **The six codepoints, and why these specific six.** `editor_icons.hpp`
+  (new, `include/engine/`) names them: `kIconFolder` (0xF07B, "folder"),
+  `kIconMesh` (0xF1B2, "cube"), `kIconPointLight` (0xF0EB, "lightbulb"),
+  `kIconDirectionalLight` (0xF185, "sun"), `kIconCamera` (0xF030, "camera"),
+  `kIconTexture` (0xF03E, "image") -- one per Scene Hierarchy row kind this
+  phase's brief names (ModelComponent/PointLight/DirectionalLight/
+  CameraComponent/empty-organizational) plus one per Assets Browser file
+  category (`asset_drop.hpp`'s existing `AssetDropCategory::kModel`/
+  `kTexture`), with the folder glyph doing double duty for both "an empty
+  Scene row" and "any Assets directory row" -- the same concept
+  ("a group, not a specific piece of content") in both trees.
+- **`editor_icons.hpp`/`editor_icons.cpp`** (new): besides the six codepoint
+  constants, two pure, GL/ImGui-free decision functions --
+  `sceneNodeIconGlyph(hasModel, hasPointLight, hasDirectionalLight,
+  hasCamera)` and `assetNodeIconGlyph(isDirectory, AssetDropCategory)` --
+  each with exactly one right answer given its inputs, the identical "small,
+  standalone decision, unit-tested in isolation" shape `light.hpp`'s
+  `resolveActiveDirectionalLight()`, `material_override.hpp`'s
+  `resolveDiffuseTextureOverride()`, `asset_drop.hpp`'s
+  `classifyAssetDropPath()`, and `camera_capture.hpp`'s
+  `decideCameraCapture()` already establish. `assetNodeIconGlyph()`
+  deliberately reuses `asset_drop.hpp`'s own `AssetDropCategory` enum rather
+  than inventing a second "what kind of asset is this" type -- the exact
+  same classification `editor_ui.cpp`'s Viewport-drop handling (Phase 15g)
+  already derives from an identical `"assets/" + AssetTreeNode::relativePath`
+  string, now reused a second time instead of re-derived a second, possibly-
+  drifting way. Depends on nothing but `<cstdint>` and `asset_drop.hpp`
+  itself, so `tests/editor_icons_test.cpp` exercises both functions --
+  including the precedence order when a `SceneTreeNode` carries more than
+  one flag at once (Model beats every light/camera flag; a light flag beats
+  Camera; PointLight is checked before DirectionalLight -- see that header's
+  own comment for the full reasoning) -- with no live GL context, Dear ImGui
+  frame, or font atlas at all.
+- **`scene_hierarchy.hpp`/`.cpp`**: `SceneTreeNode` gains four new bools --
+  `hasModel`/`hasPointLight`/`hasDirectionalLight`/`hasCamera` -- set once,
+  in `buildSceneTree()`, from the same `registry.getComponent<T>() !=
+  nullptr` checks every other per-entity UI in this engine already does.
+  Computed here rather than re-checked every frame from inside the ImGui-
+  facing row-drawing code, the same "this file already has registry access
+  and already visits every entity once per build" reasoning `name` itself is
+  resolved with. `scene_hierarchy.cpp` now also includes `light.hpp`/
+  `camera_component.hpp` -- both header-only as far as a plain component-
+  presence check needs, so this is **not** a new link dependency:
+  `tests/scene_hierarchy_test.cpp`'s own CMake entry still links only
+  `scene_hierarchy.cpp` itself, no `light.cpp`/`camera_component.cpp`.
+- **`editor_ui.cpp`**: this engine's first EXPLICIT font-atlas
+  configuration. Before this phase, `io.Fonts` held zero fonts of its own
+  anywhere in this codebase -- Dear ImGui's own `ImFontAtlasBuildMain()`
+  auto-calls `AddFontDefault()` the first time the atlas is ever built if
+  nothing else already has, so every row's text has, until now, always
+  silently been that implicit fallback. `EditorUI`'s constructor now calls
+  `io.Fonts->AddFontDefault()` explicitly, then
+  `io.Fonts->AddFontFromFileTTF(resolveAssetPath("assets/fonts/
+  editor-icons.ttf"), 0.0f, &iconFontConfig, kIconGlyphRanges)` with
+  `iconFontConfig.MergeMode = true` -- merging the six icon glyphs directly
+  into the SAME `ImFont` every row already draws with (no
+  `ImGui::PushFont()` needed anywhere in the row-drawing code).
+  `kIconGlyphRanges` is a narrow, explicit `{lo, hi}` pair per codepoint,
+  built FROM `editor_icons.hpp`'s own constants (not a second, hand-copied
+  list) so the atlas merge and the row-drawing code can never silently list
+  a different set of codepoints. A failed font load (a checkout missing
+  `assets/fonts/`) degrades to a `LOG_WARN` and icon-less rows -- the exact
+  pre-Phase-17b look -- rather than crashing the whole engine over a
+  cosmetic asset, the same instinct `asset_browser.cpp`'s own unreadable-
+  entry handling already established.
+  - **Researched against the actual vendored ImGui, not assumed** (the same
+    discipline Phase 16's own GLFW-cursor/ImGui-hover research applied):
+    this project's vendored `v1.92.9b-docking` build sets
+    `ImGuiBackendFlags_RendererHasTextures` (`imgui_impl_opengl3.cpp`'s own
+    `Init()`), which routes font baking through a DYNAMIC per-glyph-on-
+    demand path (`ImFontAtlasBuildMain()`) that bakes whichever codepoint a
+    draw call actually requests, from whichever merged source actually has
+    it. `GlyphRanges` itself is only consulted by the LEGACY eager-preload-
+    everything path (`ImFontAtlasBuildLegacyPreloadAllGlyphRanges()`),
+    skipped entirely once `RendererHasTextures` is true -- so on this
+    build, the narrow glyph-ranges array's real effect is close to
+    redundant (the vendored subset font physically contains only these six
+    glyphs anyway). It's still passed explicitly because it's the
+    documented, standard `MergeMode` idiom regardless of backend, costs
+    nothing, and keeps this code correct if the rendering backend ever
+    changes to one where `RendererHasTextures` is false.
+  - `SizePixels` is left at its `ImFontConfig` default (0.0f, "implicit
+    reference size") rather than a fixed pixel constant -- matching
+    `AddFontDefault()`'s own implicit sizing keeps the icon glyphs
+    auto-scaling in lockstep with the base UI font instead of this
+    constructor needing to hardcode/maintain a second size constant that
+    could drift out of sync with it.
+- **`renderSceneTreeNode()`/`renderAssetTreeNode()`** (`editor_ui.cpp`):
+  each row's label is now `"<icon>  <name>"` -- one space-padded icon glyph
+  (UTF-8-encoded by this file's own new `iconGlyphUtf8()` helper) ahead of
+  the existing text, still exactly one `TreeNodeEx()` call/one selectable
+  row, so `IsItemClicked()`/drag-and-drop/everything else either function
+  already did needed **no** further change to keep working with the icon
+  folded into the same label string. `renderSceneTreeNode()`'s icon comes
+  from `sceneNodeIconGlyph()` fed by the node's own four new flags;
+  `renderAssetTreeNode()`'s comes from `assetNodeIconGlyph()` fed by
+  `node.isDirectory` and `classifyAssetDropPath("assets/" +
+  node.relativePath)` -- the identical `assetPath` string this function
+  already needed to build for Phase 15g's own drag-and-drop payload, now
+  computed once and reused for both instead of built twice. Both
+  functions' own long-standing "No icon glyphs" header comments are
+  updated (not deleted) to record that this phase is what closed the gap
+  they used to explain, matching this project's own "update, don't erase, a
+  stale comment" precedent (e.g. Phase 15b's Directional-Light tooltip).
+- **Deliberately general, not hardcoded to tree rows.** This phase's own
+  brief is explicit that a LATER item in this arc (the toolbar --
+  grid/lighting/texture/play-pause toggle icons) will want to merge more
+  icons into the same font/atlas. Nothing here forces that to be awkward: a
+  future phase adds one more named `char32_t` constant to
+  `editor_icons.hpp`, appends it to `editor_ui.cpp`'s own
+  `kIconGlyphRanges` array, and merges cleanly into the exact same `ImFont`
+  this phase's own `AddFontFromFileTTF()`/`MergeMode` call already builds --
+  no rearchitecting of the merge mechanism itself, just "one more
+  codepoint" each time.
+- **Deliberately NOT done this phase**: the toolbar itself (grid/lighting/
+  texture/play-pause toggle buttons) -- a separate, later item in this arc,
+  named explicitly in this phase's own brief as out of scope even though it
+  will reuse this phase's font infrastructure. Phase 17a's base ImGui color/
+  rounding theme pass -- not yet built, not assumed by anything here (see
+  this section's own opening paragraph). Custom window chrome -- untouched.
+  A procedural vector-icon system drawn with raw `ImDrawList` primitives (an
+  alternative this phase's own brief explicitly rejected as a materially
+  different, larger, more speculative approach than a font-atlas merge, the
+  standard, well-trodden Dear ImGui pattern for this).
+- **Verify**: a clean rebuild (`rm -rf build && cmake -B build -S . &&
+  cmake --build build -j"$(nproc)"`) compiles with **zero warnings** under
+  `-Wall -Wextra` (`editor_icons.cpp`/`editor_icons_test.cpp` included).
+  `ctest` reports **13/13** (`editor_icons_test` new -- exhaustive coverage
+  of both glyph-selection functions including the multi-flag precedence
+  cases; `scene_hierarchy_test` extended with one entity per component kind
+  plus a genuinely empty one, proving `buildSceneTree()` itself sets each
+  of the four new flags correctly from the registry, independent of
+  `sceneNodeIconGlyph()`'s own precedence logic). A baseline
+  `tools/run_headless.sh` run (`ENGINE_MAX_FRAMES=60`, no debug env vars)
+  logs the same clustered-lighting occupancy every prior phase's own
+  baseline has recorded (2136 -> 2153-2155/2304 clusters occupied, avg
+  3.565543 -> ~3.580 lights/occupied cluster, the same small run-to-run
+  llvmpipe noise Phase 15c's own review already characterized) and **zero**
+  `[ERROR]` lines -- confirming this phase's changes (font atlas + row
+  labels only) touch nothing in the rendering/lighting pipeline itself.
+  Inspected as screenshots (`ENGINE_SHOW_DEBUG_UI=1` for the baseline; four
+  further runs with `ENGINE_DEBUG_CREATE=pointlight`/`directionallight`/
+  `camera`/`empty` + a matching `ENGINE_DEBUG_SELECT`, each logging its own
+  `Created entity "..." via the Scene panel's Create menu` with zero
+  `[ERROR]` lines):
+  - The Scene panel shows a real cube glyph next to `scene`/`falling_cube`/
+    `parented_demo_cube` (this engine's default scene's own `ModelComponent`
+    entities), a real lightbulb glyph next to a freshly created "Point
+    Light" row, a real sun glyph next to "Directional Light", a real camera
+    glyph next to "Camera", and a real folder glyph next to "Empty" -- five
+    distinct, correctly-shaped glyphs (a lightbulb outline, an eight-point
+    sunburst, a camera body, a folder, a wireframe cube), not tofu/missing-
+    glyph boxes, confirming the font merge and per-row glyph selection are
+    both correct end to end.
+  - The Assets panel shows real folder glyphs next to the `models`/
+    `textures` category rows (and, expanded, next to `textures/hdri/` and
+    `textures/skybox/`), real cube glyphs next to every file under
+    `models/` (`.obj`/`.mtl` alike -- matching `classifyAssetDropPath()`'s
+    own "classified by folder, not extension" contract), and real image
+    glyphs next to `textures/hdri/sky.hdr` and `textures/skybox/back.png` --
+    the same "vendored subset font actually contains a well-formed, sensibly
+    designed glyph, not a corrupt/placeholder one" confirmation, independent
+    of the Scene panel's own five.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
@@ -6498,6 +6777,7 @@ brief called out explicitly, not an oversight.
 | **Assimp** | CMake `FetchContent` (git, tag `v5.4.3`) | De facto standard asset-import library; loads Phase 5's OBJ/glTF scenes via one well-known API instead of hand-rolling per-format parsers. Importer scope narrowed to just OBJ + glTF (see "Phase 5" above) to keep build time/scope down. |
 | **nlohmann/json** | CMake `FetchContent` (git, tag `v3.11.3`) | Single-header, MIT-licensed JSON library; Phase 8b's scene file format (see "Phase 8b" above) -- fetched the same way as GLFW/GLM/Assimp (an ordinary tagged git dependency), not hand-vendored like GLAD/stb_image below (see "Phase 8b"'s own writeup on why that precedent doesn't apply to a JSON library). |
 | **Dear ImGui** | CMake `FetchContent` (git, tag `v1.92.9b`), built as a first-party `imgui` static library target (see "Phase 8c" above) | Phase 8c's debug overlay (entity inspector, render-pass toggles, frame stats) -- the de facto standard immediate-mode debug UI library for real-time engines/tools; ships no CMake build of its own by design, so this project compiles its core sources + GLFW/OpenGL3 backend files directly, the same "small first-party target" shape `glad` below already uses. |
+| **Font Awesome Free 6.7.2 (Solid)** | Vendored, hand-subsetted to 6 glyphs (2,160 bytes) in `assets/fonts/editor-icons.ttf`, from an offline-downloaded upstream release file (see "Phase 17b" above) | Scene Hierarchy/Assets Browser row icons (folder/mesh/point-light/directional-light/camera/texture) -- OFL 1.1 licensed (fonts), permissive/redistribution-friendly; vendored rather than `FetchContent`'d since the upstream repo is large and a subsetting step is needed either way (see "Phase 17b"'s own writeup for the full reasoning). |
 
 ### GL loader: why hand-written instead of a generated GLAD
 
