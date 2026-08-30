@@ -503,6 +503,7 @@
 #include "engine/ecs.hpp"
 #include "engine/editor_ui.hpp"
 #include "engine/framebuffer.hpp"
+#include "engine/gizmo.hpp"
 #include "engine/ibl_probe.hpp"
 #include "engine/input.hpp"
 #include "engine/material.hpp"
@@ -729,6 +730,17 @@ private:
     // later this same frame (its own renderDockspaceShell() call, further
     // down in render()) is what the gizmo will be drawn at NEXT frame, not
     // this one.
+    //
+    // Phase 18j: also reads `gizmoMode_` -- kTranslate draws
+    // gizmoArrowMesh_'s three arrows exactly as Phase 18e always did;
+    // kRotate draws gizmoRingMesh_'s three rings instead, through the
+    // IDENTICAL per-axis model-matrix loop (same rotation table, same
+    // gizmoAxisLength()-based scale, same X/Y/Z colors, same gizmoShader_ --
+    // mesh.hpp's makeGizmoRing() deliberately lies in the local Y-Z plane,
+    // i.e. its own normal is local +X, specifically so it needs no second
+    // rotation table of its own). Never draws both in the same frame -- see
+    // GizmoMode's own gizmo.hpp header comment for why this is a debug/
+    // test-only selection for now, not a live per-frame user toggle.
     void renderGizmo(const glm::mat4& view, const glm::mat4& projection);
 
     // Phase 13g: the SSR compositing pass -- redraws ONLY the PBR sphere
@@ -1496,6 +1508,14 @@ private:
     // "one shared Mesh, many instances" shape sphereMesh_/sphereInstances_
     // just below already establish.
     Mesh gizmoArrowMesh_;
+    // Phase 18j: the rotate gizmo's shared ring mesh (mesh.hpp's
+    // makeGizmoRing()) -- one instance, drawn three times per frame (once
+    // per axis), the identical "one shared Mesh, many instances" shape
+    // gizmoArrowMesh_ above already establishes, just for the rotate tool
+    // instead of translate. Only ever drawn instead of gizmoArrowMesh_, never
+    // alongside it -- see renderGizmo()'s own updated comment for how
+    // gizmoMode_ picks between the two.
+    Mesh gizmoRingMesh_;
     // Phase 9: the PBR sphere test-grid. One shared Mesh (every sphere is
     // geometrically identical) plus one SphereInstance (transform +
     // PBRMaterial) per sphere -- see application.cpp's kSphere* constants
@@ -1557,6 +1577,32 @@ private:
     // frame). Meaningless (left at its default) whenever
     // debugGizmoDragEntity_ is std::nullopt.
     glm::vec3 debugGizmoDragStartPosition_{0.0f};
+
+    // Phase 18j: which gizmo tool (translate/rotate) is currently active --
+    // see GizmoMode's own gizmo.hpp header comment for why this is a debug/
+    // test-only selection (ENGINE_DEBUG_GIZMO_MODE, application.cpp) rather
+    // than a live user-facing toggle yet. Set once, in the constructor body,
+    // from debugGizmoModeFromEnv() -- never written anywhere else this
+    // phase, so it stays fixed for the whole run (no live-switch
+    // stale-state concern to guard against, unlike a real per-frame
+    // toggle would have).
+    GizmoMode gizmoMode_ = GizmoMode::kTranslate;
+    // Phase 18j: set from ENGINE_DEBUG_GIZMO_ROTATE_DRAG (see that env
+    // var's own application.cpp comment) -- std::nullopt (the default)
+    // unless it resolved to a real entity at startup. update() drives a
+    // scripted synthetic rotate-gizmo drag against this entity over a small
+    // fixed frame window (kDebugGizmoRotateDragStartFrame et al.,
+    // application.cpp) when set, and logs its Transform::rotation() (as
+    // Euler degrees, human-checkable) periodically while doing so -- the
+    // identical "one member both SELECTS the debug feature and NAMES its
+    // target" shape debugGizmoDragEntity_ above already establishes for the
+    // translate gizmo's own equivalent hook. Only actually does anything
+    // when gizmoMode_ == kRotate (a verification run also needs
+    // ENGINE_DEBUG_GIZMO_MODE=rotate AND ENGINE_DEBUG_SELECT set to the same
+    // entity, exactly the "also needs ENGINE_DEBUG_SELECT" caveat
+    // debugGizmoDragEntity_'s own comment already documents for the
+    // translate case).
+    std::optional<EntityId> debugGizmoRotateDragEntity_;
 
     // Phase 18h: ENGINE_DEBUG_UNDO=<count>/ENGINE_DEBUG_REDO=<count> -- see
     // those two env vars' own application.cpp comments. 0 (the default)

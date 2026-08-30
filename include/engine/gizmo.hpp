@@ -316,6 +316,232 @@ struct GizmoDragResult {
 GizmoDragResult updateGizmoDrag(const GizmoDragState& current, bool mouseDown, bool mousePressedThisFrame,
                                  GizmoAxis hoverAxis, const Ray& ray, const glm::vec3& entityPosition);
 
+// Phase 18j: which of the two gizmo tools built so far is currently active
+// -- NOT yet a real, user-facing move/rotate/scale switcher (that's
+// explicitly Phase 18k's own job, once scale exists too and all three tools
+// can be switched between with one W/E/R-style mechanism built once rather
+// than revised twice) -- this phase reaches kRotate only via a new
+// debug-only env var (ENGINE_DEBUG_GIZMO_MODE, application.cpp), defaulting
+// to kTranslate so every pre-18j screenshot/test/behavior is completely
+// unaffected. Lives in this pure header (not editor_ui.hpp/application.hpp)
+// because both EditorUI's interaction code and Application's rendering code
+// need to agree on it, the same "shared pure vocabulary both GL/ImGui-facing
+// halves consume" role GizmoAxis above already plays.
+enum class GizmoMode {
+    kTranslate,
+    kRotate,
+};
+
+// ===========================================================================
+// Phase 18j: the rotate gizmo's own additions below -- three colored rings
+// (X=red/Y=green/Z=blue, the identical axis-color convention the translate
+// gizmo's own three arrows already established), each lying in the plane
+// PERPENDICULAR to its own axis (the X ring lies in the Y-Z plane, etc.),
+// click-dragged to spin the selected entity around that one axis. Follows
+// the same "pure decision function here, ImGui wiring in EditorUI,
+// Application applies the result" split the translate gizmo above
+// establishes -- see this header's own top-of-file comment for the general
+// shape, unchanged by this phase.
+// ===========================================================================
+
+// The result of intersecting `ray` with the infinite plane through
+// `planePoint` with unit normal `planeNormal` (`planeNormal` need not be
+// pre-normalized -- this function normalizes it internally, the same
+// convention closestPointsBetweenLines() already applies to its own
+// `lineDirection`). Returns std::nullopt in exactly two cases, both "no
+// meaningful result this frame, not garbage" (the same convention every
+// other near-degenerate case in this file already follows):
+//   - `ray.direction` nearly perpendicular to `planeNormal` (dot() near
+//     zero) -- physically, the ray is grazing almost exactly ALONG the
+//     plane itself, where a well-defined single intersection point doesn't
+//     exist (or is arbitrarily far away for an infinitesimally smaller
+//     angle) -- the plane-equivalent of closestPointsBetweenLines()'s own
+//     near-parallel-lines case, and reused here as the SAME threshold
+//     (kParallelEpsilon, gizmo.cpp) for the identical reason: both are "the
+//     angle between two unit directions is near zero" degeneracies.
+//   - the computed intersection lies BEHIND the ray's own origin (t < 0) --
+//     never a usable result for a mouse ray cast forward from the camera,
+//     the same "reject, don't hand back a point no on-screen click could
+//     have produced" instinct worldPointToScreenPoint()'s own w<=epsilon
+//     guard already applies to a different kind of behind-the-camera case.
+struct RayPlaneHit {
+    float t = 0.0f;
+    glm::vec3 point{0.0f};
+};
+std::optional<RayPlaneHit> intersectRayWithPlane(const Ray& ray, const glm::vec3& planePoint,
+                                                  const glm::vec3& planeNormal);
+
+// The two orthonormal basis vectors spanning the plane perpendicular to
+// `axis` -- `u` is this ring's own angle-zero direction, `v` is the
+// direction a POSITIVE angle sweeps toward. `v` is deliberately chosen as
+// cross(gizmoAxisDirection(axis), u) (hand-verified per axis below), which
+// is exactly what makes an angle DELTA computed in this basis, when handed
+// to Transform::rotate(deltaDeg, gizmoAxisDirection(axis)) (transform.hpp),
+// visually spin the grabbed ring point in the SAME direction the mouse
+// dragged it -- glm::angleAxis(theta, a) rotates a vector starting
+// perpendicular to `a` towards cross(a, that vector) for small positive
+// theta (the standard right-hand-rule Rodrigues-formula fact), so choosing
+// v = cross(axis, u) up front means this header's own angle convention and
+// Transform::rotate()'s own rotation convention agree by construction,
+// rather than by ad-hoc sign-matching at every call site.
+//   kX: u=(0,1,0), v=cross((1,0,0),(0,1,0))=(0,0,1)
+//   kY: u=(0,0,1), v=cross((0,1,0),(0,0,1))=(1,0,0)
+//   kZ: u=(1,0,0), v=cross((0,0,1),(1,0,0))=(0,1,0)
+// kNone returns both vectors zeroed -- never meant to be used as a real
+// basis, just a well-defined value for the enum's own default case, the
+// same convention gizmoAxisDirection(kNone) already establishes.
+struct RingPlaneBasis {
+    glm::vec3 u{0.0f};
+    glm::vec3 v{0.0f};
+};
+RingPlaneBasis gizmoRingPlaneBasis(GizmoAxis axis);
+
+// The angle (radians, atan2()'s own (-pi, pi] range) of `point` around
+// `gizmoOrigin`, measured in the plane perpendicular to `axis` using
+// gizmoRingPlaneBasis(axis)'s own (u, v) convention above: angle 0 sits at
+// `gizmoOrigin + u`, and angle increases towards `v`. `point` need not lie
+// exactly at the ring's own radius, or exactly in-plane -- only its
+// projection onto (u, v) is used (dot(point - gizmoOrigin, u) and
+// dot(point - gizmoOrigin, v)), so any point intersectRayWithPlane() above
+// hands back (already exactly in-plane by construction) yields a
+// well-defined angle regardless of exactly how far from the ring's own
+// drawn radius it landed.
+float gizmoRingAngle(const glm::vec3& point, const glm::vec3& gizmoOrigin, GizmoAxis axis);
+
+// The result of testing `ray` against all three of the gizmo's own rings
+// (each the circle of radius `ringRadius`, centered at `gizmoOrigin`, lying
+// in the plane perpendicular to that axis) -- kNone when the ray's
+// plane-intersection point (intersectRayWithPlane() above) lands no closer
+// than `pickToleranceWorld` to any of the three circles' own radius, or
+// when the ray happens to be near-parallel to every one of the three
+// planes at once (geometrically implausible for all three simultaneously,
+// but handled the same defensive way regardless, exactly like
+// hitTestGizmoAxes()'s own identical all-three-parallel corner case).
+//
+// The "distance from the ray to a ring" this function actually measures is
+// |length(planeIntersectionPoint - gizmoOrigin) - ringRadius| -- since the
+// plane-intersection point is, by construction, exactly IN the same plane
+// the ring's own circle lies in, this is the EXACT (not approximate)
+// distance from that point to the closest point on the circle: the
+// closest point on a circle to any other point in its own plane always
+// lies along the radial direction through that point, at a distance equal
+// to the difference between the two radii. This is the standard technique
+// real DCC tools use for ring-gizmo picking (project the ray onto the
+// ring's own plane, then compare radial distance) -- genuine closest-point-
+// on-a-CIRCLE math, not an approximation that treats the ring as a straight
+// line segment the way hitTestGizmoAxes() correctly does for the
+// translate gizmo's own straight arrow handles.
+struct RingHitTestResult {
+    GizmoAxis axis = GizmoAxis::kNone;
+};
+RingHitTestResult hitTestGizmoRings(const Ray& ray, const glm::vec3& gizmoOrigin, float ringRadius,
+                                     float pickToleranceWorld);
+
+// The rotate gizmo's own persistent cross-frame drag state -- the
+// "not dragging / dragging-ring-X/Y/Z" state machine, the same shape
+// GizmoDragState above establishes for the translate gizmo, just carrying
+// an angle anchor instead of a position one.
+//
+// `axis == kNone` means "not currently dragging" (`lastAngle` is
+// meaningless in that state, left at its default). Unlike GizmoDragState's
+// own `startAxisT`/`startEntityPosition` -- which anchor a translate drag
+// to a FIXED point captured once at grab time, since updateGizmoDrag()
+// recomputes the drag's TOTAL delta from that fixed anchor every frame and
+// hands the caller an absolute new position to assign -- `lastAngle` is
+// deliberately updated EVERY frame (see updateGizmoRotateDrag()'s own
+// comment below for why): this state machine hands the caller an
+// INCREMENTAL angle delta each frame, meant to be applied via
+// Transform::rotate() (which itself composes onto whatever rotation is
+// already live, transform.hpp's own documented "new_rotation = incoming *
+// old" contract) rather than a second, hand-rolled quaternion composition
+// scheme recomputing an absolute result from a fixed start every frame the
+// way the translate gizmo's own setPosition()-based application does.
+struct GizmoRotateDragState {
+    GizmoAxis axis = GizmoAxis::kNone;
+    float lastAngle = 0.0f;
+};
+
+// GizmoRotateDragResult::deltaAngleDeg is set (to the shortest signed
+// angle, in DEGREES, from `current.lastAngle` to this frame's freshly
+// measured ring angle -- see below for the wraparound handling) on every
+// frame an in-progress drag actually has a fresh angle to report;
+// std::nullopt on every other frame (not dragging at all; the frame a drag
+// starts, which only anchors `lastAngle` without reporting any delta yet;
+// the frame it ends; or a frame where the ray happened to be too
+// near-parallel to the ring's own plane to compute a meaningful angle --
+// see intersectRayWithPlane()'s own comment). The caller
+// (EditorUI::updateGizmoRotate()) is what actually applies this delta, via
+// `transform->rotate(*deltaAngleDeg, gizmoAxisDirection(state.axis))` --
+// this file has no idea what a Transform is, the same separation
+// GizmoDragResult's own header comment above already documents for the
+// translate gizmo.
+struct GizmoRotateDragResult {
+    GizmoRotateDragState state;
+    std::optional<float> deltaAngleDeg;
+};
+
+// The rotate gizmo's whole drag state machine, in one pure function -- the
+// same "current state + this frame's inputs -> next state (+ any derived
+// output)" shape updateGizmoDrag() above already establishes for the
+// translate gizmo, adapted for an angle-based (not position-based) drag:
+//
+//   - current.axis == kNone (not dragging):
+//       - mousePressedThisFrame && hoverAxis != kNone: GRABS that ring --
+//         intersects `ray` with the plane through `gizmoOrigin`
+//         perpendicular to hoverAxis (intersectRayWithPlane()) and, if that
+//         succeeds, starts dragging: next state has axis=hoverAxis,
+//         lastAngle = gizmoRingAngle() of the intersection point.
+//         deltaAngleDeg is std::nullopt this same frame -- a grab only
+//         anchors the drag, exactly mirroring updateGizmoDrag()'s own "the
+//         grab frame produces no position update" contract, applied here to
+//         angle instead. If the plane intersection fails (the ray is
+//         grazing the ring's own plane right where the user clicked, or
+//         lands behind the ray's own origin), the grab is silently
+//         declined -- stays kNone -- rather than starting a drag anchored
+//         to a meaningless angle.
+//       - anything else (no press, or a press somewhere hoverAxis says
+//         isn't a ring): stays kNone, deltaAngleDeg = std::nullopt. Exactly
+//         updateGizmoDrag()'s own edge-triggering contract -- a held-but-
+//         not-freshly-pressed button hovering a ring must not retroactively
+//         start a drag.
+//   - current.axis != kNone (dragging):
+//       - !mouseDown: released -- RETURNS to kNone (every field reset to
+//         its default), deltaAngleDeg = std::nullopt (the entity's rotation
+//         already reflects the last frame that DID report a delta;
+//         releasing the button rotates nothing further).
+//       - mouseDown (still held): re-intersects `ray` with the SAME ring's
+//         plane (through `gizmoOrigin`, perpendicular to current.axis --
+//         note this is `gizmoOrigin`, not a cached grab-time anchor point,
+//         since the plane a ring lies in is defined purely by its axis
+//         direction through the gizmo's own current origin, unlike the
+//         translate gizmo's axis LINE, which has to stay fixed in space for
+//         the whole gesture -- see GizmoDragState's own comment for why
+//         THAT anchor is frozen; a rotation's own plane has no equivalent
+//         "already moving out from under the drag" problem, since spinning
+//         an entity in place doesn't relocate `gizmoOrigin`). If that
+//         succeeds, deltaAngleDeg = the shortest signed angle (radians,
+//         wrapped via atan2(sin(delta), cos(delta)) so a grab spanning the
+//         ±180-degree discontinuity reports a small delta in the right
+//         direction rather than an enormous wrong-signed jump) from
+//         current.lastAngle to this frame's freshly measured angle,
+//         converted to degrees; state.lastAngle is updated to this frame's
+//         freshly measured angle (NOT incremented by the delta -- reading
+//         the ray fresh every frame this way means one skipped/degenerate
+//         frame never leaves the next good frame's own delta polluted by
+//         it). If it fails (ray briefly grazing the ring's own plane
+//         mid-drag), state.lastAngle is left UNCHANGED (still whatever the
+//         last successful frame measured) and deltaAngleDeg is
+//         std::nullopt for just this one frame -- the entity simply holds
+//         its last rotation rather than jumping to a garbage one, and the
+//         very next non-degenerate frame's delta is computed against that
+//         same still-valid last-known angle, with no accumulated drift from
+//         the skipped frame(s) -- the identical resume-cleanly guarantee
+//         updateGizmoDrag()'s own header comment already documents for its
+//         own briefly-parallel mid-drag case.
+GizmoRotateDragResult updateGizmoRotateDrag(const GizmoRotateDragState& current, bool mouseDown,
+                                             bool mousePressedThisFrame, GizmoAxis hoverAxis, const Ray& ray,
+                                             const glm::vec3& gizmoOrigin);
+
 }  // namespace engine
 
 #endif  // ENGINE_GIZMO_HPP

@@ -396,4 +396,48 @@ Mesh makeGizmoArrow(float shaftLength, float shaftRadius, float tipLength, float
     return Mesh(vertices, indices);
 }
 
+Mesh makeGizmoRing(float radius, float thickness, int segments) {
+    // Same defensive floor makeGizmoArrow()/makeUVSphere() already apply to
+    // their own segment counts -- fewer than 3 sides isn't a real ring.
+    segments = std::max(segments, 3);
+
+    constexpr float kTwoPi = 2.0f * 3.14159265358979323846f;
+    const float innerRadius = radius - thickness * 0.5f;
+    const float outerRadius = radius + thickness * 0.5f;
+
+    std::vector<Vertex> vertices;
+    std::vector<unsigned int> indices;
+
+    // Two rings of `segments + 1` vertices (the repeated angle=0/angle=2*pi
+    // seam vertex, the same makeGizmoArrow()/makeUVSphere() idiom for a
+    // closed loop) -- inner (radius - thickness/2) and outer (radius +
+    // thickness/2), both lying in the local Y-Z plane (x=0). `normal` is an
+    // arbitrary placeholder (+X, this ring's own nominal facing direction) --
+    // see this function's own header comment for why gizmo.vert never
+    // actually reads it.
+    const auto ringPoint = [](float angle, float r) {
+        return glm::vec3(0.0f, r * std::cos(angle), r * std::sin(angle));
+    };
+
+    const unsigned int innerBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        vertices.push_back({ringPoint(angle, innerRadius), {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}});
+    }
+    const unsigned int outerBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        vertices.push_back({ringPoint(angle, outerRadius), {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}});
+    }
+    for (int i = 0; i < segments; ++i) {
+        const unsigned int innerA = innerBase + static_cast<unsigned int>(i);
+        const unsigned int innerB = innerA + 1;
+        const unsigned int outerA = outerBase + static_cast<unsigned int>(i);
+        const unsigned int outerB = outerA + 1;
+        indices.insert(indices.end(), {innerA, outerA, outerB, outerB, innerB, innerA});
+    }
+
+    return Mesh(vertices, indices);
+}
+
 }  // namespace engine

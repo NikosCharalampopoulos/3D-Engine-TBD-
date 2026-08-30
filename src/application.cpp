@@ -1345,6 +1345,47 @@ std::string debugGizmoDragEntityNameFromEnv() {
     return value != nullptr ? std::string(value) : std::string();
 }
 
+// Phase 18j: ENGINE_DEBUG_GIZMO_MODE=<translate|rotate>, unset (or
+// "translate") by default -- the debug/test-only mechanism this phase's own
+// brief calls for to reach the new rotate gizmo at all, standing in for the
+// real move/rotate/scale UI switcher explicitly deferred to Phase 18k (once
+// scale exists too, so it can be built once for all three tools). See
+// GizmoMode's own gizmo.hpp header comment for the full "why debug-only for
+// now" reasoning. An unrecognized non-empty value is logged as a warning and
+// treated as "translate" -- the same "don't silently misbehave on a typo'd
+// env var" treatment debugUndoOrRedoCountFromEnv() above already gives a
+// different malformed value.
+GizmoMode debugGizmoModeFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_GIZMO_MODE");
+    if (value == nullptr || *value == '\0') {
+        return GizmoMode::kTranslate;
+    }
+    const std::string raw(value);
+    if (raw == "translate") {
+        return GizmoMode::kTranslate;
+    }
+    if (raw == "rotate") {
+        return GizmoMode::kRotate;
+    }
+    LOG_WARN("ENGINE_DEBUG_GIZMO_MODE=\"" + raw + "\" is not \"translate\" or \"rotate\"; defaulting to translate");
+    return GizmoMode::kTranslate;
+}
+
+// Phase 18j: ENGINE_DEBUG_GIZMO_ROTATE_DRAG=<entity name>, unset by
+// default -- the rotate gizmo's own headless verification hook, the exact
+// same "Xvfb has no physical pointer device, so feed a scripted sequence of
+// synthetic mouse positions into the same production entry point a real
+// drag would" shape debugGizmoDragEntityNameFromEnv()'s own comment above
+// already establishes for the translate gizmo, reused here unmodified for
+// rotation. Only has any effect when gizmoMode_ is ALSO kRotate
+// (ENGINE_DEBUG_GIZMO_MODE=rotate) -- see debugGizmoRotateDragEntity_'s own
+// application.hpp comment for the full "also needs ENGINE_DEBUG_SELECT"
+// caveat.
+std::string debugGizmoRotateDragEntityNameFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_GIZMO_ROTATE_DRAG");
+    return value != nullptr ? std::string(value) : std::string();
+}
+
 // Phase 18h: ENGINE_DEBUG_UNDO=<count>/ENGINE_DEBUG_REDO=<count>, unset (0)
 // by default -- undo/redo's own headless verification hook, same
 // getenv-gated-value shape as every other ENGINE_DEBUG_* env var above, just
@@ -1871,6 +1912,49 @@ constexpr std::size_t kDebugGizmoDragStepCount = sizeof(kDebugGizmoDragOffsets) 
 // not a limitation this phase is smuggling into the real feature.
 constexpr GizmoAxis kDebugGizmoDragAxis = GizmoAxis::kX;
 
+// Phase 18j: ENGINE_DEBUG_GIZMO_ROTATE_DRAG's own scripted frame schedule --
+// see debugGizmoRotateDragEntityNameFromEnv()'s own comment for the full
+// design. Reuses frame 15, the same starting frame kDebugGizmoDragStartFrame
+// above uses -- a separate, independently named constant (not a shared one)
+// because the two scripts are never meant to run in the SAME process (a
+// verification run tests one gizmo mode at a time, via
+// ENGINE_DEBUG_GIZMO_MODE), so there is no timeline-overlap concern the way
+// kDebugUndoFrame/kDebugRedoFrame's own comment has to reason about for
+// features that genuinely can coexist in one run.
+constexpr std::uint64_t kDebugGizmoRotateDragStartFrame = 15;
+
+// The ABSOLUTE angle (degrees, around the ring's own gizmoRingPlaneBasis()
+// convention -- gizmo.hpp) targeted at each successive scripted frame,
+// starting from the grab itself (index 0, which only anchors the drag
+// without rotating anything yet, matching updateGizmoRotateDrag()'s own
+// documented "the grab frame produces no delta" contract -- the identical
+// shape kDebugGizmoDragOffsets above already establishes for translate,
+// just measured in degrees-around-a-ring instead of world-units-along-a-
+// line). Five entries (grab + four rotate steps), each 30 degrees apart --
+// a deliberately round number so every intermediate log line's expected
+// rotation is trivial to verify by hand (each step composes exactly +30
+// degrees around the X axis onto whatever rotation is already live, via
+// Transform::rotate() -- see updateGizmoRotateDrag()'s own header comment
+// for why this is INCREMENTAL, not an absolute target the way translate's
+// own newPosition is). Starts at 20, not 0 -- avoiding the ring's own
+// angle-zero seam purely for the same "aim somewhere a real hand naturally
+// would, not at a boundary value" instinct kDebugGizmoDragOffsets' own
+// comment already documents for a different reason (there, avoiding the
+// three-axis-handles-converge-at-the-origin ambiguity; a ring has no
+// analogous ambiguity at its own angle 0, but starting off of it keeps this
+// script's own log output free of any coincidental-looking round number at
+// the very first step).
+constexpr float kDebugGizmoRotateDragAngleOffsets[] = {20.0f, 50.0f, 80.0f, 110.0f, 140.0f};
+constexpr std::size_t kDebugGizmoRotateDragStepCount =
+    sizeof(kDebugGizmoRotateDragAngleOffsets) / sizeof(kDebugGizmoRotateDragAngleOffsets[0]);
+
+// This debug script always drags the X ring -- the identical "fixed one
+// axis, keep the script's own expected result trivial to state and verify
+// by hand" scope choice kDebugGizmoDragAxis above already documents; the
+// underlying updateGizmoRotateDrag()/hitTestGizmoRings() machinery itself is
+// fully axis-generic (see tests/gizmo_test.cpp, which exercises all three).
+constexpr GizmoAxis kDebugGizmoRotateDragAxis = GizmoAxis::kX;
+
 // Phase 18h: ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO's own scripted frames --
 // see debugUndoOrRedoCountFromEnv()'s own comment for the full design. Both
 // well after kDebugGizmoDragStartFrame's own scripted drag has fully
@@ -2062,6 +2146,12 @@ Application::Application(int width, int height, const std::string& title, std::u
       // Phase 18e: the translate gizmo's shared arrow mesh -- see mesh.hpp's
       // makeGizmoArrow() and this class's own renderGizmo() header comment.
       gizmoArrowMesh_(makeGizmoArrow()),
+      // Phase 18j: the rotate gizmo's shared ring mesh -- see mesh.hpp's
+      // makeGizmoRing() and this class's own renderGizmo() header comment.
+      // Reuses gizmoShader_ (no second shader program) and the identical
+      // per-axis rotate/scale model-matrix loop gizmoArrowMesh_ above
+      // already uses -- see renderGizmo()'s own updated comment.
+      gizmoRingMesh_(makeGizmoRing()),
       // Phase 9: the PBR sphere grid's shared geometry -- one Mesh, reused
       // (with a different PBRMaterial + Transform) by every sphere in
       // sphereInstances_ (built below, in the constructor body, since it
@@ -2370,6 +2460,46 @@ Application::Application(int width, int height, const std::string& title, std::u
                           std::to_string(kDebugGizmoDragStartFrame));
             } else {
                 LOG_WARN("ENGINE_DEBUG_GIZMO_DRAG=\"" + gizmoDragName + "\" does not match any entity's name");
+            }
+        }
+    }
+
+    // Phase 18j: ENGINE_DEBUG_GIZMO_MODE -- see debugGizmoModeFromEnv()'s
+    // own comment above for the full design. Applied here, in the
+    // constructor body (not gizmoMode_'s own in-class default), the same
+    // "apply a debug env-var override in the body" placement every other
+    // constructor-time debug flag in this class already follows (see e.g.
+    // debugForcePlayModeFromEnv()'s own call site comment for why). Only
+    // logged when it actually changes anything from the default -- an unset/
+    // "translate" run (every pre-18j behavior) stays silent here, matching
+    // this class's own "don't log a no-op" instinct elsewhere.
+    gizmoMode_ = debugGizmoModeFromEnv();
+    if (gizmoMode_ == GizmoMode::kRotate) {
+        LOG_INFO("ENGINE_DEBUG_GIZMO_MODE=rotate: the rotate gizmo (not the translate gizmo) is now the active "
+                  "gizmo tool");
+    }
+
+    // Phase 18j: ENGINE_DEBUG_GIZMO_ROTATE_DRAG -- the identical resolve-
+    // once-at-startup shape the ENGINE_DEBUG_GIZMO_DRAG block immediately
+    // above already establishes, just for the rotate gizmo's own scripted
+    // drag. See debugGizmoRotateDragEntityNameFromEnv()'s own comment for
+    // why this alone does nothing without ALSO setting
+    // ENGINE_DEBUG_GIZMO_MODE=rotate (and ENGINE_DEBUG_SELECT, the same
+    // "also needs SELECT" caveat the translate hook's own comment already
+    // documents).
+    {
+        const std::string gizmoRotateDragName = debugGizmoRotateDragEntityNameFromEnv();
+        if (!gizmoRotateDragName.empty()) {
+            const EntityId found = findEntityByName(registry_, gizmoRotateDragName);
+            if (found.valid()) {
+                debugGizmoRotateDragEntity_ = found;
+                LOG_INFO("ENGINE_DEBUG_GIZMO_ROTATE_DRAG=\"" + gizmoRotateDragName +
+                          "\": will script a synthetic rotate-gizmo drag against entity " +
+                          std::to_string(found.index()) + " starting frame " +
+                          std::to_string(kDebugGizmoRotateDragStartFrame));
+            } else {
+                LOG_WARN("ENGINE_DEBUG_GIZMO_ROTATE_DRAG=\"" + gizmoRotateDragName +
+                          "\" does not match any entity's name");
             }
         }
     }
@@ -2912,6 +3042,79 @@ void Application::update(double deltaTime, const InputState& input) {
         // (findEntityByName(), constructor) has a Transform by construction.
     }
 
+    // Phase 18j: ENGINE_DEBUG_GIZMO_ROTATE_DRAG's own scripted synthetic
+    // rotate drag -- the identical shape the ENGINE_DEBUG_GIZMO_DRAG block
+    // immediately above already establishes (this block only ever decides
+    // WHAT synthetic mouse input to feed EditorUI this frame; the real
+    // hit-test/drag-state-machine/Transform-mutation code runs later this
+    // SAME frame, inside EditorUI's own updateGizmoRotate(), called from
+    // render() -- only when gizmoMode_ == kRotate). Every rotation logged
+    // below is therefore this frame's value as of the START of update(),
+    // the identical one-frame latency the translate block above documents.
+    //
+    // Unlike the translate script, this one does NOT need to cache the
+    // entity's own start position/rotation across frames -- the ring's
+    // plane is defined purely by the entity's CURRENT world position
+    // (gizmoOrigin, re-read fresh every frame below, exactly like
+    // EditorUI::updateGizmoRotate() itself does -- see
+    // updateGizmoRotateDrag()'s own gizmo.hpp header comment for why a
+    // rotation's own plane has no "already moving out from under the drag"
+    // problem the translate gizmo's fixed axis LINE has), and a target
+    // ANGLE (kDebugGizmoRotateDragAngleOffsets) needs no anchor of its own
+    // to be computed relative to.
+    if (debugGizmoRotateDragEntity_.has_value()) {
+        Transform* transform = registry_.getComponent<Transform>(*debugGizmoRotateDragEntity_);
+        if (transform != nullptr) {
+            if (frameCount_ >= kDebugGizmoRotateDragStartFrame &&
+                frameCount_ < kDebugGizmoRotateDragStartFrame + kDebugGizmoRotateDragStepCount) {
+                const std::size_t step = static_cast<std::size_t>(frameCount_ - kDebugGizmoRotateDragStartFrame);
+                // Same root-entity "local position IS world position"
+                // simplification gizmo.hpp's own header comment documents
+                // for the translate gizmo -- every entity this env var can
+                // target in this engine's own demo scene is unparented.
+                const glm::vec3 gizmoOrigin = transform->position();
+                const float distanceToCamera = glm::length(camera_.position() - gizmoOrigin);
+                const float ringRadius = gizmoAxisLength(distanceToCamera);
+                const RingPlaneBasis basis = gizmoRingPlaneBasis(kDebugGizmoRotateDragAxis);
+                const float angleRad = glm::radians(kDebugGizmoRotateDragAngleOffsets[step]);
+                const glm::vec3 targetWorldPoint =
+                    gizmoOrigin + ringRadius * (std::cos(angleRad) * basis.u + std::sin(angleRad) * basis.v);
+                const float aspect = viewportHeight_ != 0
+                                          ? static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_)
+                                          : 1.0f;
+                const std::optional<glm::vec2> screenPoint =
+                    worldPointToScreenPoint(targetWorldPoint, static_cast<float>(viewportWidth_),
+                                             static_cast<float>(viewportHeight_), camera_.getViewMatrix(),
+                                             camera_.getProjectionMatrix(aspect));
+                if (screenPoint.has_value()) {
+                    editorUI_.setDebugMouseOverride(*screenPoint, /*mouseDown=*/true,
+                                                     /*mousePressedThisFrame=*/step == 0);
+                } else {
+                    LOG_WARN("ENGINE_DEBUG_GIZMO_ROTATE_DRAG: target world point projects behind the camera at "
+                              "step " + std::to_string(step) + "; skipping");
+                }
+                const glm::vec3 rotationDeg = glm::degrees(glm::eulerAngles(transform->rotation()));
+                LOG_INFO("Phase 18j gizmo-rotate-drag-verify: frame " + std::to_string(frameCount_) + " step " +
+                          std::to_string(step) + ", entity " + std::to_string(debugGizmoRotateDragEntity_->index()) +
+                          " rotation (deg) = (" + std::to_string(rotationDeg.x) + ", " +
+                          std::to_string(rotationDeg.y) + ", " + std::to_string(rotationDeg.z) + ")");
+            } else if (frameCount_ == kDebugGizmoRotateDragStartFrame + kDebugGizmoRotateDragStepCount) {
+                // One frame past the last scripted rotate step -- release
+                // the mouse button, ending the drag the same way a real
+                // mouse-button-up would (updateGizmoRotateDrag()'s own
+                // release-branch contract, gizmo.hpp).
+                editorUI_.setDebugMouseOverride(std::nullopt, /*mouseDown=*/false, /*mousePressedThisFrame=*/false);
+                const glm::vec3 rotationDeg = glm::degrees(glm::eulerAngles(transform->rotation()));
+                LOG_INFO("Phase 18j gizmo-rotate-drag-verify: frame " + std::to_string(frameCount_) +
+                          " release, entity " + std::to_string(debugGizmoRotateDragEntity_->index()) +
+                          " final rotation (deg) = (" + std::to_string(rotationDeg.x) + ", " +
+                          std::to_string(rotationDeg.y) + ", " + std::to_string(rotationDeg.z) + ")");
+            }
+        }
+        // else: defensive only -- every entity this env var can resolve to
+        // (findEntityByName(), constructor) has a Transform by construction.
+    }
+
     // Phase 18h: ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO's own scripted frames --
     // see debugUndoOrRedoCountFromEnv()'s own comment for the full design.
     // Fires exactly once each (frameCount_ is monotonically increasing, so
@@ -3349,20 +3552,28 @@ void Application::renderGizmo(const glm::mat4& view, const glm::mat4& projection
     gizmoShader_->use();
     gizmoShader_->setMat4("uView", view);
     gizmoShader_->setMat4("uProjection", projection);
-    gizmoArrowMesh_.bind();
+
+    // Phase 18j: which of the two gizmo tools' shared geometry this frame's
+    // three draws use -- gizmoRingMesh_ (mesh.hpp's makeGizmoRing()) needs
+    // no rotation table of its own beyond the one already built for
+    // gizmoArrowMesh_ below, since it deliberately lies in the local Y-Z
+    // plane (its own normal along local +X), the identical local-+X
+    // convention makeGizmoArrow() already uses -- see this method's own
+    // updated application.hpp comment.
+    Mesh& gizmoMesh = (gizmoMode_ == GizmoMode::kRotate) ? gizmoRingMesh_ : gizmoArrowMesh_;
+    gizmoMesh.bind();
 
     struct GizmoAxisDraw {
         GizmoAxis axis;
         glm::vec3 color;
     };
     // Fixed X/Y/Z draw order -- with depth testing disabled (above), the
-    // three arrows are not self-occlusion-correct against each other from
+    // three handles are not self-occlusion-correct against each other from
     // every possible camera angle (a real concern only when looking nearly
-    // straight down one axis, where that axis's own arrow is foreshortened
-    // to almost nothing on screen anyway); a translate gizmo needing full
-    // mutual self-occlusion between its own three handles is real, separate
-    // polish this phase's own scope (translate only, see this phase's
-    // README section) doesn't take on.
+    // straight down one axis, where that axis's own arrow/ring is
+    // foreshortened to almost nothing on screen anyway); a gizmo needing
+    // full mutual self-occlusion between its own three handles is real,
+    // separate polish neither this phase nor Phase 18e takes on.
     const GizmoAxisDraw axisDraws[3] = {
         {GizmoAxis::kX, kGizmoAxisColorX},
         {GizmoAxis::kY, kGizmoAxisColorY},
@@ -3370,10 +3581,16 @@ void Application::renderGizmo(const glm::mat4& view, const glm::mat4& projection
     };
     for (const GizmoAxisDraw& axisDraw : axisDraws) {
         glm::mat4 model = glm::translate(glm::mat4(1.0f), gizmoOrigin);
-        // Rotates makeGizmoArrow()'s own local +X onto this axis's world
-        // direction (gizmo.hpp's gizmoAxisDirection()) -- hand-verified:
-        // rotating (1,0,0) by +90 deg about +Z gives (0,1,0); by -90 deg
-        // about +Y gives (0,0,1); kX itself needs no rotation at all.
+        // Rotates makeGizmoArrow()'s/makeGizmoRing()'s own local +X onto
+        // this axis's world direction (gizmo.hpp's gizmoAxisDirection()) --
+        // hand-verified: rotating (1,0,0) by +90 deg about +Z gives
+        // (0,1,0); by -90 deg about +Y gives (0,0,1); kX itself needs no
+        // rotation at all. For the ring mesh specifically, this rotation
+        // does exactly what its own local Y-Z-plane construction needs: the
+        // X ring (no rotation) stays in the Y-Z plane; the Y ring (rotated
+        // +90 about Z) ends up in the X-Z plane; the Z ring (rotated -90
+        // about Y) ends up in the X-Y plane -- each one perpendicular to
+        // its own axis, exactly the standard rotate-gizmo appearance.
         switch (axisDraw.axis) {
             case GizmoAxis::kY:
                 model = glm::rotate(model, glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
@@ -3386,17 +3603,17 @@ void Application::renderGizmo(const glm::mat4& view, const glm::mat4& projection
             default:
                 break;
         }
-        // makeGizmoArrow()'s own default shape is unit length (shaftLength +
-        // tipLength == 1.0) along local +X -- uniform-scaling by axisLength
-        // here is what makes this frame's actual drawn arrow length agree
-        // with gizmoAxisLength()'s own value, the same one EditorUI's
-        // updateGizmo() uses to build the pickable axis segment's own
-        // extent.
+        // makeGizmoArrow()'s/makeGizmoRing()'s own default shapes are both
+        // unit-scaled along/around local +X -- uniform-scaling by
+        // axisLength here is what makes this frame's actual drawn geometry
+        // agree with gizmoAxisLength()'s own value, the same one EditorUI's
+        // updateGizmo()/updateGizmoRotate() use to build the pickable
+        // geometry's own extent.
         model = glm::scale(model, glm::vec3(axisLength));
 
         gizmoShader_->setMat4("uModel", model);
         gizmoShader_->setVec3("uColor", axisDraw.color);
-        gizmoArrowMesh_.draw();
+        gizmoMesh.draw();
     }
 
     GL_CHECK(glEnable(GL_DEPTH_TEST));
@@ -4678,7 +4895,7 @@ void Application::render() {
         cameraCaptureRequested, editShadingMode_, physicsRunning_, !window_.isDecorated(), window_.isMaximized(),
         window_.getWindowPos(), titleBarAction, renderCamera.position(), view, projection, deleteEntityRequested,
         transformEditCommitted, undoStack_.canUndo(), undoStack_.canRedo(), undoRequested, redoRequested,
-        newSceneRequested, saveAsRequested, currentScenePath_, openSceneRequested);
+        newSceneRequested, saveAsRequested, currentScenePath_, openSceneRequested, gizmoMode_);
     if (createRequest != CreateEntityKind::kNone) {
         spawnEntityFromCreateMenu(createRequest);
     }

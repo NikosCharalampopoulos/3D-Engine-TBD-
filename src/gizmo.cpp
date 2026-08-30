@@ -171,6 +171,138 @@ AxisHitTestResult hitTestGizmoAxes(const Ray& ray, const glm::vec3& gizmoOrigin,
     return best;
 }
 
+// Phase 18j: intersectRayWithPlane() below reuses this file's own
+// kParallelEpsilon (defined once, at file scope, above) rather than
+// defining a second copy -- both closestPointsBetweenLines()'s own
+// near-parallel-lines case and this function's own near-parallel-to-plane
+// case are the identical underlying degeneracy ("the angle between two unit
+// directions is near zero"), so the same threshold applies to both.
+std::optional<RayPlaneHit> intersectRayWithPlane(const Ray& ray, const glm::vec3& planePoint,
+                                                  const glm::vec3& planeNormal) {
+    const glm::vec3 normal = glm::normalize(planeNormal);
+    const float denom = glm::dot(normal, ray.direction);
+    if (std::fabs(denom) < kParallelEpsilon) {
+        // Ray nearly parallel to the plane itself (grazing angle) -- see
+        // this function's own header comment.
+        return std::nullopt;
+    }
+    const float t = glm::dot(planePoint - ray.origin, normal) / denom;
+    if (t < 0.0f) {
+        // Behind the ray's own origin -- not a usable result for a mouse
+        // ray cast forward from the camera. See this function's own header
+        // comment.
+        return std::nullopt;
+    }
+    RayPlaneHit hit;
+    hit.t = t;
+    hit.point = ray.origin + ray.direction * t;
+    return hit;
+}
+
+RingPlaneBasis gizmoRingPlaneBasis(GizmoAxis axis) {
+    switch (axis) {
+        case GizmoAxis::kX:
+            return RingPlaneBasis{glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)};
+        case GizmoAxis::kY:
+            return RingPlaneBasis{glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(1.0f, 0.0f, 0.0f)};
+        case GizmoAxis::kZ:
+            return RingPlaneBasis{glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f)};
+        case GizmoAxis::kNone:
+        default:
+            return RingPlaneBasis{};
+    }
+}
+
+float gizmoRingAngle(const glm::vec3& point, const glm::vec3& gizmoOrigin, GizmoAxis axis) {
+    const RingPlaneBasis basis = gizmoRingPlaneBasis(axis);
+    const glm::vec3 offset = point - gizmoOrigin;
+    return std::atan2(glm::dot(offset, basis.v), glm::dot(offset, basis.u));
+}
+
+RingHitTestResult hitTestGizmoRings(const Ray& ray, const glm::vec3& gizmoOrigin, float ringRadius,
+                                     float pickToleranceWorld) {
+    RingHitTestResult best;
+    float bestDistance = std::numeric_limits<float>::max();
+
+    const GizmoAxis axes[3] = {GizmoAxis::kX, GizmoAxis::kY, GizmoAxis::kZ};
+    for (GizmoAxis axis : axes) {
+        const glm::vec3 normal = gizmoAxisDirection(axis);
+        const std::optional<RayPlaneHit> hit = intersectRayWithPlane(ray, gizmoOrigin, normal);
+        if (!hit.has_value()) {
+            continue;
+        }
+        // See this function's own header comment: since `hit->point` lies
+        // exactly in the ring's own plane, this radial difference IS the
+        // exact closest distance from that point to the circle -- not an
+        // approximation.
+        const float radiusAtHit = glm::length(hit->point - gizmoOrigin);
+        const float distance = std::fabs(radiusAtHit - ringRadius);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best.axis = axis;
+        }
+    }
+
+    if (bestDistance > pickToleranceWorld) {
+        return RingHitTestResult{};
+    }
+    return best;
+}
+
+GizmoRotateDragResult updateGizmoRotateDrag(const GizmoRotateDragState& current, bool mouseDown,
+                                             bool mousePressedThisFrame, GizmoAxis hoverAxis, const Ray& ray,
+                                             const glm::vec3& gizmoOrigin) {
+    GizmoRotateDragResult result;
+
+    if (current.axis == GizmoAxis::kNone) {
+        // Not currently dragging -- only a fresh press directly on a ring
+        // starts one (the identical edge-triggering contract
+        // updateGizmoDrag() already documents).
+        if (mousePressedThisFrame && hoverAxis != GizmoAxis::kNone) {
+            const std::optional<RayPlaneHit> hit =
+                intersectRayWithPlane(ray, gizmoOrigin, gizmoAxisDirection(hoverAxis));
+            if (hit.has_value()) {
+                result.state.axis = hoverAxis;
+                result.state.lastAngle = gizmoRingAngle(hit->point, gizmoOrigin, hoverAxis);
+            }
+            // else: ray grazing the ring's own plane -- decline the grab,
+            // result.state stays default-constructed (kNone).
+        }
+        // else: result.state stays default-constructed (kNone).
+        return result;
+    }
+
+    // Currently dragging.
+    if (!mouseDown) {
+        // Released -- back to kNone (default-constructed), no further
+        // rotation this frame.
+        return result;
+    }
+
+    // Still held -- re-intersect the SAME ring's plane (through
+    // `gizmoOrigin`, perpendicular to current.axis -- see this function's
+    // own header comment for why this is `gizmoOrigin` fresh every frame,
+    // not a frozen grab-time anchor the way the translate gizmo's own axis
+    // line has to be).
+    result.state = current;
+    const std::optional<RayPlaneHit> hit =
+        intersectRayWithPlane(ray, gizmoOrigin, gizmoAxisDirection(current.axis));
+    if (hit.has_value()) {
+        const float angle = gizmoRingAngle(hit->point, gizmoOrigin, current.axis);
+        // Shortest signed angle from current.lastAngle to `angle`, wrapped
+        // into (-pi, pi] -- a plain subtraction would report a huge
+        // wrong-signed jump for a drag that crosses the atan2 ±pi seam.
+        const float rawDelta = angle - current.lastAngle;
+        const float wrappedDelta = std::atan2(std::sin(rawDelta), std::cos(rawDelta));
+        result.deltaAngleDeg = glm::degrees(wrappedDelta);
+        result.state.lastAngle = angle;
+    }
+    // else: briefly grazing this one frame -- result.deltaAngleDeg stays
+    // std::nullopt, state.lastAngle is unchanged, so tracking resumes
+    // cleanly from the same last-known angle the next non-degenerate frame.
+    return result;
+}
+
 GizmoDragResult updateGizmoDrag(const GizmoDragState& current, bool mouseDown, bool mousePressedThisFrame,
                                  GizmoAxis hoverAxis, const Ray& ray, const glm::vec3& entityPosition) {
     GizmoDragResult result;

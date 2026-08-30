@@ -228,6 +228,40 @@ Mesh makeUVSphere(int latSegments = 32, int lonSegments = 32, float radius = 1.0
 Mesh makeGizmoArrow(float shaftLength = 0.72f, float shaftRadius = 0.018f, float tipLength = 0.28f,
                      float tipRadius = 0.06f, int segments = 10);
 
+// Phase 18j: a simple procedural ring -- a thin flat annulus (a disk with a
+// concentric hole through its middle, "washer"-shaped), lying in the local
+// Y-Z plane, centered on the origin. Used by the rotate gizmo's three axis
+// handles (see gizmo.hpp/application.cpp's renderGizmo()): one shared
+// instance of this mesh is reused for all three axes, each drawn with its
+// own model matrix that rotates local +X (this ring's own NORMAL -- it lies
+// perpendicular to +X by construction) to point along the world axis that
+// handle represents (gizmo.hpp's gizmoAxisDirection()), and scales it by
+// that frame's own gizmoAxisLength() (gizmo.hpp) -- the exact same rotation/
+// scale convention makeGizmoArrow() above already establishes, deliberately
+// reused verbatim (not a second one invented) so Application::renderGizmo()
+// can draw either tool's geometry through the identical per-axis model-
+// matrix loop.
+//
+// Built as a flat ribbon of quads between two concentric circles (radius -
+// thickness/2 and radius + thickness/2), the simplest "keep it simple"
+// choice this project's own gizmo geometry already prefers (makeGizmoArrow()
+// above isn't a fancy shape either) -- a real 3D torus (a tube extruded
+// around the big circle) would need a second, nested ring of segments and
+// isn't needed here: like makeGizmoArrow(), this mesh is deliberately solid
+// triangles (Mesh::draw() only ever issues GL_TRIANGLES), and like every
+// other mesh in this engine, GL_CULL_FACE is never enabled (see makeCube()'s
+// own comment), so a single flat ribbon renders correctly from either side
+// with no winding-direction concern. Not meant to be lit (gizmo.frag is
+// flat/unlit, the identical convention makeGizmoArrow()'s own comment
+// documents) -- normal/texCoord/tangent are unused placeholders (gizmo.vert
+// only ever reads aPos), the same "unused attributes get an arbitrary
+// placeholder value" precedent makeFullscreenQuad()/makeGizmoArrow() already
+// establish. `radius` defaults to 1.0 (matching makeGizmoArrow()'s own unit-
+// length default) so the identical gizmoAxisLength()-based uniform scale
+// that sizes the translate gizmo's arrows sizes this ring's own visible
+// radius too.
+Mesh makeGizmoRing(float radius = 1.0f, float thickness = 0.035f, int segments = 48);
+
 }  // namespace engine
 
 #endif  // ENGINE_MESH_HPP

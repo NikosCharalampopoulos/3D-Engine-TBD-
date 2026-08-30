@@ -22,6 +22,7 @@
 #include <glm/gtc/epsilon.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -379,6 +380,292 @@ int main() {
         const GizmoDragResult r = updateGizmoDrag(idle, /*mouseDown=*/true, /*mousePressedThisFrame=*/true,
                                                    GizmoAxis::kX, ray, glm::vec3(0.0f));
         expectTrue(r.state.axis == GizmoAxis::kNone, "a grab with a ray parallel to the axis is declined");
+    }
+
+    // =========================================================================
+    // Phase 18j: the rotate gizmo's own new pure functions below. Same
+    // discipline as every case above -- every expected value is derived by
+    // hand from plain trigonometry, not read off whatever the code under
+    // test happens to produce.
+    // =========================================================================
+
+    // ==== intersectRayWithPlane() ===========================================
+    {
+        // A genuinely oblique case (not axis-aligned in any single
+        // coordinate): plane through (1,2,3) with normal +Z; ray from the
+        // world origin along the diagonal (1,1,1)/sqrt(3). Since the ray's
+        // x/y/z components all grow at the identical rate, the ray reaches
+        // z=3 (the plane) when each of x/y/z individually equals 3 too --
+        // t = 3*sqrt(3) (the parametric distance along a unit-length
+        // diagonal direction needed to advance 3 units along any one axis),
+        // landing at world point (3,3,3).
+        const Ray ray{glm::vec3(0.0f), glm::normalize(glm::vec3(1.0f, 1.0f, 1.0f))};
+        const std::optional<RayPlaneHit> hit = intersectRayWithPlane(ray, glm::vec3(1.0f, 2.0f, 3.0f),
+                                                                       glm::vec3(0.0f, 0.0f, 1.0f));
+        expectTrue(hit.has_value(), "oblique ray hits an oblique plane");
+        if (hit.has_value()) {
+            expectNear(hit->t, 3.0f * std::sqrt(3.0f), "oblique plane hit t");
+            expectVec3Near(hit->point, glm::vec3(3.0f, 3.0f, 3.0f), "oblique plane hit point");
+        }
+    }
+    {
+        // Ray direction lies entirely WITHIN the plane itself (perpendicular
+        // to the plane's own normal) -- grazing angle, no well-defined
+        // single intersection, must reject rather than divide by ~0.
+        const Ray ray{glm::vec3(0.0f, 0.0f, 5.0f), glm::vec3(1.0f, 0.0f, 0.0f)};
+        const std::optional<RayPlaneHit> hit =
+            intersectRayWithPlane(ray, glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        expectTrue(!hit.has_value(), "a ray grazing the plane rejects rather than produces garbage");
+    }
+    {
+        // The plane is genuinely behind the ray's own origin (t < 0) -- not
+        // a usable result for a forward-cast mouse ray.
+        const Ray ray{glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)};
+        const std::optional<RayPlaneHit> hit =
+            intersectRayWithPlane(ray, glm::vec3(0.0f, 0.0f, -5.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        expectTrue(!hit.has_value(), "a plane behind the ray's own origin is rejected");
+    }
+
+    // ==== gizmoRingPlaneBasis() ==============================================
+    {
+        const RingPlaneBasis basisX = gizmoRingPlaneBasis(GizmoAxis::kX);
+        expectVec3Near(basisX.u, glm::vec3(0, 1, 0), "gizmoRingPlaneBasis(kX).u");
+        expectVec3Near(basisX.v, glm::vec3(0, 0, 1), "gizmoRingPlaneBasis(kX).v");
+        const RingPlaneBasis basisY = gizmoRingPlaneBasis(GizmoAxis::kY);
+        expectVec3Near(basisY.u, glm::vec3(0, 0, 1), "gizmoRingPlaneBasis(kY).u");
+        expectVec3Near(basisY.v, glm::vec3(1, 0, 0), "gizmoRingPlaneBasis(kY).v");
+        const RingPlaneBasis basisZ = gizmoRingPlaneBasis(GizmoAxis::kZ);
+        expectVec3Near(basisZ.u, glm::vec3(1, 0, 0), "gizmoRingPlaneBasis(kZ).u");
+        expectVec3Near(basisZ.v, glm::vec3(0, 1, 0), "gizmoRingPlaneBasis(kZ).v");
+        const RingPlaneBasis basisNone = gizmoRingPlaneBasis(GizmoAxis::kNone);
+        expectVec3Near(basisNone.u, glm::vec3(0, 0, 0), "gizmoRingPlaneBasis(kNone).u");
+        expectVec3Near(basisNone.v, glm::vec3(0, 0, 0), "gizmoRingPlaneBasis(kNone).v");
+    }
+
+    // ==== gizmoRingAngle() ===================================================
+    {
+        const glm::vec3 origin(0.0f);
+        expectNear(gizmoRingAngle(glm::vec3(0, 1, 0), origin, GizmoAxis::kX), 0.0f, "ring angle at u is 0");
+        expectNear(gizmoRingAngle(glm::vec3(0, 0, 1), origin, GizmoAxis::kX), 1.57079633f,
+                   "ring angle at v is +90 deg");
+        expectNear(gizmoRingAngle(glm::vec3(0, -1, 0), origin, GizmoAxis::kX), 3.14159265f,
+                   "ring angle opposite u is 180 deg");
+        expectNear(gizmoRingAngle(glm::vec3(0, 0, -1), origin, GizmoAxis::kX), -1.57079633f,
+                   "ring angle opposite v is -90 deg");
+        // Off-center gizmoOrigin, and a non-axis-aligned offset -- a 3-4-5
+        // triangle within the kY ring's own (u=+Z, v=+X) plane, so the
+        // expected angle is the well-known atan2(4,3) ~= 53.13 degrees, not
+        // just a multiple of 90.
+        const glm::vec3 offCenterOrigin(2.0f, 3.0f, 4.0f);
+        const glm::vec3 point = offCenterOrigin + glm::vec3(4.0f, 0.0f, 3.0f);  // +4 along v(+X), +3 along u(+Z)
+        expectNear(gizmoRingAngle(point, offCenterOrigin, GizmoAxis::kY), 0.92729522f,
+                   "off-center 3-4-5 ring angle");
+    }
+
+    // ==== hitTestGizmoRings() ================================================
+    // gizmoOrigin at the world origin, ringRadius 2. A ray traveling along
+    // +X, offset so it crosses the X ring's own plane (x=0) EXACTLY at
+    // radius 2 (world point (0,2,0)) -- squarely on the ring itself.
+    // Traveling along +X also makes this ray lie exactly WITHIN both the Y
+    // ring's plane (y=0? no -- lies within the PLANE'S OWN set of
+    // directions, i.e. perpendicular to that plane's normal) and the Z
+    // ring's plane, so both are silently skipped as grazing, not
+    // coincidental hits.
+    {
+        const Ray ray{glm::vec3(-5.0f, 2.0f, 0.0f), glm::vec3(1.0f, 0.0f, 0.0f)};
+        const RingHitTestResult hit = hitTestGizmoRings(ray, glm::vec3(0.0f), 2.0f, 0.5f);
+        expectTrue(hit.axis == GizmoAxis::kX, "a ray landing squarely on the X ring hits kX");
+    }
+    // A ray that passes nowhere near any of the three rings must report
+    // kNone.
+    {
+        const Ray ray{glm::vec3(10.0f, 10.0f, -10.0f), glm::vec3(0.0f, 0.0f, 1.0f)};
+        const RingHitTestResult hit = hitTestGizmoRings(ray, glm::vec3(0.0f), 2.0f, 0.5f);
+        expectTrue(hit.axis == GizmoAxis::kNone, "a ray missing every ring reports kNone");
+    }
+    // Three genuinely competing candidates -- a diagonal ray through
+    // (-6,-4,-2) direction (1,1,1)/sqrt(3) hits all three rings' own planes
+    // at DIFFERENT radii (hand-derived: the X-plane hit lands at (0,2,4),
+    // radius sqrt(20)~=4.472, distance from ringRadius(2) ~=2.472; the
+    // Y-plane hit lands at (-2,0,2), radius sqrt(8)~=2.828, distance
+    // ~=0.828; the Z-plane hit lands at (-4,-2,0), radius sqrt(20)~=4.472,
+    // distance ~=2.472 again) -- Y is the genuinely closer one, and must win
+    // even with a pick tolerance loose enough (3.0) that X/Z would ALSO
+    // individually qualify as hits.
+    {
+        const Ray ray{glm::vec3(-6.0f, -4.0f, -2.0f), glm::normalize(glm::vec3(1.0f, 1.0f, 1.0f))};
+        const RingHitTestResult hit = hitTestGizmoRings(ray, glm::vec3(0.0f), 2.0f, 3.0f);
+        expectTrue(hit.axis == GizmoAxis::kY, "the genuinely closer ring (Y) wins over two farther candidates");
+    }
+
+    // ==== updateGizmoRotateDrag(): idle -> dragging -> idle, with hand-
+    // computed angles at every step, including a wraparound across the
+    // atan2 +-180-degree seam =====================================
+    {
+        const glm::vec3 gizmoOrigin(0.0f);
+        // A ray traveling along +X, offset in Y/Z to land on the X ring's
+        // own plane (x=0) at exactly the requested angle (see
+        // gizmoRingPlaneBasis(kX)'s own u=+Y/v=+Z convention) -- the ring's
+        // own radius doesn't affect the ANGLE at all, only where along it
+        // the ray happens to cross, so any fixed radius works here.
+        auto rayAtAngleDeg = [](float deg) {
+            const float rad = glm::radians(deg);
+            return Ray{glm::vec3(-5.0f, 2.0f * std::cos(rad), 2.0f * std::sin(rad)), glm::vec3(1.0f, 0.0f, 0.0f)};
+        };
+
+        GizmoRotateDragState state;  // starts at kNone
+
+        // Not dragging, mouse merely hovering (no press): nothing happens.
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/false, /*mousePressedThisFrame=*/false, GizmoAxis::kX, rayAtAngleDeg(30.0f),
+                gizmoOrigin);
+            expectTrue(r.state.axis == GizmoAxis::kNone, "hover alone does not start a rotate drag");
+            expectTrue(!r.deltaAngleDeg.has_value(), "hover alone produces no angle delta");
+            state = r.state;
+        }
+        // A held button that was NOT a fresh press this frame must not
+        // start a drag either -- the same edge-triggering contract
+        // updateGizmoDrag() already requires.
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/true, /*mousePressedThisFrame=*/false, GizmoAxis::kX, rayAtAngleDeg(30.0f),
+                gizmoOrigin);
+            expectTrue(r.state.axis == GizmoAxis::kNone,
+                       "a held-but-not-just-pressed button does not start a rotate drag");
+            state = r.state;
+        }
+
+        // Frame 1: a fresh press aimed at angle 30 deg -- grabs the X ring.
+        // This frame only anchors the drag; no delta yet.
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/true, /*mousePressedThisFrame=*/true, GizmoAxis::kX, rayAtAngleDeg(30.0f),
+                gizmoOrigin);
+            expectTrue(r.state.axis == GizmoAxis::kX, "a fresh press on the X ring starts dragging kX");
+            expectNear(r.state.lastAngle, glm::radians(30.0f), "grab frame's lastAngle");
+            expectTrue(!r.deltaAngleDeg.has_value(), "the grab frame itself produces no angle delta");
+            state = r.state;
+        }
+
+        // Frame 2: still held, ray now at 60 deg -> delta = 60-30 = +30.
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/true, /*mousePressedThisFrame=*/false, GizmoAxis::kX, rayAtAngleDeg(60.0f),
+                gizmoOrigin);
+            expectTrue(r.state.axis == GizmoAxis::kX, "still dragging kX on frame 2");
+            expectTrue(r.deltaAngleDeg.has_value(), "frame 2 produces an angle delta");
+            if (r.deltaAngleDeg.has_value()) {
+                expectNear(*r.deltaAngleDeg, 30.0f, "frame 2 delta");
+            }
+            expectNear(r.state.lastAngle, glm::radians(60.0f), "frame 2's updated lastAngle");
+            state = r.state;
+        }
+
+        // Frame 3: ray now at 179 deg -> delta = 179-60 = +119, still well
+        // short of the +-180 seam.
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/true, /*mousePressedThisFrame=*/false, GizmoAxis::kX, rayAtAngleDeg(179.0f),
+                gizmoOrigin);
+            expectTrue(r.deltaAngleDeg.has_value(), "frame 3 produces an angle delta");
+            if (r.deltaAngleDeg.has_value()) {
+                expectNear(*r.deltaAngleDeg, 119.0f, "frame 3 delta");
+            }
+            state = r.state;
+        }
+
+        // Frame 4: ray jumps to -170 deg -- the raw difference (-170 - 179 =
+        // -349 deg) is a wildly wrong-signed near-full-turn; the SHORTEST
+        // signed angle from 179 to -170 (both measured the short way around
+        // the seam) is actually +11 deg (179 -> 180/-180 -> -170 is an
+        // 11-degree continued rotation in the SAME direction the drag was
+        // already going), which is what a correctly-wrapped delta must
+        // report.
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/true, /*mousePressedThisFrame=*/false, GizmoAxis::kX, rayAtAngleDeg(-170.0f),
+                gizmoOrigin);
+            expectTrue(r.deltaAngleDeg.has_value(), "frame 4 (wraparound) produces an angle delta");
+            if (r.deltaAngleDeg.has_value()) {
+                expectNear(*r.deltaAngleDeg, 11.0f, "frame 4 wrapped delta is +11, not -349 or +349", 0.05f);
+            }
+            state = r.state;
+        }
+
+        // Frame 5: button released -- back to kNone, no further delta.
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/false, /*mousePressedThisFrame=*/false, GizmoAxis::kX, rayAtAngleDeg(-170.0f),
+                gizmoOrigin);
+            expectTrue(r.state.axis == GizmoAxis::kNone, "releasing the button returns to kNone");
+            expectTrue(!r.deltaAngleDeg.has_value(), "the release frame produces no angle delta");
+            state = r.state;
+        }
+
+        // Frame 6: pressed again, but NOT hovering any ring this time --
+        // must not start a new drag (no leftover state from the prior drag
+        // contaminates this fresh gesture).
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/true, /*mousePressedThisFrame=*/true, GizmoAxis::kNone, rayAtAngleDeg(-170.0f),
+                gizmoOrigin);
+            expectTrue(r.state.axis == GizmoAxis::kNone, "a fresh press with no ring hovered starts nothing");
+        }
+    }
+
+    // A grab attempted with a ray whose direction lies entirely WITHIN the
+    // ring's own plane (grazing) must be declined, not started with a
+    // meaningless anchor -- the rotate-gizmo counterpart to
+    // updateGizmoDrag()'s own parallel-ray-declines-a-grab case above.
+    {
+        const Ray ray{glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f)};  // lies within the X ring's own Y-Z plane
+        const GizmoRotateDragState idle;
+        const GizmoRotateDragResult r = updateGizmoRotateDrag(idle, /*mouseDown=*/true,
+                                                                /*mousePressedThisFrame=*/true, GizmoAxis::kX, ray,
+                                                                glm::vec3(0.0f));
+        expectTrue(r.state.axis == GizmoAxis::kNone, "a grab with a ray grazing the ring's own plane is declined");
+    }
+
+    // A ray that briefly grazes the ring's own plane MID-drag must hold the
+    // last-known angle (not report a garbage delta), and the very next
+    // non-degenerate frame must resume cleanly from that same still-valid
+    // anchor -- no accumulated drift from the skipped frame.
+    {
+        const glm::vec3 gizmoOrigin(0.0f);
+        auto rayAtAngleDeg = [](float deg) {
+            const float rad = glm::radians(deg);
+            return Ray{glm::vec3(-5.0f, 2.0f * std::cos(rad), 2.0f * std::sin(rad)), glm::vec3(1.0f, 0.0f, 0.0f)};
+        };
+
+        GizmoRotateDragState state;
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/true, /*mousePressedThisFrame=*/true, GizmoAxis::kX, rayAtAngleDeg(50.0f),
+                gizmoOrigin);
+            expectTrue(r.state.axis == GizmoAxis::kX, "grab for the mid-drag-grazing case succeeds");
+            state = r.state;
+        }
+        {
+            // Direction lies within the X ring's own plane -- grazing.
+            const Ray grazingRay{glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f)};
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(state, /*mouseDown=*/true,
+                                                                    /*mousePressedThisFrame=*/false, GizmoAxis::kNone,
+                                                                    grazingRay, gizmoOrigin);
+            expectTrue(!r.deltaAngleDeg.has_value(), "a mid-drag grazing frame produces no angle delta");
+            expectTrue(r.state.axis == GizmoAxis::kX, "a mid-drag grazing frame stays dragging kX");
+            expectNear(r.state.lastAngle, glm::radians(50.0f), "a mid-drag grazing frame leaves lastAngle unchanged");
+            state = r.state;
+        }
+        {
+            const GizmoRotateDragResult r = updateGizmoRotateDrag(
+                state, /*mouseDown=*/true, /*mousePressedThisFrame=*/false, GizmoAxis::kX, rayAtAngleDeg(80.0f),
+                gizmoOrigin);
+            expectTrue(r.deltaAngleDeg.has_value(), "the next non-degenerate frame resumes with a real delta");
+            if (r.deltaAngleDeg.has_value()) {
+                expectNear(*r.deltaAngleDeg, 30.0f, "resumed delta is measured from the still-valid 50-deg anchor");
+            }
+        }
     }
 
     if (failures == 0) {

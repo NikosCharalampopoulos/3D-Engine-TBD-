@@ -9722,6 +9722,230 @@ proposed exactly the resolution this phase implements, the same
 "name the next gap explicitly, close it for real when its own phase
 arrives" discipline this project has followed since the Phase 14 arc.
 
+### Phase 18j: a rotate gizmo -- three colored rings, click-drag to spin the selected entity
+
+The first of two new gizmo phases (rotate now, scale to follow as Phase
+18k), plus a planned Phase 18l ("lock editing to Edit-mode-only") after
+that. Phase 18e's translate gizmo already built the foundational pure math
+(`screenPointToWorldRay()`, `closestPointsBetweenLines()`) and the
+"pure decision function in `gizmo.hpp`/`gizmo.cpp`, ImGui wiring in
+`EditorUI`, `Application` applies the result" architecture -- this phase
+extends that same file/architecture rather than starting a parallel one,
+the identical "grow the existing pure module" precedent Phase 18g's own
+`camera_component.cpp` addition already set.
+
+- **Architecture: `gizmo.hpp`/`gizmo.cpp` grow three new pure functions,
+  the same GL/ImGui-free module Phase 18e already established.**
+  - `intersectRayWithPlane()` -- the standard ray/plane intersection
+    formula, returning `std::nullopt` for exactly two cases: the ray
+    grazing the plane itself (direction nearly perpendicular to the
+    plane's own normal -- the plane-equivalent of
+    `closestPointsBetweenLines()`'s own near-parallel-lines case, reusing
+    that SAME `kParallelEpsilon` threshold, since both are "the angle
+    between two unit directions is near zero" degeneracies), and an
+    intersection landing behind the ray's own origin (never a usable
+    result for a forward-cast mouse ray).
+  - `gizmoRingPlaneBasis()`/`gizmoRingAngle()` -- the two orthonormal
+    vectors spanning the plane perpendicular to a given axis (`u` = angle
+    zero, `v` = the direction a positive angle sweeps toward, chosen as
+    `cross(axisDirection, u)` specifically so an angle DELTA computed in
+    this basis, applied through `Transform::rotate(deltaDeg,
+    axisDirection)`, visually spins the grabbed ring point the same
+    direction the mouse dragged it -- by construction, not by ad-hoc
+    sign-matching), and the angle of any world point around a ring's own
+    center in that basis.
+  - `hitTestGizmoRings()` -- tests a ray against all three rings, using
+    `intersectRayWithPlane()` then comparing the intersection point's own
+    radial distance from the gizmo's origin against the ring's drawn
+    radius. Since that intersection point is, by construction, exactly IN
+    the ring's own plane, `|radius_at_hit - ringRadius|` is the EXACT
+    closest distance from that point to the circle (not an approximation)
+    -- genuine closest-point-on-a-circle math, standing in contrast to
+    `hitTestGizmoAxes()`'s own closest-point-on-a-LINE-SEGMENT math for the
+    translate gizmo's straight arrow handles, which a ring is not.
+  - `updateGizmoRotateDrag()` -- the "not dragging / dragging-ring-X/Y/Z"
+    state machine, the same `current state + this frame's inputs -> next
+    state (+ derived output)` shape `updateGizmoDrag()` already
+    establishes, but adapted where the two gizmos' own math genuinely
+    differs rather than forced into a shared abstraction: translate's own
+    state anchors a FIXED start position and recomputes an absolute new
+    position from it every frame (matching `Transform::setPosition()`'s
+    own "replace the value" contract); rotate's own state instead tracks
+    the LAST frame's measured angle and hands back an INCREMENTAL delta
+    each frame, meant to be applied via `Transform::rotate(deltaDeg,
+    axis)` -- transform.hpp's own existing method (`new_rotation =
+    incoming * old`), never a second, hand-rolled quaternion composition
+    scheme. The angle delta is wrapped via `atan2(sin(delta), cos(delta))`
+    so a drag crossing the atan2 +-180-degree seam reports a small,
+    correctly-signed delta rather than a wrong-signed near-full-turn. A
+    grab declines cleanly (stays not-dragging) when the ray grazes the
+    ring's own plane; a mid-drag frame that briefly grazes holds the last
+    known angle rather than jumping to a garbage delta, resuming cleanly
+    once the ray is no longer degenerate -- the identical "no meaningful
+    result this frame, not garbage" convention `updateGizmoDrag()`'s own
+    briefly-parallel case already establishes, just for a different
+    degeneracy.
+- **Rendering: `makeGizmoRing()`, reusing the translate gizmo's own shader
+  and per-axis model-matrix loop verbatim.** `mesh.hpp`'s new
+  `makeGizmoRing()` builds a thin flat annulus (two concentric circles
+  joined into a ribbon of quads -- the simplest "keep it simple" shape,
+  matching `makeGizmoArrow()`'s own unfancy cylinder+cone), lying in the
+  local Y-Z plane (its own normal along local +X) -- the SAME local-+X
+  convention `makeGizmoArrow()` already uses. That deliberate choice means
+  `Application::renderGizmo()` needs no second rotation table at all: the
+  identical per-axis rotate/scale/color loop (X = red / Y = green / Z =
+  blue, matching the translate gizmo's axis colors exactly) that already
+  points an arrow along X/Y/Z now points a ring's own NORMAL along X/Y/Z
+  too, which is exactly what makes each ring end up lying in the plane
+  PERPENDICULAR to its own axis -- the standard rotate-gizmo appearance.
+  `gizmoRingMesh_` is drawn through the SAME `gizmoShader_` program
+  (`gizmo.vert`/`.frag`, unmodified -- a plain `uModel`/`uView`/
+  `uProjection` + flat `uColor`) as `gizmoArrowMesh_`; no new shader files
+  this phase. Ring radius uses `gizmoAxisLength()` -- the exact same
+  distance-based scaling function the translate gizmo's arrows already
+  use, not a second scaling scheme.
+- **Interaction: `EditorUI::updateGizmoRotate()`, a clean parallel to
+  `updateGizmo()`, not a forced merge.** Rotate's own angle-based drag
+  state (`gizmoRotateDragState_`) is genuinely shaped differently enough
+  from translate's own position-based state (`gizmoDragState_`) that a
+  single shared state machine would have needed an awkward union of the
+  two anyway -- a clean parallel private method, mirroring `updateGizmo()`'s
+  own hit-test/drag/undo-Command structure line for line, was the simpler
+  choice. Composes each frame's reported delta directly onto the entity's
+  LIVE rotation via `transform->rotate(*result.deltaAngleDeg,
+  gizmoAxisDirection(axis))` -- literally reusing `Transform::rotate()`,
+  never a hand-rolled second composition. On release, builds the identical
+  `TransformSnapshot` before/after undo `Command` `updateGizmo()`'s own
+  Phase 18h integration already establishes, using a freshly added
+  `gizmoRotateDragStartRotation_` member (the entity's rotation as of the
+  grab frame) as `before`.
+  - **Camera-capture precedence, identical mechanism.** `updateGizmoRotate()`
+    returns `true` on any frame the mouse is hovering OR dragging a ring --
+    the exact same `gizmoActiveThisFrame` signal `updateGizmo()`'s own
+    return value already feeds into `renderDockspaceShell()`'s
+    double-click-to-capture guard, so a rotate drag takes precedence over
+    the Phase 16 camera-capture gesture exactly like a translate drag
+    already does, through the SAME suppression check, not a second one.
+- **Mode: a new debug-only env var, `ENGINE_DEBUG_GIZMO_MODE=translate|rotate`,
+  defaulting to `translate`.** `gizmo.hpp`'s new `GizmoMode` enum is threaded
+  through `Application::renderGizmo()` (which mesh/rotation-table to draw)
+  and `EditorUI::renderDockspaceShell()`'s own new `gizmoMode` parameter
+  (which of `updateGizmo()`/`updateGizmoRotate()` runs this frame -- never
+  both). **This is explicitly NOT the real move/rotate/scale UI switcher** --
+  no W/E/R keyboard shortcuts, no toolbar buttons this phase. That real
+  switcher is deliberately deferred to Phase 18k, once scale exists too, so
+  it can be built once for all three tools instead of partially now and
+  revised twice. Left unset (or set to `translate`), this engine's behavior
+  is completely unchanged from Phase 18e/18i -- confirmed, not merely
+  assumed (see Verify below).
+- **Deliberately NOT done this phase** (documented scope, not an
+  oversight):
+  - **Rotate only.** No scale gizmo -- Phase 18k's own scope.
+  - **No move/rotate/scale UI switcher.** See "Mode" above -- Phase 18k's
+    own scope.
+  - **No lock-editing-to-Edit-mode.** The rotate gizmo works in exactly
+    whatever mode the translate gizmo already works in; Phase 18l's own
+    scope, untouched here.
+  - **No mutual self-occlusion between the three rings**, and **no
+    hover-highlight color change** -- the identical, identically-scoped
+    polish items Phase 18e's own README section already lists for the
+    translate gizmo's three arrows, unchanged here.
+  - **No parent-hierarchy-aware rotation.** Exactly Phase 18e's own
+    documented local-vs-world simplification, applied to rotation instead
+    of position: the ring's own visual origin is the entity's resolved
+    WORLD position, but the rotation delta is composed directly onto the
+    entity's own LOCAL `Transform::rotation()`, unconverted through any
+    parent's own transform.
+- **Verify.**
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S .
+    -DCMAKE_BUILD_TYPE=Debug`, this project's real convention) produced
+    **zero warnings**. `ctest` reports **18/18 passing** -- the same 18
+    targets as Phase 18i (this phase adds no new test executable; it
+    extends `gizmo_test` in place, since it tests the same `gizmo.cpp` file)
+    with a large new block of hand-computed rotate-gizmo cases:
+    `intersectRayWithPlane()` (an oblique hit checked against a
+    hand-derived point, a grazing-ray rejection, and a behind-the-origin
+    rejection); `gizmoRingPlaneBasis()` (all three axes' exact `u`/`v`
+    vectors plus `kNone`); `gizmoRingAngle()` (the four cardinal directions
+    around the X ring, plus an off-center gizmo origin with a non-
+    axis-aligned 3-4-5-triangle offset, whose expected angle,
+    `atan2(4,3) ~= 53.13 deg`, is hand-verifiable); `hitTestGizmoRings()`
+    (a ray landing squarely on the X ring while the Y/Z rings are correctly
+    skipped as grazing, not coincidental hits; a ray missing every ring
+    reporting `kNone`; and three genuinely competing candidates -- hand-
+    derived radii `~4.472`/`~2.828`/`~4.472` for X/Y/Z -- confirming the
+    GENUINELY closer ring (Y) wins even with a pick tolerance loose enough
+    for the two farther candidates to also individually qualify); and a
+    full `updateGizmoRotateDrag()` idle -> grab -> multi-step drag ->
+    **wraparound across the atan2 +-180-degree seam** (179 deg -> -170 deg
+    reports a wrapped `+11` deg delta, not the raw `-349`/`+349`) ->
+    release sequence, plus the edge-triggering contract, a declined grazing
+    grab, and a dedicated mid-drag-grazing-then-resumes-cleanly case
+    proving no leftover/corrupted anchor after a skipped frame.
+  - **No regression when nothing is selected, or when the mode var is
+    unset/rotate with no selection -- proven against a real pre-18j
+    baseline, not assumed.** A pre-Phase-18j build (Phase 18i's own commit,
+    `adf1368`, built fresh in a separate `git worktree` so the working tree
+    under active edit was never touched) and this phase's build were both
+    run headlessly with a fixed 3-second-delay manual capture (bypassing
+    `run_headless.sh`'s own polling heuristic, which Phase 18g's own README
+    section already documented can occasionally land on a genuine
+    mid-settle transient frame during the dockspace's own Viewport panel
+    resize -- confirmed here too: the polling-based capture spuriously
+    reported 150,131 differing pixels on an otherwise-identical pair,
+    while the fixed-delay capture reports the true result below).
+    `compare -metric AE` between the two builds' own no-selection
+    screenshots reports **`0`** differing pixels (byte-identical PNG file
+    sizes, 274,493 bytes each). Setting `ENGINE_DEBUG_GIZMO_MODE=rotate`
+    with still no selection ALSO reports **`0`** differing pixels against
+    that same baseline -- `Application::renderGizmo()`'s leading "no
+    selection => draw nothing" guard runs before `gizmoMode_` is ever
+    consulted, so the new tool genuinely never engages with nothing
+    selected, regardless of which mode is active.
+  - **The translate gizmo's own exact Phase 18e behavior, unchanged.**
+    `ENGINE_DEBUG_SELECT=scene ENGINE_DEBUG_GIZMO_DRAG=scene` (mode left
+    unset, defaulting to `kTranslate`) reproduces Phase 18e's own exact
+    documented log trajectory: `x` climbing `0.000000 -> 0.000000 (grab) ->
+    0.500001 -> 1.000001 -> 1.500001 -> 2.000001`, `y`/`z` unchanged at
+    every step.
+  - **The three rotate rings, visually confirmed.** A screenshot with
+    `ENGINE_DEBUG_GIZMO_MODE=rotate ENGINE_DEBUG_SELECT=scene` shows three
+    clearly distinguishable rings -- red, green, blue -- converging at the
+    `scene` entity's own origin, each visibly perpendicular to its own
+    axis, alongside the pre-existing teal silhouette outline; no translate
+    arrows are drawn in this mode.
+  - **Full wired-path proof: a scripted rotate drag actually spins the
+    entity, composed onto its existing rotation.** A new
+    `ENGINE_DEBUG_GIZMO_ROTATE_DRAG=<entity name>` env var feeds a scripted
+    sequence of synthetic screen-space mouse positions (aimed at successive
+    points around the X ring's own circumference, computed via this
+    phase's own `gizmoRingPlaneBasis()`) into `EditorUI::updateGizmoRotate()`
+    through the SAME `setDebugMouseOverride()` entry point
+    `ENGINE_DEBUG_GIZMO_DRAG` already established -- only the raw mouse
+    input is synthetic; every function downstream is the exact same
+    production code a real drag runs through. Run against `scene` (which
+    starts with a real, non-identity 12-degree Y rotation already applied
+    -- deliberately not an identity-rotation entity, so this proves the
+    "compose onto the EXISTING rotation" contract for real, not just
+    against a trivial starting case), scripting a total ring-angle span of
+    120 degrees (20 -> 140 degrees) around world +X: the log shows the
+    Euler-decomposed rotation evolving `(0, 12, 0) -> (0, 12, 0) [grab] ->
+    (30.55, 10.37, 6.07) -> (60.54, 5.97, 10.43) -> (90.00, 0.00, 12.00) ->
+    (119.45, -5.97, 10.43) [release]` degrees -- the non-obvious
+    X/Y/Z-mixing at each intermediate step is the CORRECT, expected
+    consequence of composing a world-space X rotation onto an
+    already-Y-tilted object (Euler decomposition of non-commuting
+    rotations about different axes is not additive per-axis; the gizmo
+    math itself is a single clean quaternion composition throughout,
+    confirmed independently by `gizmo_test.cpp`'s own from-identity cases
+    above). A screenshot taken after the drag completes shows the `scene`
+    mesh visibly tipped over from its original upright pyramid-on-a-table
+    pose into a rotated, lying-further-down orientation, with the
+    Inspector's own `Rot Y` field reading `-5.967` -- matching the logged
+    final Euler Y exactly. `compare -metric AE` against the pre-drag
+    three-rings screenshot reports **17,360** of 480,000 pixels differing,
+    an unmistakable, visually-confirmed rotation.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |

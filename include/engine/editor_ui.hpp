@@ -771,6 +771,16 @@ public:
     // why this needs no one-time caching the way buildAssetTree()'s own much
     // larger recursive walk does), so a scene saved via Save As during THIS
     // same run immediately appears in the very next time this popup opens.
+    // Phase 18j: one more trailing parameter, `gizmoMode` -- GizmoMode
+    // (gizmo.hpp), Application's own `gizmoMode_` (ENGINE_DEBUG_GIZMO_MODE,
+    // application.cpp), read-only BY VALUE, the identical shape
+    // `cameraPosition` above already uses for per-frame state EditorUI only
+    // ever reads. Decides, inside this call's own Viewport panel block,
+    // whether updateGizmo() (translate, unchanged since Phase 18e) or the
+    // new updateGizmoRotate() (private, below) runs THIS frame -- never
+    // both. See GizmoMode's own gizmo.hpp header comment for why this is a
+    // debug/test-only selection for now, not a live per-frame user toggle
+    // (that's Phase 18k's own scope, once scale exists too).
     CreateEntityKind renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                            std::optional<EntityId>& selectedEntity,
                                            std::optional<EntityId> activeDirectionalLight, bool hasActiveCamera,
@@ -787,7 +797,7 @@ public:
                                            bool& undoRequested, bool& redoRequested, bool& newSceneRequested,
                                            std::optional<std::string>& saveAsRequested,
                                            const std::string& currentScenePath,
-                                           std::optional<std::string>& openSceneRequested);
+                                           std::optional<std::string>& openSceneRequested, GizmoMode gizmoMode);
 
     // Phase 18e: the headless verification hook behind ENGINE_DEBUG_GIZMO_DRAG
     // (see that env var's own application.cpp comment for the full design).
@@ -941,6 +951,34 @@ private:
                       const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
                       std::optional<Command>& transformEditCommitted);
 
+    // Phase 18j: the rotate gizmo's own mouse-interaction handling -- the
+    // identical role/shape updateGizmo() above plays for the translate
+    // gizmo, adapted for rings/angles instead of arrows/positions: hit-tests
+    // which ring (if any) the mouse is over (gizmo.hpp's
+    // hitTestGizmoRings()), runs gizmo.hpp's updateGizmoRotateDrag() state
+    // machine, and, while dragging, calls `transform->rotate(deltaDeg,
+    // axisDirection)` -- transform.hpp's OWN existing method, not a
+    // hand-rolled second quaternion composition scheme -- once per frame
+    // with that frame's freshly reported incremental delta. A private
+    // member function for the identical reason updateGizmo() is: it needs
+    // this class's own persistent cross-frame state (gizmoRotateDragState_
+    // below).
+    //
+    // Called from renderDockspaceShell() INSTEAD OF updateGizmo() (never
+    // both in the same frame) whenever that call's own `gizmoMode` parameter
+    // is GizmoMode::kRotate -- same placement/ordering constraint
+    // (inside the Viewport panel's Begin()/End() block, after the toolbar
+    // overlay) and the identical return-value contract (true on any frame
+    // the mouse is hovering OR dragging a ring, so the double-click camera-
+    // capture guard suppresses itself) updateGizmo()'s own header comment
+    // documents. Every other parameter mirrors updateGizmo()'s own
+    // same-named parameter exactly.
+    bool updateGizmoRotate(EntityRegistry& registry, std::optional<EntityId> selectedEntity,
+                            const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                            const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
+                            const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
+                            std::optional<Command>& transformEditCommitted);
+
     bool layoutBuilt_ = false;
     // Phase 17d: true from the frame a title-bar drag starts (a left-click on
     // the title bar's own empty, non-button area -- see renderTitleBar()'s
@@ -1019,6 +1057,25 @@ private:
     std::optional<glm::vec2> debugMouseScreenPosOverride_;
     bool debugMouseDownOverride_ = false;
     bool debugMousePressedOverride_ = false;
+
+    // Phase 18j: the rotate gizmo's own persistent cross-frame drag state --
+    // gizmo.hpp's own GizmoRotateDragState, the identical "not dragging /
+    // dragging-ring-X/Y/Z" state machine described there, threaded back in
+    // as `current` on every updateGizmoRotate() call and overwritten with
+    // whatever it returns. Has to persist across frames for the same reason
+    // gizmoDragState_ above does.
+    GizmoRotateDragState gizmoRotateDragState_;
+    // The selected entity's own Transform::rotation() as of the frame
+    // gizmoRotateDragState_ transitioned from kNone to a real axis -- used
+    // ONLY as the `before` half of the completed-edit undo Command built on
+    // release (the identical role gizmoDragStartLocalPosition_ above plays
+    // for the translate gizmo's own position edits; unlike that member,
+    // this is NOT an anchor updateGizmoRotate() re-applies deltas onto every
+    // frame -- each frame's delta is instead composed directly onto the
+    // entity's own LIVE rotation via Transform::rotate(), see
+    // updateGizmoRotate()'s own header comment). Meaningless (left at its
+    // default) whenever gizmoRotateDragState_.axis == GizmoAxis::kNone.
+    glm::quat gizmoRotateDragStartRotation_{1.0f, 0.0f, 0.0f, 0.0f};
 
     // Phase 15d: built exactly once, in the constructor -- see this class's
     // own header comment above and asset_browser.hpp's own "Caching"
