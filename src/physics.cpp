@@ -44,6 +44,19 @@ void stepPhysics(EntityRegistry& registry, float deltaTime, float groundY) {
             body.velocity.y -= kGravityAcceleration * deltaTime;
         }
 
+        // Phase 18c: terminal-velocity clamp -- see kTerminalFallSpeed's own
+        // physics.hpp comment for why this is unconditional (not gated on
+        // useGravity above): a scene-authored initial "velocity" could hand
+        // an entity an already-huge downward speed with useGravity=false,
+        // and this clamp should bound that just as much as gravity-driven
+        // acceleration. Only ever clamps a downward (negative) velocity.y --
+        // an upward velocity.y (e.g. a scene-authored upward launch) is left
+        // completely untouched, since "terminal fall speed" only ever
+        // describes how fast something can be FALLING.
+        if (body.velocity.y < -kTerminalFallSpeed) {
+            body.velocity.y = -kTerminalFallSpeed;
+        }
+
         glm::vec3 position = transform->position() + body.velocity * deltaTime;
 
         const Collider* collider = registry.getComponent<Collider>(id);
@@ -52,6 +65,29 @@ void stepPhysics(EntityRegistry& registry, float deltaTime, float groundY) {
             if (position.y <= restY) {
                 position.y = restY;
                 body.velocity.y = 0.0f;
+
+                // Phase 18c: ground friction -- decelerate horizontal (X/Z)
+                // velocity toward zero while resting on the ground this
+                // step. See kGroundFriction's own physics.hpp comment for
+                // the deceleration rate's rationale, and stepPhysics()'s own
+                // physics.hpp comment for why this treats X/Z as one
+                // resultant vector rather than decelerating each axis
+                // independently. Clamped ("clamped kinetic friction," not a
+                // `velocity *= factor` exponential decay) so a single step's
+                // deceleration can never exceed the horizontal speed it's
+                // being applied to -- that would overshoot past zero and
+                // reverse the direction of motion, which real friction never
+                // does: it brings a sliding object to a stop and then holds
+                // it there, it doesn't fling it backward.
+                const glm::vec3 horizontalVelocity(body.velocity.x, 0.0f, body.velocity.z);
+                const float horizontalSpeed = glm::length(horizontalVelocity);
+                if (horizontalSpeed > 0.0f) {
+                    const float deceleration = kGroundFriction * deltaTime;
+                    const float newSpeed = (horizontalSpeed > deceleration) ? (horizontalSpeed - deceleration) : 0.0f;
+                    const glm::vec3 newHorizontalVelocity = horizontalVelocity * (newSpeed / horizontalSpeed);
+                    body.velocity.x = newHorizontalVelocity.x;
+                    body.velocity.z = newHorizontalVelocity.z;
+                }
             }
         }
 

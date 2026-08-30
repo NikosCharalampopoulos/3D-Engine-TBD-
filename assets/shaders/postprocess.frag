@@ -73,6 +73,64 @@ uniform float uBloomStrength;
 uniform sampler2D uSSAOMap;
 uniform int uSSAODebug;
 
+// Phase 18d: the selection outline's edge-detection composite -- the second
+// half of the new 3D silhouette outline (see Application::renderSelectionMask()/
+// selection_mask.frag for the first half, which builds uSelectionMask).
+// Reused this SAME final compositing pass rather than a separate fullscreen
+// draw call: this is already the one place every frame's fully-finished,
+// tonemapped image exists as a sampler2D right before it's handed to
+// EditorUI's ImGui::Image(), the same "one pass, already reading everything
+// this frame needs to composite" role uBloomBuffer/uSSAOMap above already
+// fill for their own overlays.
+//
+// uSelectionMask is selectionMaskFramebuffer_'s own color texture -- 1.0
+// wherever the selected entity's VISIBLE (not-occluded-by-anything-else)
+// silhouette landed this frame, 0.0 everywhere else (see that pass's own
+// comment). uHasSelection is 0 every frame nothing is selected -- checked
+// FIRST, below, so this branch is skipped entirely rather than sampling
+// uSelectionMask at all in that case, guaranteeing this pass's output is
+// byte-for-byte identical to what it would be with this whole feature never
+// built, exactly the "no selection => no visible change whatsoever" default
+// Phase 14d's own now-removed 2D outline already established and this
+// phase's own brief requires stay true.
+uniform sampler2D uSelectionMask;
+uniform vec2 uSelectionMaskTexelSize;
+uniform int uHasSelection;
+uniform vec3 uSelectionOutlineColor;
+
+// A texel is painted as outline if IT is outside the mask (not part of the
+// selected entity's own visible silhouette) but at least one texel within
+// this small fixed radius of it IS inside the mask -- i.e. "this texel sits
+// just outside the selection, right at its edge." A simple few-texel-radius
+// max-neighbor check, not a full Sobel/gradient operator: this only ever
+// needs to answer "is there a mask/no-mask transition near here," not
+// estimate an edge's exact direction or strength, so the cheaper check is
+// both sufficient and, at one sampler2D fetch per neighbor texel instead of
+// a full 3x3 (or larger) weighted kernel, noticeably less work per pixel.
+const int kSelectionOutlineRadius = 2;
+
+float selectionOutlineFactor(vec2 uv) {
+    // Already inside the selected entity's own silhouette -- Unity/Unreal-
+    // style selection outlines draw a thin band tracing the SHAPE, not a
+    // wash over the whole selected object, so a texel already marked
+    // selected never itself becomes outline (its neighbors right outside
+    // the silhouette are what pick up the band instead, one step below).
+    if (texture(uSelectionMask, uv).r > 0.5) {
+        return 0.0;
+    }
+    float neighborMax = 0.0;
+    for (int dy = -kSelectionOutlineRadius; dy <= kSelectionOutlineRadius; ++dy) {
+        for (int dx = -kSelectionOutlineRadius; dx <= kSelectionOutlineRadius; ++dx) {
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            vec2 offset = vec2(float(dx), float(dy)) * uSelectionMaskTexelSize;
+            neighborMax = max(neighborMax, texture(uSelectionMask, uv + offset).r);
+        }
+    }
+    return neighborMax;
+}
+
 void main() {
     if (uSSAODebug != 0) {
         float ao = texture(uSSAOMap, vTexCoord).r;
@@ -83,5 +141,18 @@ void main() {
     vec3 hdrColor = texture(uHdrBuffer, vTexCoord).rgb * uExposure;
     vec3 bloomColor = texture(uBloomBuffer, vTexCoord).rgb * uBloomStrength;
     vec3 mapped = (hdrColor + bloomColor) / (hdrColor + bloomColor + vec3(1.0));
+
+    // Phase 18d: composited AFTER tonemapping, not blended into the HDR
+    // scene color before it -- this is a flat UI-style accent (the same
+    // teal Phase 17a's own theme already uses for a selected row/active
+    // toolbar button), meant to read as exactly that fixed color on screen
+    // regardless of the scene's own exposure/bloom that frame, not
+    // something that should itself bloom or tonemap-compress the way an
+    // actual light source in the scene would.
+    if (uHasSelection != 0) {
+        float outline = selectionOutlineFactor(vTexCoord);
+        mapped = mix(mapped, uSelectionOutlineColor, outline);
+    }
+
     FragColor = vec4(mapped, 1.0);
 }

@@ -152,12 +152,24 @@ glm::mat4 resolveWorldMatrix(EntityRegistry& registry, EntityId id);
 // (resolveWorldMatrix(), while `id` -- the soon-to-be-destroyed parent --
 // is still present to resolve against) BEFORE `id` is destroyed, decomposes
 // that matrix back into position/rotation/scale (glm::decompose(), see
-// transform_hierarchy.cpp's own comment on why that's safe for every
-// transform this engine's own UI can actually produce), and overwrites the
-// child's own Transform with that decomposed result -- so the child visibly
-// stays exactly where it was an instant ago, now simply no longer riding
-// along with a parent that no longer exists, exactly the "keeping their own
+// transform_hierarchy.cpp's own comment on the one case -- a fully
+// degenerate world matrix -- where that decomposition can fail, and how
+// this function stays correct even then), and overwrites the child's own
+// Transform with that decomposed result -- so the child visibly stays
+// exactly where it was an instant ago, now simply no longer riding along
+// with a parent that no longer exists, exactly the "keeping their own
 // current world position" behavior this phase's own brief calls for.
+//
+// Post-14f bug-review fix: every direct child is orphaned (its Parent
+// component removed) UNCONDITIONALLY, regardless of whether that
+// decompose() call above actually succeeds -- only the Transform-overwrite
+// itself is conditional on it. See transform_hierarchy.cpp's own comment on
+// destroyEntityOrphaningChildren() for why: an earlier version of this
+// function skipped orphaning entirely for a child whose world matrix failed
+// to decompose, which left that child's Parent still pointing at `id` right
+// up until `id` was destroyed -- reintroducing, on exactly the path meant to
+// prevent it, the "child's stale LOCAL transform gets silently reinterpreted
+// as a WORLD one" teleport bug this whole function exists to avoid.
 //
 // Only DIRECT children (Parent.id == id) are touched -- a grandchild
 // parented under one of those direct children keeps its own existing Parent

@@ -36,10 +36,19 @@
 // plus a ground-plane collision check/resolve: once an entity's collider
 // would cross below the ground, its position is snapped to rest exactly on
 // the surface and its vertical velocity is zeroed, rather than left sunk
-// into the ground or bouncing off it.
-// IS NOT: a general constraint solver, continuous collision detection, or
-// entity-vs-entity collision -- this phase's own brief explicitly scopes
-// those out; "ground collision + gravity" is the one load-bearing
+// into the ground or bouncing off it. Phase 18c adds two small, deliberately
+// bounded refinements on top of that same shape -- a hard clamp on fall
+// speed (kTerminalFallSpeed) and ground friction decelerating horizontal
+// velocity toward zero while resting (kGroundFriction) -- see each
+// constant's own comment above and stepPhysics()'s own comment below for
+// exactly where they apply; neither changes the ground-snap/zero-vertical-
+// velocity behavior itself.
+// IS NOT: a general constraint solver, continuous collision detection,
+// entity-vs-entity collision, bounce/restitution, or air resistance modeled
+// as a continuous drag force -- this phase's own brief explicitly scopes
+// those out; "ground collision + gravity" (plus, since Phase 18c, a fall-
+// speed clamp and ground friction, both still just per-entity, still no
+// entity-vs-entity interaction of any kind) is the one load-bearing
 // requirement. See stepPhysics()'s own comment below for why a single
 // per-step position check is still enough to avoid tunneling through the
 // ground specifically, without needing a general CCD sweep.
@@ -63,6 +72,59 @@ class EntityId;
 // exact same value stepPhysics() itself uses, rather than a second
 // hardcoded copy that could silently drift out of sync with this one.
 constexpr float kGravityAcceleration = 9.81f;
+
+// Phase 18c: the fastest an entity is ever allowed to fall, world
+// units/second, applied as a hard clamp on RigidBody::velocity.y before it's
+// integrated into position (see stepPhysics()'s own comment below for
+// exactly where). A real falling object doesn't accelerate forever -- air
+// resistance grows with speed until it exactly balances gravity, at which
+// point the object stops accelerating and falls at a constant "terminal
+// velocity" (a skydiver in a belly-to-earth position reaches roughly
+// 50-55 m/s / ~120 mph). This engine has no drag force of its own (see this
+// header's own top comment on what stepPhysics() deliberately IS/IS NOT --
+// modeling air resistance as a continuous, speed-dependent force is real,
+// separate scope this phase does not add), so a hard clamp is a deliberately
+// simplified stand-in for that same real-world effect: it bounds how fast
+// ANY fall gets, from any starting height or initial velocity (including one
+// authored directly via a scene's "rigidBody" "velocity" block -- see
+// scene_serialization.hpp), without needing a second force to compute or a
+// per-entity drag coefficient to store. 40.0f sits comfortably below a real
+// skydiver's terminal velocity (this is a simplified game-physics stand-in,
+// not a real drag simulation, so it doesn't need to match that number
+// exactly) while still being far above anything this engine's own existing
+// demo content actually reaches before landing (assets/scenes/default.json's
+// "falling_cube" falls 1.5-2.5 world units and lands under 6 m/s -- see
+// physics_test.cpp's own hand-computed free-fall expectations) -- so this
+// clamp is provably inert for every scene this engine ships today, and only
+// engages for a deliberately extreme case (see tests/physics_test.cpp's own
+// Phase 18c terminal-velocity cases), exactly the "sane maximum, not a
+// gameplay-visible speed limit" this constant is meant to be.
+constexpr float kTerminalFallSpeed = 40.0f;
+
+// Phase 18c: ground friction's deceleration rate, world units/second^2 --
+// how quickly an entity's HORIZONTAL (X/Z) velocity is reduced toward zero
+// while it is resting on the ground (see stepPhysics()'s own comment below
+// for exactly where this applies). Exposed here as a named constant for the
+// exact same reason kGravityAcceleration above is: so a caller computing an
+// expected result by hand (tests/physics_test.cpp) integrates with the
+// identical value stepPhysics() itself uses. Real kinetic friction is
+// (coefficient of friction) * (gravitational acceleration) -- independent of
+// the sliding object's own mass, the same "every body decelerates at the
+// same rate regardless of how heavy it is" property kGravityAcceleration
+// already has above, and for the identical underlying reason this header's
+// own "Deliberately no mass field" RigidBody comment gives: a mass field
+// would be stored but never read by anything, since neither this constant
+// nor kGravityAcceleration ever needs one to compute a per-entity
+// deceleration. 4.9f is (kGravityAcceleration * 0.5f), i.e. a friction
+// coefficient of ~0.5 -- a middle-of-the-road value for a dry, moderately
+// grippy surface (rubber-on-concrete sits closer to 0.7-1.0, polished
+// wood-on-wood or metal-on-metal closer to 0.2-0.4), chosen so a moderate
+// sliding speed (a brisk 3 world-units/second) settles to a full stop in
+// roughly half a second -- fast enough to read as "friction is clearly
+// acting," not an near-imperceptibly slow crawl to zero, but not the
+// instant, unnatural dead-stop a naive velocity.x = velocity.z = 0.0f would
+// produce either.
+constexpr float kGroundFriction = 4.9f;
 
 // A rigid body's own per-entity simulation state: current velocity (world
 // units/second) and whether gravity applies to it at all.
@@ -93,16 +155,32 @@ struct Collider {
 };
 
 // Runs one physics step for every entity that has a RigidBody: applies
-// gravity to its velocity (only if RigidBody::useGravity), integrates that
-// velocity into its Transform's position (semi-implicit Euler -- see this
-// header's own top comment), then -- only for entities that ALSO have a
-// Collider -- checks the resulting position against `groundY` (the
-// world-space height of a flat, effectively infinite ground plane;
-// Application passes its own kGroundY here) and resolves a penetration by
-// snapping the entity to rest exactly on the surface
-// (position.y = groundY + collider->halfExtent) and zeroing velocity.y --
-// rather than a bounce/restitution response, which this "basic" ground
-// collision doesn't model.
+// gravity to its velocity (only if RigidBody::useGravity), clamps
+// velocity.y to never fall faster than -kTerminalFallSpeed (Phase 18c --
+// applied unconditionally, whether or not this step's own velocity change
+// came from gravity or from a scene-authored initial "velocity", so this is
+// a cap on how fast the entity IS falling, not specifically on how fast
+// gravity alone can accelerate it), integrates that velocity into its
+// Transform's position (semi-implicit Euler -- see this header's own top
+// comment), then -- only for entities that ALSO have a Collider -- checks
+// the resulting position against `groundY` (the world-space height of a
+// flat, effectively infinite ground plane; Application passes its own
+// kGroundY here) and resolves a penetration by snapping the entity to rest
+// exactly on the surface (position.y = groundY + collider->halfExtent) and
+// zeroing velocity.y -- rather than a bounce/restitution response, which
+// this "basic" ground collision doesn't model. That same "resting on the
+// ground this step" branch is also where Phase 18c's ground friction
+// applies: the entity's horizontal (X/Z) velocity is decelerated toward
+// zero at kGroundFriction world-units/second^2, clamped so a single step
+// can never overshoot past zero and reverse the direction of motion --
+// friction opposes the resultant X/Z velocity vector as a whole (not each
+// axis independently), so a diagonal slide decelerates at the same rate as
+// an axis-aligned one of the same speed, matching how real kinetic friction
+// opposes the actual direction of sliding motion rather than its
+// component-wise projections. An entity with a RigidBody but no Collider
+// (see below) never resolves ground collision at all, so it never receives
+// friction either -- there is no "ground" for it to be considered resting
+// on.
 //
 // Checking the collider's already-integrated (predicted) position against
 // groundY, rather than sweeping the volume it moved through this step, is

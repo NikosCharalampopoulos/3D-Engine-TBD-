@@ -116,8 +116,38 @@ public:
     // (whether culled or drawn) so a caller can log/verify culling actually
     // happened -- see Application::render(). Passing frustum == nullptr
     // (the default) draws unconditionally, exactly as before this phase.
+    //
+    // Phase 15f: `diffuseTextureOverride`, if non-null, is passed to
+    // Material::bind() (see material.hpp's own bind() comment) INSTEAD of
+    // that Material's own baked-in diffuse texture -- this Model's own
+    // materials_ are never touched. A caller passes this for exactly one
+    // entity per frame (the one entity, if any, whose MaterialOverride
+    // component resolveDiffuseTextureOverride() -- material_override.hpp --
+    // resolved a non-null texture for; see Application::render()'s own
+    // ModelComponent draw loop), so every OTHER entity sharing this same
+    // cached Model still calls draw() with the default nullptr and renders
+    // with its unmodified Material exactly as before this phase.
+    //
+    // Post-15f bug-review fix: this override is applied to ONLY the single
+    // mesh primaryMaterial() (below) itself samples from -- i.e. meshes_
+    // [kPrimaryMeshIndex] -- NOT to every mesh drawNode() happens to draw
+    // for this entity. The first-pass implementation forwarded
+    // `diffuseTextureOverride` unconditionally to every mesh in the whole
+    // node subtree, which is wrong for any multi-mesh Model: this project's
+    // own assets/models/scene.obj (the default scene's "scene" entity) has
+    // 3 meshes/4 materials (Box, Pyramid, Table, each visually distinct),
+    // and the Inspector's Material section only ever shows the user ONE
+    // representative sample (primaryMaterial(), see its own comment below)
+    // -- it never implies a "Browse..." pick is retexturing three unrelated
+    // meshes at once. Scoping the override to exactly the mesh
+    // primaryMaterial() reads from keeps "what you see in the Inspector is
+    // what your override actually changes" true for every Model this engine
+    // loads, not just the common single-mesh case -- see drawNode()'s own
+    // model.cpp comment for the mechanics, and kPrimaryMeshIndex's own
+    // comment (below) for why one shared constant, not two independently
+    // hardcoded "mesh 0" references, is what keeps these two in sync.
     void draw(Shader& shader, const glm::mat4& rootTransform = glm::mat4(1.0f), const Frustum* frustum = nullptr,
-              CullStats* cullStats = nullptr) const;
+              CullStats* cullStats = nullptr, const Texture* diffuseTextureOverride = nullptr) const;
 
     // Phase 7a: draws every node's mesh geometry with `shader` (expected to
     // be the depth-only shadow shader, see shadow_map.hpp/assets/shaders/
@@ -182,24 +212,40 @@ public:
     //
     // Not "the" material of a possibly-multi-mesh model (scene.obj's "scene"
     // entity alone has three nodes, each with its own material) -- this
-    // returns whichever material meshes_[0] (the first mesh Assimp reported,
-    // not necessarily the root node's own mesh) actually uses, falling back
-    // to defaultMaterial_ if meshMaterialIndex_ is empty (no meshes at all,
-    // defensive only) or out of range (see meshMaterialIndex_'s own comment
-    // below for when that can happen). A single representative sample is
-    // exactly what a "what does this thing generally look like" Inspector
-    // readout needs; a full per-mesh material list is real, separate scope
-    // this phase's own brief doesn't ask for.
+    // returns whichever material meshes_[kPrimaryMeshIndex] (the first mesh
+    // Assimp reported, not necessarily the root node's own mesh) actually
+    // uses, falling back to defaultMaterial_ if meshMaterialIndex_ is empty
+    // (no meshes at all, defensive only) or out of range (see
+    // meshMaterialIndex_'s own comment below for when that can happen). A
+    // single representative sample is exactly what a "what does this thing
+    // generally look like" Inspector readout needs; a full per-mesh material
+    // list is real, separate scope this phase's own brief doesn't ask for.
+    //
+    // Post-15f bug-review note: drawNode() (model.cpp) reads
+    // kPrimaryMeshIndex too, to scope a per-entity diffuse-texture override
+    // to exactly this same mesh -- see draw()'s own Phase 15f comment above
+    // and kPrimaryMeshIndex's own comment below for why that matters.
     const Material& primaryMaterial() const {
-        if (meshMaterialIndex_.empty() || meshMaterialIndex_.front() < 0) {
+        if (meshMaterialIndex_.empty() || meshMaterialIndex_[kPrimaryMeshIndex] < 0) {
             return defaultMaterial_;
         }
-        return materials_[static_cast<std::size_t>(meshMaterialIndex_.front())];
+        return materials_[static_cast<std::size_t>(meshMaterialIndex_[kPrimaryMeshIndex])];
     }
 
 private:
+    // Post-15f bug-review fix: the ONE mesh index primaryMaterial() (above)
+    // samples its representative material from -- always meshes_[0],
+    // whichever mesh Assimp reported first (see primaryMaterial()'s own
+    // comment). Pulled out as a named constant, rather than left as two
+    // independent "index 0" literals (one in primaryMaterial(), one in
+    // drawNode()'s override-scoping check), specifically so those two can
+    // never silently drift apart -- the whole point of scoping
+    // drawNode()'s diffuseTextureOverride to "the mesh primaryMaterial()
+    // shows" only holds if both call sites agree on which mesh that is.
+    static constexpr std::size_t kPrimaryMeshIndex = 0;
+
     void drawNode(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform, const Frustum* frustum,
-                  CullStats* cullStats) const;
+                  CullStats* cullStats, const Texture* diffuseTextureOverride) const;
     void drawNodeDepthOnly(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
     void drawNodeNormalDepth(Shader& shader, const ModelNode& node, const glm::mat4& parentTransform) const;
     // Phase 14d: recursive helper for the public boundingSphere() above --

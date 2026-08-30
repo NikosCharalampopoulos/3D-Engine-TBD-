@@ -19,17 +19,28 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
-#include <cmath>
+#include <cstring>
+#include <filesystem>
 #include <string>
 
+#include "engine/asset_browser.hpp"
+#include "engine/asset_drop.hpp"
+#include "engine/camera_capture.hpp"
+#include "engine/camera_component.hpp"
+#include "engine/editor_icons.hpp"
+#include "engine/light.hpp"
 #include "engine/log.hpp"
 #include "engine/material.hpp"
+#include "engine/material_override.hpp"
 #include "engine/model.hpp"
+#include "engine/paths.hpp"
 #include "engine/physics.hpp"
+#include "engine/scene_file_ops.hpp"
 #include "engine/scene_hierarchy.hpp"
 #include "engine/texture.hpp"
 #include "engine/transform.hpp"
 #include "engine/transform_hierarchy.hpp"
+#include "engine/window_chrome.hpp"
 
 namespace engine {
 
@@ -46,6 +57,168 @@ const char* glslVersionString() {
 #endif
 }
 
+// Phase 15g: the Dear ImGui drag-and-drop "type" tag shared between the
+// Assets panel's own drag source (renderAssetTreeNode(), below) and the
+// Viewport panel's own drop target (renderDockspaceShell(), further down) --
+// SetDragDropPayload()/AcceptDragDropPayload()'s own contract (imgui.h) is
+// "must match exactly, at most 32 characters," so this one constant is what
+// keeps the two ends from ever silently drifting apart, the same reason this
+// file already shares fixed popup-id strings ("SceneCreateMenu", "Choose
+// Diffuse Texture") between whatever opens each popup and its own matching
+// Begin*() call.
+constexpr const char* kAssetDragDropPayloadType = "ASSET_PATH";
+
+// Phase 15f: recursively collects every non-directory AssetTreeNode
+// (asset_browser.hpp) reachable under `node` into `out`, in the same
+// directories-before-files/alphabetical order buildAssetTree() already
+// sorted them into -- the Material Inspector's texture-picker popup
+// (renderInspectorPanel()'s own Material section below) needs a flat list
+// of PICKABLE entries (leaf files, e.g. "checker.png" or
+// "skybox/right.png"), not the nested tree renderAssetTreeNode() renders for
+// the Assets panel itself; walking the already-built assetTree_ this way
+// (rather than re-walking the filesystem a second time) is exactly the
+// "asset tree is a cache" discipline asset_browser.hpp's own header comment
+// establishes for the Assets panel, applied to a second consumer.
+void collectTextureFiles(const AssetTreeNode& node, std::vector<const AssetTreeNode*>& out) {
+    if (node.isDirectory) {
+        for (const AssetTreeNode& child : node.children) {
+            collectTextureFiles(child, out);
+        }
+    } else {
+        out.push_back(&node);
+    }
+}
+
+// Phase 15f: the Material Inspector's texture-picker popup body -- opened by
+// the Material section's own "Browse..." button (see renderInspectorPanel()
+// below) via a matching ImGui::OpenPopup("Choose Diffuse Texture") call
+// there. Deliberately a flat ImGui::Selectable() list inside a small fixed-
+// height scrolling child, not a nested tree/a searchable-filterable
+// control: this phase's own brief explicitly calls for "just a working
+// list" (drag-and-drop, a fancier picker, and thumbnails are all separate,
+// later scope -- see asset_browser.hpp's own Phase 15d "Deliberately not
+// done this phase" list for the identical reasoning already applied to the
+// Assets panel itself). Clicking an entry records its assets/-relative path
+// (the "textures/..." AssetTreeNode::relativePath, prefixed with "assets/"
+// to match ModelComponent::path/MaterialOverride::diffuseTexturePath's own
+// convention -- see ecs.hpp/material_override.hpp) into
+// `textureAssignRequested` and closes the popup; nothing here touches
+// ResourceManager/registry directly (see renderInspectorPanel()'s own Phase
+// 15f comment for why that's Application::render()'s job instead).
+void renderTextureBrowsePopup(const std::vector<AssetTreeNode>& assetTree,
+                               std::optional<std::string>& textureAssignRequested) {
+    if (!ImGui::BeginPopup("Choose Diffuse Texture")) {
+        return;
+    }
+
+    std::vector<const AssetTreeNode*> textureFiles;
+    for (const AssetTreeNode& top : assetTree) {
+        // "textures" -- see asset_browser.hpp's own header comment for why
+        // this is one of exactly two top-level categories buildAssetTree()
+        // ever produces (the other, "models", isn't a texture and has no
+        // business appearing in this specific picker).
+        if (top.isDirectory && top.relativePath == "textures") {
+            collectTextureFiles(top, textureFiles);
+        }
+    }
+
+    if (textureFiles.empty()) {
+        // Genuinely reachable, not just defensive: a fresh checkout missing
+        // assets/textures/ entirely (asset_browser.hpp's own "a missing
+        // category directory is silently skipped, not an error") would
+        // leave this popup with nothing to offer -- telling the user that
+        // plainly beats an empty, unexplained scrollbox.
+        ImGui::TextDisabled("No textures found under assets/textures/.");
+    } else {
+        ImGui::BeginChild("TextureBrowseList", ImVec2(320.0f, 200.0f), true);
+        for (const AssetTreeNode* file : textureFiles) {
+            ImGui::PushID(file->relativePath.c_str());
+            if (ImGui::Selectable(file->relativePath.c_str())) {
+                textureAssignRequested = "assets/" + file->relativePath;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+    }
+
+    ImGui::EndPopup();
+}
+
+// Phase 18i: the File > Open Scene... popup body -- opened by that menu
+// item's own `ImGui::OpenPopup("Open Scene")` call (renderDockspaceShell(),
+// below), called EVERY frame the same "must keep running after the File
+// menu itself has closed" reason renderSaveAsPopup() (private member
+// function, below -- see its own header comment) is. A free function, not a
+// member one, unlike renderSaveAsPopup(): this popup owns no persistent
+// cross-frame state of its own (no text field to remember -- just a fresh
+// listSceneFileNames() call and a click), the identical "free function vs.
+// member function" split renderTextureBrowsePopup() above/updateGizmo()
+// (private, header) already establish for the same reason.
+//
+// listSceneFileNames() (scene_file_ops.hpp) is called fresh every frame
+// this popup is open, not cached -- see that function's own header comment
+// for why a flat, small, single-directory listing needs no one-time-build
+// caching the way buildAssetTree()'s own much larger recursive walk does;
+// concretely, this means a scene just Saved As during this same run
+// immediately shows up the very next time this popup is opened, with no
+// extra invalidation logic anywhere.
+void renderOpenScenePopup(std::optional<std::string>& openSceneRequested) {
+    if (!ImGui::BeginPopup("Open Scene")) {
+        return;
+    }
+
+    const std::vector<std::string> sceneNames = listSceneFileNames(resolveAssetPath("assets/scenes"));
+    if (sceneNames.empty()) {
+        // Reachable in practice only if assets/scenes/ itself were ever
+        // deleted out from under a running process -- kDefaultScenePath is
+        // checked into this project, so an ordinary checkout/build always
+        // has at least "default" to show here.
+        ImGui::TextDisabled("No scene files found under assets/scenes/.");
+    } else {
+        ImGui::BeginChild("OpenSceneList", ImVec2(240.0f, 160.0f), true);
+        for (const std::string& name : sceneNames) {
+            ImGui::PushID(name.c_str());
+            if (ImGui::Selectable(name.c_str())) {
+                openSceneRequested = name;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+    }
+
+    ImGui::EndPopup();
+}
+
+// Phase 17b: encodes one Unicode codepoint as a raw UTF-8 byte sequence, so
+// it can be prepended directly onto an ImGui row label string. Every
+// codepoint editor_icons.hpp actually names (Font Awesome Free Solid's own
+// Private Use Area glyphs, 0xF030-0xF1B2) falls in the three-byte UTF-8
+// range (0x0800-0xFFFF) -- this deliberately does NOT handle the one- or
+// two-byte cases, or surrogate pairs for codepoints above 0xFFFF, since
+// nothing in this engine ever calls it with anything outside that range;
+// widening it "to be general" for inputs that can't occur would be exactly
+// the kind of speculative generality this codebase's own established style
+// avoids (see e.g. ecs.hpp's own EntityId "no generation counter until a
+// real need exists" comment for the same instinct). Dear ImGui's own
+// TextUnformatted()/TreeNodeEx() etc. all take raw UTF-8 and decode it back
+// to a codepoint internally (ImTextCharFromUtf8(), imgui.cpp) to look the
+// glyph up in whichever merged ImFont source actually has it -- see this
+// file's own EditorUI constructor comment for the font-atlas merge that
+// makes that lookup succeed. A small local helper rather than reaching for
+// <codecvt> (deprecated since C++17, this project's own language target) --
+// three-byte UTF-8 encoding is a handful of bit shifts, not enough logic to
+// justify either a new dependency or std library machinery two revisions
+// deprecated.
+std::string iconGlyphUtf8(char32_t codepoint) {
+    std::string out;
+    out.push_back(static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F)));
+    out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    return out;
+}
+
 // Phase 14d: recursively renders one Scene-Hierarchy row (and, if expanded,
 // its own children) as an ImGui::TreeNodeEx() -- real parent/child nesting
 // via ImGui's own tree indentation, matching this engine's own choice of
@@ -57,17 +230,23 @@ const char* glslVersionString() {
 // id-stack-based widget identity is concerned, without the visible label
 // itself growing a stray "##123" suffix.
 //
-// No icon glyphs (folder/mesh/light/camera, per the approved mockup): Dear
-// ImGui's default font (no custom font atlas is built anywhere in this
-// engine) only carries the ASCII/Latin-1 glyph range, nowhere near the
-// Unicode private-use/symbol code points an icon font would need -- adding
-// one is real, separate scope (a new vendored font asset + atlas
-// configuration) this phase's brief doesn't ask for. Indentation, the
+// Icon glyphs (folder/mesh/light/camera, per the approved mockup) -- CLOSED
+// Phase 17b. Until this phase, Dear ImGui's default font (no custom font
+// atlas was built anywhere in this engine) only carried the ASCII/Latin-1
+// glyph range, nowhere near the Unicode private-use/symbol code points an
+// icon font needs -- adding one was real, separate scope this project
+// deliberately deferred through the whole Phase 14/15/16 arc (see
+// README.md's own Phase 17b section for why icon-font work landed before
+// 17a's base theme pass, out of this arc's own lettered order). This
+// function now prepends one Font Awesome Solid glyph -- resolved by
+// editor_icons.hpp's own sceneNodeIconGlyph() from this node's own
+// hasModel/hasPointLight/hasDirectionalLight/hasCamera flags (set once, in
+// buildSceneTree() -- scene_hierarchy.cpp) -- to the row's own label text,
+// UTF-8-encoded by this file's own iconGlyphUtf8() above. Indentation, the
 // tree-node's own expand/collapse arrow, and ImGuiTreeNodeFlags_Selected's
-// highlight are what carry "this is a group vs. a leaf" and "this row is
-// selected" instead -- functionally equivalent to the mockup's own icons/
-// highlight for this phase's purpose (real tree + click-to-select), just
-// without the pixel-identical iconography.
+// highlight still carry "this is a group vs. a leaf"/"this row is
+// selected" exactly as before -- the icon is additive, not a replacement
+// for any of that.
 void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& selectedEntity) {
     ImGui::PushID(static_cast<int>(node.id.index()));
 
@@ -85,7 +264,15 @@ void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& sel
         flags |= ImGuiTreeNodeFlags_Selected;
     }
 
-    const bool opened = ImGui::TreeNodeEx(node.name.c_str(), flags);
+    // Phase 17b: "<icon>  <name>" -- one space-padded icon glyph ahead of
+    // the existing label text, not a separate ImGui::Image()/column. This
+    // is still exactly one TreeNodeEx() call/one selectable row, so
+    // IsItemClicked() below (and everything else this function already
+    // does) needs no change at all to keep working with the icon folded in.
+    const char32_t icon =
+        sceneNodeIconGlyph(node.hasModel, node.hasPointLight, node.hasDirectionalLight, node.hasCamera);
+    const std::string label = iconGlyphUtf8(icon) + "  " + node.name;
+    const bool opened = ImGui::TreeNodeEx(label.c_str(), flags);
     // IsItemClicked() covers a click anywhere on this row's own label/
     // background (not the expand arrow specifically, which TreeNodeEx()
     // already handles internally for open/close) -- exactly "click this row
@@ -104,69 +291,129 @@ void renderSceneTreeNode(const SceneTreeNode& node, std::optional<EntityId>& sel
     ImGui::PopID();
 }
 
-// Phase 14d: the approved mockup's dashed-rectangle-plus-corner-brackets
-// selection look (a simple 2D screen-space gizmo, deliberately NOT a fancy
-// inverted-hull silhouette shader -- see this phase's own brief). Both
-// helpers draw directly into `drawList` in already-resolved screen-pixel
-// coordinates (topLeft/bottomRight), leaving all NDC-to-panel-pixel mapping
-// to their one call site below.
-void addDashedRect(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight, ImU32 color) {
-    constexpr float kDashLength = 6.0f;
-    constexpr float kGapLength = 4.0f;
-    constexpr float kThickness = 1.5f;
+// Phase 15d: the Assets panel's own row-drawing helper -- deliberately mirrors
+// renderSceneTreeNode() above almost line for line (same TreeNodeEx() flag
+// set, same "click anywhere on the row selects it" IsItemClicked() check,
+// same "<icon>  <name>" label-prefixing icons Phase 17b gave that helper --
+// see this function's own body below for the one real difference: an asset
+// row's icon comes from classifyAssetDropPath(), not a SceneTreeNode's own
+// precomputed flags, since AssetTreeNode carries no such flags of its own),
+// just walking asset_browser.hpp's AssetTreeNode forest instead of
+// scene_hierarchy.hpp's SceneTreeNode one, and keying selection by
+// `node.relativePath` (a stable string identity for a filesystem row)
+// instead of an EntityId. Kept as its own separate function rather than
+// templating renderSceneTreeNode() over "anything tree-shaped": the two
+// trees' node types share no base/interface, their selection state has
+// different types and different owners (Application's selectedEntity_ vs.
+// this class's own selectedAssetPath_ -- see this file's own header comment
+// on why), and the two panels are likely to diverge further once either
+// grows real functionality -- Phase 15g's own drag-and-drop source below,
+// added only here, not to renderSceneTreeNode(), is exactly that
+// divergence actually happening (see this phase's own README section for
+// why the Scene panel does NOT gain a matching drag source this phase) --
+// collapsing them into one generic helper now would buy nothing today at
+// the cost of a genuinely awkward abstraction.
+void renderAssetTreeNode(const AssetTreeNode& node, std::optional<std::string>& selectedAssetPath) {
+    ImGui::PushID(node.relativePath.c_str());
 
-    auto dashedLine = [&](ImVec2 from, ImVec2 to) {
-        const ImVec2 delta(to.x - from.x, to.y - from.y);
-        const float length = std::sqrt((delta.x * delta.x) + (delta.y * delta.y));
-        if (length < 1.0f) {
-            return;
-        }
-        const ImVec2 direction(delta.x / length, delta.y / length);
-        float traveled = 0.0f;
-        bool drawing = true;
-        while (traveled < length) {
-            const float segment = std::min(drawing ? kDashLength : kGapLength, length - traveled);
-            if (drawing) {
-                const ImVec2 segmentStart(from.x + (direction.x * traveled), from.y + (direction.y * traveled));
-                const ImVec2 segmentEnd(from.x + (direction.x * (traveled + segment)),
-                                         from.y + (direction.y * (traveled + segment)));
-                drawList->AddLine(segmentStart, segmentEnd, color, kThickness);
-            }
-            traveled += segment;
-            drawing = !drawing;
-        }
-    };
-
-    dashedLine(topLeft, ImVec2(bottomRight.x, topLeft.y));
-    dashedLine(ImVec2(bottomRight.x, topLeft.y), bottomRight);
-    dashedLine(bottomRight, ImVec2(topLeft.x, bottomRight.y));
-    dashedLine(ImVec2(topLeft.x, bottomRight.y), topLeft);
-}
-
-void addCornerBrackets(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight, ImU32 color) {
-    // Each bracket's own two short, solid arms -- not dashed, so they read as
-    // a distinct "handle" accent against the dashed outline itself, matching
-    // the approved mockup's own corner-bracket look.
-    constexpr float kArmLength = 10.0f;
-    constexpr float kThickness = 2.0f;
-
-    const ImVec2 corners[4] = {
-        topLeft,
-        ImVec2(bottomRight.x, topLeft.y),
-        bottomRight,
-        ImVec2(topLeft.x, bottomRight.y),
-    };
-    // Sign of each arm's own direction along x/y, pointing INWARD from that
-    // corner (e.g. the top-left corner's arms extend right and down) so the
-    // brackets sit just inside the dashed rectangle rather than outside it.
-    const float armX[4] = {1.0f, -1.0f, -1.0f, 1.0f};
-    const float armY[4] = {1.0f, 1.0f, -1.0f, -1.0f};
-
-    for (int i = 0; i < 4; ++i) {
-        const ImVec2& corner = corners[i];
-        drawList->AddLine(corner, ImVec2(corner.x + (armX[i] * kArmLength), corner.y), color, kThickness);
-        drawList->AddLine(corner, ImVec2(corner.x, corner.y + (armY[i] * kArmLength)), color, kThickness);
+    const bool isSelected = selectedAssetPath.has_value() && *selectedAssetPath == node.relativePath;
+    // Deliberately NO ImGuiTreeNodeFlags_DefaultOpen here, unlike
+    // renderSceneTreeNode() above: this engine's own scene has a handful of
+    // entities total, so starting every group expanded costs nothing and
+    // shows everything at a glance, but assets/models/ and assets/textures/
+    // can plausibly grow into real per-category folder structure a level
+    // designer would want collapsed by default (this project's own
+    // assets/textures/skybox/ and assets/textures/hdri/ subfolders already
+    // show the shape of that) -- an all-expanded-by-default asset tree gets
+    // worse, not better, as a project's content grows, which an all-expanded
+    // scene tree does not.
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (node.children.empty()) {
+        // Same "no expand arrow / no matching TreePop() needed" shape
+        // renderSceneTreeNode() above uses for a childless entity -- here,
+        // a file (isDirectory == false always has empty children, but an
+        // empty directory does too, and both should render as a plain leaf
+        // row rather than a permanently-unopenable arrow).
+        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
     }
+    if (isSelected) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+
+    // Phase 17b: the row's own icon. `assetPath` -- "assets/" +
+    // node.relativePath -- is the SAME string classifyAssetDropPath()
+    // already expects (AssetTreeNode::relativePath's own "relative to
+    // assets/ itself" convention -- see this function's own Phase 15g
+    // comment below for the identical prefixing on the drag payload), so
+    // this reuses that one function rather than re-deriving "model or
+    // texture" from the path a second, possibly-drifting way.
+    // classifyAssetDropPath()'s own result is irrelevant for a directory
+    // row (editor_icons.hpp's own assetNodeIconGlyph() checks isDirectory
+    // FIRST and returns the folder icon outright), but it's still computed
+    // unconditionally here rather than only for files -- branching on
+    // node.isDirectory to skip it would save one cheap string classify call
+    // at the cost of a second, separate code path this function does not
+    // otherwise need.
+    const std::string assetPath = "assets/" + node.relativePath;
+    const char32_t icon = assetNodeIconGlyph(node.isDirectory, classifyAssetDropPath(assetPath));
+    const std::string label = iconGlyphUtf8(icon) + "  " + node.name;
+    const bool opened = ImGui::TreeNodeEx(label.c_str(), flags);
+    if (ImGui::IsItemClicked()) {
+        selectedAssetPath = node.relativePath;
+    }
+
+    // Phase 15g: every row -- file or folder alike -- is a real Dear ImGui
+    // drag source now, not just files. Attached to the SAME item
+    // TreeNodeEx()/IsItemClicked() above just acted on (BeginDragDropSource()'s
+    // own contract -- imgui.h -- is "call right after submitting the item it
+    // applies to"), so this can't accidentally attach to some other row.
+    // Deliberately uniform across files AND folders rather than special-cased
+    // per node.isDirectory: this function's whole job is drawing one row, not
+    // deciding what a drop of it means downstream -- that classification
+    // (model vs. texture vs. "not a real draggable file at all," which is
+    // exactly what dragging a bare category folder like "models" itself, or
+    // one of assets/textures/'s own skybox/hdri subfolders, produces) is
+    // engine::classifyAssetDropPath() (asset_drop.hpp)'s job alone, run once
+    // a drop actually lands on the Viewport (see this file's own
+    // renderDockspaceShell() Phase 15g comment below) -- keeping that
+    // decision out of this row-drawing function is the same "EditorUI reports
+    // intent, Application decides what it means" split this class already
+    // follows for createRequest/textureAssignRequested.
+    //
+    // The payload itself is one flat, null-terminated path string --
+    // `assetPath` above (already "assets/" + node.relativePath, computed
+    // once for this function's own Phase 17b icon lookup and reused here
+    // rather than rebuilding an identical string a second time), matching
+    // AssetTreeNode::relativePath's OWN "relative to assets/ itself"
+    // convention the identical way renderTextureBrowsePopup()'s own
+    // "assets/" + file->relativePath already is (this file's own Phase 15f
+    // comment) -- not a small POD struct bundling path+category+isDirectory:
+    // SetDragDropPayload() copies its `data` argument by raw byte value
+    // (imgui.cpp), so anything containing a std::string/std::vector (owning
+    // heap memory) would be unsafe to hand it this way; a flat char buffer
+    // has no such hazard, and the one piece of information a drop target
+    // actually needs -- WHICH asset -- is fully captured by the path alone
+    // (category is re-derived from it, not shipped alongside it, so there's
+    // no second field that could ever drift out of sync with the path
+    // itself).
+    if (ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload(kAssetDragDropPayloadType, assetPath.c_str(), assetPath.size() + 1);
+        // The default drag preview tooltip (Dear ImGui's own "..." fallback
+        // -- imgui.h's own BeginDragDropSource() comment) isn't very useful;
+        // this is the identical "just the row's own visible label" preview
+        // pattern imgui_demo.cpp's own drag-and-drop examples use.
+        ImGui::TextUnformatted(node.name.c_str());
+        ImGui::EndDragDropSource();
+    }
+
+    if (opened && !node.children.empty()) {
+        for (const AssetTreeNode& child : node.children) {
+            renderAssetTreeNode(child, selectedAssetPath);
+        }
+        ImGui::TreePop();
+    }
+
+    ImGui::PopID();
 }
 
 // Phase 14f: the Scene panel's Create menu -- its own item list, shared
@@ -180,7 +427,10 @@ void addCornerBrackets(ImDrawList* drawList, ImVec2 topLeft, ImVec2 bottomRight,
 // closes a popup automatically the instant one of its own MenuItem()s is
 // clicked, the default behavior this engine's other popups (if any existed
 // yet) would already rely on too.
-CreateEntityKind renderCreateEntityMenuItems() {
+//
+// `hasActiveCamera` (Phase 18g): true once a scene Camera entity already
+// exists -- see editor_ui.hpp's own updated renderDockspaceShell() comment.
+CreateEntityKind renderCreateEntityMenuItems(bool hasActiveCamera) {
     CreateEntityKind result = CreateEntityKind::kNone;
 
     if (ImGui::MenuItem("Cube")) {
@@ -198,38 +448,76 @@ CreateEntityKind renderCreateEntityMenuItems() {
 
     ImGui::Separator();
 
-    // Shown (matching the originally approved mockup) but disabled, not
-    // omitted -- see editor_ui.hpp's own CreateEntityKind comment for the
-    // full "why deferred" reasoning: a real Point/Directional Light or
-    // Camera entity needs a genuinely new ECS component type (and, for
-    // lights, rewiring basic.frag/pbr.frag's shading to read from the ECS
-    // instead of application.cpp's existing fixed kPointLights/kSpotLights
-    // arrays; for a camera, an "which entity is the active camera" concept
-    // this engine has no notion of anywhere today) -- real, substantial,
-    // separate scope well beyond "add a menu item", so this phase declines
-    // to half-build either. Same BeginDisabled()-plus-explanatory-tooltip
-    // treatment this project's own Inspector already established for
-    // "Browse..." (Phase 14e, material.hpp) and, until this very phase,
-    // "Delete Object" itself -- ImGui::BeginDisabled() makes the item itself
-    // unclickable (no dangling half-wired handler to accidentally trigger),
-    // while ImGuiHoveredFlags_AllowWhenDisabled lets IsItemHovered() still
-    // report a hover on a disabled item so the tooltip below still shows.
-    const auto disabledCreateMenuItem = [](const char* label, const char* tooltip) {
+    // Phase 15a: "Point Light" is real now -- light.hpp's new PointLight
+    // component plus application.cpp's collectPointLights()-based upload
+    // (see that file's own Phase 15a comment) means a created point light
+    // actually lights the scene, the same "real, working" treatment
+    // Cube/Sphere/Plane/Empty above already got in Phase 14f.
+    if (ImGui::MenuItem("Point Light")) {
+        result = CreateEntityKind::kPointLight;
+    }
+
+    // Phase 15b: "Directional Light" is real now too -- light.hpp's new
+    // DirectionalLight component plus application.cpp's
+    // resolveActiveDirectionalLight()-based upload (see that header's own
+    // Phase 15b comment) means a created-and-active directional light
+    // actually replaces the fixed kLightDirection/kLightColor "sun" this
+    // frame, cascaded shadows included. This one WAS the harder of the two
+    // Phase 15a deferred (see that phase's own README section): unlike point
+    // lights, basic.frag/pbr.frag read a single fixed uLightDirection/
+    // uLightColor pair, not a uNumDirectionalLights-counted array, and it's
+    // also this engine's one shadow-casting light (renderShadowPass()/
+    // computeCascades(), application.cpp) -- so making it ECS-driven needed
+    // an "active sun" concept this engine had no notion of before this
+    // phase. That's Application's own activeDirectionalLight_
+    // (application.hpp) now -- "the most recently Create'd Directional
+    // Light entity" (set in spawnEntityFromCreateMenu(), application.cpp),
+    // the simplest rule that fits an engine with no multi-select UI concept
+    // at all yet. Camera (below) turned out NOT to need an equivalent
+    // "active" concept at all, despite looking structurally similar at
+    // first glance -- see that item's own Phase 15c comment for why.
+    if (ImGui::MenuItem("Directional Light")) {
+        result = CreateEntityKind::kDirectionalLight;
+    }
+
+    // Phase 15c: "Camera" is real now too -- the third and last of this
+    // Create menu's own Phase 14f-inherited BeginDisabled()'d gaps.
+    //
+    // Phase 18g: now BeginDisabled()'d again -- but for a completely
+    // different reason than Phase 14f's original "not implemented yet" gap
+    // (disabledCreateMenuItem() above still exists for exactly that other
+    // reason, on genuinely-not-built items elsewhere; "Camera" now HAS a
+    // real handler). This project's own confirmed, explicit design: at most
+    // ONE Camera entity may exist at a time (see camera_component.hpp's own
+    // resolveActiveCamera() comment for the full reasoning -- there is
+    // exactly one rendered view per frame, so "which of several Cameras is
+    // active" isn't a real choice the way "which of several lights is
+    // active" is). Once `hasActiveCamera` is true, this item is
+    // BeginDisabled()'d with an explanatory tooltip -- the SAME
+    // BeginDisabled()-plus-explanatory-tooltip technique
+    // disabledCreateMenuItem() above already establishes for its own,
+    // differently-reasoned gaps (ImGui::BeginDisabled() makes the item
+    // itself unclickable; ImGuiHoveredFlags_AllowWhenDisabled lets
+    // IsItemHovered() still report a hover so the tooltip shows) -- reusing
+    // that exact mechanism rather than inventing a second one, just inlined
+    // here instead of going through that lambda, since this is the only
+    // item with this particular (`hasActiveCamera`-conditional) reason to be
+    // disabled. Re-enables itself the instant that one Camera entity is
+    // deleted, since `hasActiveCamera` is recomputed fresh from the
+    // registry's real content every single call -- no separate "did it just
+    // get deleted" bookkeeping needed here at all.
+    if (hasActiveCamera) {
         ImGui::BeginDisabled();
-        ImGui::MenuItem(label);
+        ImGui::MenuItem("Camera");
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("%s", tooltip);
+            ImGui::SetTooltip(
+                "Only one Camera entity is allowed at a time (this engine has exactly one rendered view). "
+                "Delete the existing Camera entity to create a new one.");
         }
-    };
-    disabledCreateMenuItem("Point Light",
-                            "Not implemented yet -- needs a new Light ECS component plus shading-pipeline "
-                            "wiring. A natural follow-up to Phase 14f, not yet a numbered phase.");
-    disabledCreateMenuItem("Directional Light",
-                            "Not implemented yet -- same reasoning as \"Point Light\" above.");
-    disabledCreateMenuItem("Camera",
-                            "Not implemented yet -- needs a Camera ECS component and an \"active camera\" "
-                            "concept this engine doesn't have yet.");
+    } else if (ImGui::MenuItem("Camera")) {
+        result = CreateEntityKind::kCamera;
+    }
 
     return result;
 }
@@ -250,13 +538,50 @@ CreateEntityKind renderCreateEntityMenuItems() {
 // be a footgun), and Physics (the real static/dynamic split, wired through
 // physics.hpp's setEntityStatic() -- see that function's own header comment
 // for the full mechanism).
-void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& selectedEntity) {
+// Phase 15b: `activeDirectionalLight` -- see editor_ui.hpp's own Phase 15b
+// header comment and renderDockspaceShell()'s own Phase 15b comment for what
+// this is (Application's own activeDirectionalLight_, read-only here) and
+// why it's threaded through as a third parameter rather than looked up some
+// other way.
+//
+// Phase 15f: two more parameters, both specifically for the Material
+// section's newly-real "Browse..." button. `assetTree` is EditorUI's own
+// `assetTree_` (Phase 15d, built once in the constructor) -- the Material
+// section's texture-picker popup below walks its "textures" subtree to list
+// candidates, reusing that already-built forest rather than re-walking the
+// filesystem a second time (see asset_browser.hpp's own "Caching" comment
+// for why assetTree_ is a cache in the first place). `textureAssignRequested`
+// mirrors `saveSceneRequested`'s own "EditorUI reports intent, Application
+// acts on it" shape (editor_ui.hpp's own Phase 15e comment) -- EditorUI has
+// no ResourceManager to actually load a Texture through, so clicking a
+// popup entry only records WHICH asset-relative path was picked; only
+// Application::render() turns that into a real resources_.getTexture() call
+// and a MaterialOverride component (material_override.hpp) on the selected
+// entity, right after this whole call returns.
+// Phase 18h: three more trailing parameters -- `pendingTransformEditBefore`
+// is EditorUI's own pendingInspectorTransformEditBefore_ member, threaded
+// through by reference (see that member's own editor_ui.hpp comment);
+// `transformEditCommitted`/`deleteEntityRequested` mirror
+// renderDockspaceShell()'s own same-named out-parameters exactly (this
+// function is what actually sets either, on the frame a Transform field
+// edit completes / "Delete Object" is clicked).
+void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& selectedEntity,
+                           std::optional<EntityId> activeDirectionalLight,
+                           const std::vector<AssetTreeNode>& assetTree,
+                           std::optional<std::string>& textureAssignRequested,
+                           std::optional<TransformSnapshot>& pendingTransformEditBefore,
+                           std::optional<Command>& transformEditCommitted,
+                           std::optional<EntityId>& deleteEntityRequested) {
     if (!selectedEntity.has_value()) {
         // Matches this panel's pre-14e placeholder tone (see the removed
         // "Inspector -- coming in Phase 14e" line) rather than an empty/
         // blank-looking panel -- this phase's own brief explicitly calls
         // for that.
         ImGui::TextWrapped("Inspector -- select an entity in the Scene panel to view/edit it.");
+        // Phase 18h: drop any in-progress edit-session snapshot -- the same
+        // "nothing selected, nothing to interact with" reset updateGizmo()'s
+        // own equivalent early-return already applies to gizmoDragState_.
+        pendingTransformEditBefore.reset();
         return;
     }
 
@@ -272,6 +597,7 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
         // (14f+) can't turn a stale selectedEntity_ into a null dereference
         // here.
         ImGui::TextWrapped("Selected entity no longer has a Transform.");
+        pendingTransformEditBefore.reset();
         return;
     }
 
@@ -291,10 +617,49 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
     // caveat at all, since (unlike ModelComponent's Model) Transform is a
     // genuinely per-entity ComponentPool<Transform> entry (ecs.hpp).
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Phase 18h: `noteActivation`/`commitIfDeactivated` bracket each of
+        // the three widgets below, turning a COMPLETED drag/type-in
+        // interaction (not a per-frame value change -- a multi-frame drag
+        // must become exactly one undo step) into a real transformEditCommitted
+        // Command. `beforeCandidate` is read fresh right before EACH widget
+        // call, i.e. from THIS Transform's state as of before that widget's
+        // own possible mutation this same frame -- necessary because the
+        // very first frame of a drag can both activate AND already report a
+        // changed value in the same ImGui call, so "before" has to be
+        // captured pre-emptively, not decided only after learning activation
+        // happened (see pendingInspectorTransformEditBefore_'s own
+        // editor_ui.hpp comment for the fuller version of this reasoning).
+        // noteActivation() only actually commits that candidate into
+        // `pendingTransformEditBefore` if THIS widget is the one that just
+        // activated -- IsItemActivated()/IsItemDeactivatedAfterEdit() both
+        // refer to "the most recently submitted item," so both must be
+        // called immediately after their own widget, never batched.
+        const auto noteActivation = [&](const TransformSnapshot& beforeCandidate) {
+            if (ImGui::IsItemActivated()) {
+                pendingTransformEditBefore = beforeCandidate;
+            }
+        };
+        const auto commitIfDeactivated = [&]() {
+            if (ImGui::IsItemDeactivatedAfterEdit() && pendingTransformEditBefore.has_value()) {
+                const TransformSnapshot after{transform->position(), transform->rotation(), transform->scale()};
+                // Guards against pushing a no-op step -- e.g. a click on the
+                // field that activates and immediately deactivates without
+                // ever actually moving the value (see
+                // transformSnapshotsEqual()'s own undo_stack.hpp comment).
+                if (!transformSnapshotsEqual(*pendingTransformEditBefore, after)) {
+                    transformEditCommitted = makeTransformEditCommand(id, *pendingTransformEditBefore, after);
+                }
+                pendingTransformEditBefore.reset();
+            }
+        };
+
+        const TransformSnapshot beforePosition{transform->position(), transform->rotation(), transform->scale()};
         glm::vec3 position = transform->position();
         if (ImGui::DragFloat3("Position", &position.x, 0.01f)) {
             transform->setPosition(position);
         }
+        noteActivation(beforePosition);
+        commitIfDeactivated();
 
         // Rot Y only, matching the approved mockup's own single "Rot Y"
         // field -- not full XYZ Euler like DebugUI's pre-existing "Scene
@@ -317,22 +682,37 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
         // might otherwise be present). A future phase that needs to author
         // non-Y rotations from the Inspector should grow this into a full
         // DragFloat3, the same way DebugUI's own panel already does it.
+        const TransformSnapshot beforeRotation{transform->position(), transform->rotation(), transform->scale()};
         float rotationYDeg = glm::degrees(glm::eulerAngles(transform->rotation()).y);
         if (ImGui::DragFloat("Rot Y", &rotationYDeg, 0.5f)) {
             transform->setRotation(glm::angleAxis(glm::radians(rotationYDeg), glm::vec3(0.0f, 1.0f, 0.0f)));
         }
+        noteActivation(beforeRotation);
+        commitIfDeactivated();
 
+        const TransformSnapshot beforeScale{transform->position(), transform->rotation(), transform->scale()};
         glm::vec3 scale = transform->scale();
         if (ImGui::DragFloat3("Scale", &scale.x, 0.01f, 0.01f, 100.0f)) {
             transform->setScale(scale);
         }
+        noteActivation(beforeScale);
+        commitIfDeactivated();
     }
 
     // --- Material --------------------------------------------------------
-    // Read-only this phase, deliberately -- see material.hpp's own Phase
-    // 14e comment on `tint`/`shininess` for the full "why", restated briefly
-    // in-panel below too so the reason is visible to whoever is looking at
-    // this UI, not just whoever reads this source file.
+    // Phase 15f: the diffuse texture is real/live now -- "Browse..." opens a
+    // popup listing every file under assets/textures/ (reusing `assetTree`,
+    // Phase 15d's own already-built forest -- see renderTextureBrowsePopup()
+    // above), and picking one installs a MaterialOverride component
+    // (material_override.hpp) on JUST this entity, never mutating the
+    // shared, cached Model/Material every other entity loading the same
+    // asset path also points at -- see material_override.hpp's own header
+    // comment for the full "per-entity override, not clone-on-edit" design
+    // this sidesteps the shared-cache hazard with. Tint/shininess stay
+    // exactly as read-only as Phase 14e left them, deliberately -- see
+    // material.hpp's own Phase 15f update to its Phase 14e comment for why
+    // (briefly: the identical shared-cache hazard still applies to them, and
+    // this phase's own brief only asks for the texture-assignment slice).
     if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (modelComponent != nullptr && modelComponent->model != nullptr) {
             const Material& material = modelComponent->model->primaryMaterial();
@@ -343,27 +723,55 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
             ImGui::EndDisabled();
             ImGui::Text("Shininess: %.1f", static_cast<double>(material.shininess));
 
-            const Texture& diffuse = material.diffuseTexture();
-            ImGui::TextWrapped("Texture: %s (%dx%d)",
+            // Phase 15f: prefer this entity's own MaterialOverride diffuse
+            // texture, if it has one, over the shared Model's own baked-in
+            // material.diffuseTexture() -- the exact same "override wins if
+            // present, else fall back to the shared Model" rule
+            // resolveDiffuseTextureOverride() (material_override.hpp) applies
+            // at draw time, just read here for DISPLAY instead of for a
+            // texture unit bind.
+            const MaterialOverride* materialOverride = registry.getComponent<MaterialOverride>(id);
+            const bool hasOverride = materialOverride != nullptr && materialOverride->diffuseTexture != nullptr;
+            const Texture& diffuse = hasOverride ? *materialOverride->diffuseTexture : material.diffuseTexture();
+            ImGui::TextWrapped("Texture: %s (%dx%d)%s",
                                 diffuse.path().empty() ? "(unknown)" : diffuse.path().c_str(), diffuse.width(),
-                                diffuse.height());
+                                diffuse.height(), hasOverride ? " [override]" : "");
             ImGui::TextDisabled("Model asset: %s", modelComponent->path.c_str());
 
-            ImGui::BeginDisabled();
-            ImGui::Button("Browse...");
-            ImGui::EndDisabled();
+            if (ImGui::Button("Browse...")) {
+                ImGui::OpenPopup("Choose Diffuse Texture");
+            }
+            renderTextureBrowsePopup(assetTree, textureAssignRequested);
 
-            // See material.hpp's own Phase 14e comment for the full
-            // reasoning: this Model (and therefore this Material) is cached
+            if (hasOverride) {
+                ImGui::SameLine();
+                // Reverts this one entity back to the shared Model's own
+                // material -- removeComponent<MaterialOverride>(), not a
+                // null-out-in-place, so resolveDiffuseTextureOverride()'s own
+                // getComponent() lookup simply finds nothing here again,
+                // exactly like an entity that never had an override at all
+                // (and, per scene_serialization.hpp's own Phase 15f comment,
+                // so the NEXT Save Scene correctly omits this entity's
+                // "materialOverride" block instead of writing a stale one).
+                if (ImGui::Button("Clear Override")) {
+                    registry.removeComponent<MaterialOverride>(id);
+                }
+            }
+
+            // See material.hpp's own Phase 14e comment (updated for Phase
+            // 15f) for the full reasoning on why tint/shininess stay
+            // read-only: this Model (and therefore this Material) is cached
             // and shared across every entity that loaded the same asset
-            // path, so editing it here would silently repaint every other
-            // entity using the same model -- a real footgun, not a
-            // hypothetical one, given "parented_demo_cube" and
-            // "falling_cube" already share assets/models/falling_cube.obj in
-            // this project's own default scene.
+            // path, so editing THOSE two fields here would still silently
+            // repaint every other entity using the same model -- a real
+            // footgun, not a hypothetical one, given "parented_demo_cube"
+            // and "falling_cube" already share assets/models/
+            // falling_cube.obj in this project's own default scene. The
+            // diffuse texture above no longer has that problem -- it goes
+            // through the per-entity MaterialOverride above instead.
             ImGui::TextWrapped(
-                "Read-only: this material is shared by every entity using the same model asset (see "
-                "material.hpp).");
+                "Tint/Shininess are read-only: shared by every entity using the same model asset (see "
+                "material.hpp). Diffuse texture above is a per-entity override -- safe to change.");
         } else {
             ImGui::TextDisabled("No model on this entity.");
         }
@@ -439,37 +847,907 @@ void renderInspectorPanel(EntityRegistry& registry, std::optional<EntityId>& sel
             "get ground-plane collision.");
     }
 
-    ImGui::Separator();
-    // Phase 14f: real deletion. destroyEntityOrphaningChildren()
-    // (transform_hierarchy.hpp) removes `id` from EVERY component pool that
-    // currently exists (ecs.hpp's own generic EntityRegistry::
-    // destroyEntity()) after first orphaning any direct children to their
-    // own current world transform -- see that function's own header comment
-    // for the full orphan-vs-cascade design this phase settled on (and
-    // README.md's own Phase 14f section for the short version).
+    // --- Light -------------------------------------------------------------
+    // Phase 15a: shown only for an entity that actually has a PointLight
+    // component -- i.e. one created via the Create menu's new "Point Light"
+    // item (or ENGINE_DEBUG_CREATE=pointlight), never for
+    // "scene"/"falling_cube"/etc, which have no PointLight and so show no
+    // Light section at all, the same "opt-in per entity, section only
+    // appears when the component does" shape the Physics section above
+    // already establishes for RigidBody/Collider.
     //
-    // `selectedEntity` is cleared in the SAME click, immediately after --
-    // not left for next frame's defensive "Selected entity no longer has a
-    // Transform" branch (this function's own early-return above, added
-    // Phase 14e specifically anticipating this) to catch. That branch stays
-    // exactly as it was regardless (a real, still-useful safety net for any
-    // OTHER way selectedEntity could ever end up stale), but relying on it
-    // here instead of clearing eagerly would leave the Inspector showing a
-    // "no longer has a Transform" message for one full frame after a delete
-    // rather than immediately falling back to its normal "nothing selected"
-    // placeholder -- a needless, avoidable flash of the wrong message when
-    // the right one is one line away.
-    //
-    // This is the LAST thing renderInspectorPanel() does: nothing below (in
-    // fact, nothing else in this function at all, after this) reads `id`/
-    // `transform`/`modelComponent`/`nameComponent`/etc. again this call, so
-    // clicking Delete here can safely mutate `registry` out from under those
-    // now-stale local pointers without any further use-after-free risk
-    // within this same invocation.
-    if (ImGui::Button("Delete Object")) {
-        destroyEntityOrphaningChildren(registry, id);
-        selectedEntity.reset();
+    // Fully live, like Transform -- not read-only like Material: a PointLight
+    // is a genuinely per-entity ComponentPool<PointLight> entry (ecs.hpp),
+    // with none of Material's "this Model, and therefore this Material, is
+    // shared/cached across every entity using the same asset" caveat (see
+    // this file's own Material section comment above), so there is no
+    // shared-mutation footgun here to guard against.
+    if (PointLight* light = registry.getComponent<PointLight>(id)) {
+        if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::ColorEdit3("Color", &light->color.x);
+            // Same (constant, linear, quadratic) attenuation profile
+            // application.cpp's own kPointLights table already exposes as
+            // three independent floats -- see that table's own comment for
+            // what they mean. Range/step match the Inspector's existing
+            // "Collider Half-Extent" DragFloat just above (Physics section).
+            //
+            // Constant's minimum is 0.01f, not 0.0f, for the same
+            // "avoid a degenerate zero value" reason Collider Half-Extent's
+            // own 0.01f floor exists just above: basic.frag/pbr.frag compute
+            // point-light attenuation as 1.0/(constant + linear*distance +
+            // quadratic*distance^2), and a fragment very close to the light
+            // (distance ~ 0) with constant == 0.0 would divide by
+            // (near-)zero, producing Inf/NaN that can corrupt the bloom
+            // pass around that light. No prior code path could ever reach
+            // constant == 0 before this live-editable field -- kPointLights'
+            // own hardcoded table always uses 1.0.
+            //
+            // Linear and Quadratic keep 0.0f as their own minimum -- unlike
+            // Constant, zero is a legitimate value for either of them alone
+            // (it just turns off that one term of the attenuation curve) --
+            // but a NEGATIVE linear or quadratic is just as hazardous as
+            // constant == 0.0: it can still drive that same denominator to
+            // exactly zero (or past it, flipping the light's contribution
+            // sign) at some nonzero distance, even with constant floored at
+            // 0.01 above. Typing is the only way in either case (a negative
+            // drag-speed step never crosses 0.0f from a non-negative start).
+            //
+            // ImGuiSliderFlags_AlwaysClamp is required on all three fields,
+            // not optional: the v_min/v_max pair alone only clamps
+            // mouse-drag movement -- ImGui does NOT clamp a value typed
+            // directly into the field (double-click or Ctrl+Click to type)
+            // unless this flag is set (imgui.h, ImGuiSliderFlags_AlwaysClamp
+            // = ClampOnInput | ClampZeroRange), so without it a user could
+            // still type a value past any of these floors -- 0 or negative
+            // for Constant, negative for Linear/Quadratic -- and hit the
+            // same div-by-near-zero/sign-flip hazard above.
+            ImGui::DragFloat("Constant", &light->constant, 0.01f, 0.01f, 10.0f, "%.3f",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Linear", &light->linear, 0.01f, 0.0f, 10.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Quadratic", &light->quadratic, 0.01f, 0.0f, 10.0f, "%.3f",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::TextDisabled("Position comes from this entity's own Transform above.");
+        }
     }
+
+    // --- Light (Directional) ----------------------------------------------
+    // Phase 15b: shown only for an entity with a DirectionalLight component --
+    // same "opt-in per entity" shape as the PointLight section just above,
+    // and just as fully live (a genuinely per-entity ComponentPool<
+    // DirectionalLight> entry, no Material-style shared-cache caveat).
+    //
+    // Unlike PointLight's section, this one also surfaces something that has
+    // no point-light equivalent: whether THIS entity is the one entity (if
+    // any) actually driving the scene's single uLightDirection/uLightColor
+    // pair and shadow frustum right now -- see light.hpp's own
+    // resolveActiveDirectionalLight() comment and application.hpp's own
+    // activeDirectionalLight_ comment for the full "why only one, and which
+    // one" design. Without this line, two Directional Light entities would
+    // render IDENTICAL Inspector sections while only one of them is actually
+    // doing anything -- confusing in a way no other component in this
+    // engine's Inspector has to account for, since every other component
+    // type here (Transform, Material, Physics, PointLight) affects its own
+    // entity only, never competes with a sibling entity for one shared
+    // uniform slot.
+    if (DirectionalLight* dirLight = registry.getComponent<DirectionalLight>(id)) {
+        if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::ColorEdit3("Color", &dirLight->color.x);
+            // No ImGuiSliderFlags_AlwaysClamp/min-max floor here, unlike
+            // PointLight's Constant field just above -- see light.hpp's own
+            // DirectionalLight comment for why a per-AXIS floor would be
+            // actively wrong for a direction (any single axis can
+            // legitimately be exactly 0.0 for a purely axis-aligned
+            // direction). The one real hazard -- the whole VECTOR
+            // degenerating to (at or near) zero -- is guarded where the
+            // value is actually CONSUMED instead (resolveActiveDirectionalLight(),
+            // light.cpp), which is the only place that can tell "the whole
+            // vector" apart from "one axis" in the first place.
+            ImGui::DragFloat3("Direction", &dirLight->direction.x, 0.01f);
+            ImGui::TextDisabled(
+                "Points FROM the light TOWARD the scene (same convention as this engine's fixed \"sun\").");
+
+            const bool isActive = activeDirectionalLight.has_value() && *activeDirectionalLight == id;
+            if (isActive) {
+                ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f),
+                                    "Active: this entity is currently lighting the scene (and casting its "
+                                    "shadows).");
+            } else {
+                ImGui::TextDisabled(
+                    "Inactive: only the most recently created Directional Light entity is active at a time; "
+                    "this one exists but isn't currently affecting shading/shadows.");
+            }
+        }
+    }
+
+    // --- Camera --------------------------------------------------------------
+    // Phase 15c: shown only for an entity with a CameraComponent -- the same
+    // "opt-in per component" shape as the two Light sections just above, and
+    // just as fully live (a genuinely per-entity ComponentPool<
+    // CameraComponent> entry, no Material-style shared-cache caveat).
+    //
+    // Unlike either Light section, there is no "is this the active one"
+    // line here -- see camera_component.hpp's own header comment and
+    // CreateEntityKind::kCamera's own editor_ui.hpp comment for why: nothing
+    // in this engine's rendering pipeline reads a CameraComponent at all
+    // yet, so there is no shared resource for one entity to be "active" for
+    // in the first place, unlike DirectionalLight's real competition over
+    // this engine's one uLightDirection/uLightColor pair. This caption spells
+    // that out explicitly rather than leaving it as a silent omission a user
+    // could easily read as a bug -- the same "documented gap, not a quiet
+    // one" treatment this whole phase's own scope decisions get (see
+    // README.md's own Phase 15c section).
+    if (CameraComponent* cameraComponent = registry.getComponent<CameraComponent>(id)) {
+        if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Range/step mirror engine::Camera's own setFov()/setClipPlanes()
+            // intent (camera.hpp) -- an ordinary vertical FOV in degrees, and
+            // a near plane that must stay strictly positive and (for the
+            // AlwaysClamp floor below) comfortably less than the far plane so
+            // glm::perspective() never receives a degenerate near>=far range.
+            // ImGuiSliderFlags_AlwaysClamp for the same reason PointLight's
+            // own Constant field needs it above: without it, typing a value
+            // (double-click / Ctrl+Click) bypasses the v_min/v_max pair
+            // entirely, which a plain mouse drag alone would respect.
+            ImGui::DragFloat("Field of View", &cameraComponent->fovYDeg, 0.25f, 1.0f, 179.0f, "%.1f deg",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Near Plane", &cameraComponent->nearPlane, 0.01f, 0.001f, 1000.0f, "%.3f",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Far Plane", &cameraComponent->farPlane, 1.0f, 0.001f, 100000.0f, "%.3f",
+                              ImGuiSliderFlags_AlwaysClamp);
+            ImGui::TextDisabled("Position/orientation come from this entity's own Transform above.");
+            ImGui::TextDisabled(
+                "Not yet wired to this engine's actual rendered view -- that still comes entirely from "
+                "the engine's own free-fly camera, independent of this entity (see camera_component.hpp).");
+        }
+    }
+
+    ImGui::Separator();
+    // Phase 14f: real deletion. Phase 18h: no longer calls
+    // destroyEntityOrphaningChildren() (transform_hierarchy.hpp) directly --
+    // this click only REPORTS the request now (`deleteEntityRequested`),
+    // the same "EditorUI reports intent, Application acts" shape
+    // createRequest/saveSceneRequested/textureAssignRequested already
+    // establish. Actually destroying the entity has to happen on
+    // Application's own side of that call now, so it can capture a
+    // SceneEntityRecord (captureEntityRecord(), scene_serialization.hpp)
+    // and push it onto undoStack_ BEFORE the entity's components are gone --
+    // see Application::deleteEntity() (application.cpp) for the real
+    // implementation, which still ends by calling
+    // destroyEntityOrphaningChildren() exactly as this click used to
+    // directly, and still clears selectedEntity_ the identical "immediately,
+    // not left for next frame's defensive fallback" way this comment used to
+    // describe happening right here.
+    if (ImGui::Button("Delete Object")) {
+        deleteEntityRequested = id;
+    }
+}
+
+// Phase 17a: the first item in the "Phase 17: visual design" arc's own
+// LETTERED order to actually build (Phase 17b's icon font landed first, out
+// of order, per that phase's own README section -- see this project's
+// established "document the out-of-order landing, don't pretend it happened
+// in sequence" precedent, e.g. Phase 15e's schema note). This phase is
+// EXPLICITLY scoped to ImGui's own internal panel styling only -- the color
+// palette, corner rounding, border treatment, and spacing every ImGui::
+// Begin()'d panel/popup picks up automatically because ImGuiStyle is one
+// global struct, not per-window state. It does NOT touch: the OS window's
+// own title bar/border (that is borderless-window platform work, a much
+// bigger separate Phase 17d), the toolbar row (Phase 17c, reuses this
+// phase's colors once it exists), or any panel's actual rendering logic
+// (renderInspectorPanel() etc. above are all completely unchanged by this
+// function -- they inherit new colors purely because ImGui::Text()/
+// ImGui::Button()/etc. always read the CURRENT ImGuiStyle, never a value
+// baked in at the call site).
+//
+// Base + override, not "every ImGuiCol_ from scratch": ImGui::
+// StyleColorsDark() (called immediately before this function, in EditorUI's
+// constructor below) already gives every one of ImGuiStyle's ~50 Colors[]
+// entries a coherent, battle-tested dark-theme value. Re-deriving all of
+// them by hand here would both be far more code than this phase's actual
+// visual delta justifies, and risk silently drifting some entry this phase
+// never intended to touch. So this function runs strictly AFTER
+// StyleColorsDark() and only overrides the specific entries that need to
+// shift toward the reference mockup's dark/teal look; everything else
+// (Text, PlotLines/PlotHistogram -- this engine draws no ImGui plots,
+// Table* -- no ImGui tables anywhere in this codebase, TreeLines -- this
+// engine's TreeNodeEx() calls never pass ImGuiTreeNodeFlags_DrawLines*,
+// NavWindowing*/UnsavedMarker -- no multi-viewport Ctrl+Tab switcher or
+// unsaved-document markers exist here) is left exactly as StyleColorsDark()
+// set it, deliberately, rather than touched for its own sake.
+//
+// The one accent color, and where it came from: every "this is the
+// highlighted/active thing" role below (a pressed button, a selected tree
+// row, an active slider grab, a focused tab, a drag-drop target...) reuses
+// the SAME teal, `kAccentTeal` below, rather than inventing a slightly
+// different teal per widget family the way an unsystematic pass easily
+// could. Its exact value -- RGB(45, 195, 178), hex #2DC3B2 -- was picked by
+// sampling the reference mockup image directly (a small Python/Pillow
+// script averaging a clean, JPEG-artifact-free patch of the mockup's
+// "Use Gravity" toggle-on knob, the single most saturated, least
+// gradient-blended teal swatch anywhere in that image -- the app-icon
+// square and the toolbar's highlighted button are both visibly the same
+// hue but rendered with a gradient/lower saturation that would have made a
+// noisier reference point). `kAccentTealMuted` below is a SECOND directly-
+// sampled value, not a formula-derived tint: it is the mockup's own
+// selected-Scene-row background (`falling_cube`, RGB(28, 52, 54)) sampled
+// the same way, used verbatim for `ImGuiCol_Header`/`ImGuiCol_TabSelected`
+// (Dear ImGui's real "this row/tab is the selected one, at rest" colors --
+// see imgui.h's own ImGuiCol_ enum comments) precisely because that IS what
+// produced this exact pixel value in the mockup in the first place.
+// Hover/active variants of both are DERIVED (linear lerp toward white/black
+// by a fixed 15%) rather than independently eyeballed, so a hover state can
+// never accidentally end up a visibly different hue from the color it is
+// hovering over.
+//
+// Honest caveat this function's own README.md section (Phase 17a) repeats:
+// this container's screenshot capture is software-rendered/llvmpipe, lower
+// fidelity than the project owner's real Windows/GPU-accelerated build --
+// close-to, not pixel-identical-to, the mockup is the actual bar this
+// function is held to.
+void applyEditorTheme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* colors = style.Colors;
+
+    // The one accent teal, in its four roles (see header comment above).
+    // Values are plain 0..1 floats (ImVec4's own convention -- imgui.h),
+    // not 0..255 ints, so each is annotated with the 0..255 value it maps
+    // from/to for anyone cross-checking against the mockup with a color
+    // picker later.
+    constexpr ImVec4 kAccentTeal        (0.176f, 0.765f, 0.698f, 1.00f);  // #2DC3B2 (45,195,178) - sampled
+    constexpr ImVec4 kAccentTealHovered (0.300f, 0.800f, 0.740f, 1.00f);  // kAccentTeal lerped 15% toward white
+    constexpr ImVec4 kAccentTealActive  (0.150f, 0.650f, 0.590f, 1.00f);  // kAccentTeal lerped 15% toward black
+    constexpr ImVec4 kAccentTealMuted       (0.110f, 0.204f, 0.212f, 1.00f);  // #1C3436 (28,52,54) - sampled (mockup's own selected-row bg)
+    constexpr ImVec4 kAccentTealMutedHovered(0.140f, 0.280f, 0.290f, 1.00f);  // a lighter hover shade of kAccentTealMuted --
+                                                                              // eyeballed, not a strict 15% lerp like
+                                                                              // kAccentTealHovered/kAccentTealActive above
+    constexpr ImVec4 kAccentTealMutedActive (0.160f, 0.360f, 0.350f, 1.00f);  // a further step brighter, for the rarer mouse-held-down instant
+
+    // Neutral dark backgrounds -- also sampled from the mockup (a flat
+    // charcoal-navy, not pure black, with a second, slightly darker shade
+    // for the menu bar/status bar/scrollbar track it uses for those
+    // narrower always-on-screen strips).
+    constexpr ImVec4 kBgPanel  (0.094f, 0.106f, 0.141f, 1.00f);  // #181B24 (24,27,36) - sampled panel/window background
+    constexpr ImVec4 kBgSunken (0.059f, 0.071f, 0.090f, 1.00f);  // #0F1217 (15,18,23) - sampled menu-bar/status-bar background
+    constexpr ImVec4 kBgField          (0.130f, 0.150f, 0.180f, 1.00f);  // one step lighter than kBgPanel -- reads as a distinct input box
+    constexpr ImVec4 kBgFieldHovered   (0.160f, 0.200f, 0.220f, 1.00f);
+    constexpr ImVec4 kBgControl        (0.160f, 0.190f, 0.220f, 1.00f);  // ordinary (non-accented) button/control resting color
+    constexpr ImVec4 kBgControlHovered (0.220f, 0.260f, 0.290f, 1.00f);
+    constexpr ImVec4 kBorderSubtle(0.250f, 0.280f, 0.320f, 0.50f);  // low-alpha separator/border line, not a hard edge
+
+    colors[ImGuiCol_Text]         = ImVec4(0.86f, 0.87f, 0.89f, 1.00f);  // off-white, not pure white -- matches the mockup's label color
+    colors[ImGuiCol_TextDisabled] = ImVec4(0.45f, 0.47f, 0.50f, 1.00f);
+    colors[ImGuiCol_TextLink]     = kAccentTeal;  // no hyperlink text exists in this engine today, but stays consistent if one ever does
+
+    colors[ImGuiCol_WindowBg] = kBgPanel;
+    colors[ImGuiCol_ChildBg]  = kBgPanel;  // flat -- children (e.g. the texture-picker popup's scroll list) don't visually nest a shade darker
+    colors[ImGuiCol_PopupBg]  = ImVec4(0.086f, 0.098f, 0.129f, 0.98f);  // a touch darker + near-opaque so a floating popup reads as "above" its panel
+
+    colors[ImGuiCol_Border]       = kBorderSubtle;
+    colors[ImGuiCol_TitleBg]          = kBgSunken;
+    colors[ImGuiCol_TitleBgActive]    = kBgSunken;  // this engine's dockspace has no un-focused-vs-focused title distinction worth drawing differently
+    colors[ImGuiCol_TitleBgCollapsed] = ImVec4(kBgSunken.x, kBgSunken.y, kBgSunken.z, 0.75f);
+    colors[ImGuiCol_MenuBarBg]        = kBgSunken;
+
+    colors[ImGuiCol_FrameBg]        = kBgField;
+    colors[ImGuiCol_FrameBgHovered] = kBgFieldHovered;
+    colors[ImGuiCol_FrameBgActive]  = kAccentTealMuted;  // a field being actively dragged/typed into picks up the accent, not just a brighter neutral
+
+    colors[ImGuiCol_ScrollbarBg]          = kBgSunken;
+    colors[ImGuiCol_ScrollbarGrab]        = kBgControlHovered;
+    colors[ImGuiCol_ScrollbarGrabHovered] = kAccentTealMuted;
+    colors[ImGuiCol_ScrollbarGrabActive]  = kAccentTeal;
+
+    colors[ImGuiCol_CheckMark]          = kAccentTeal;
+    colors[ImGuiCol_CheckboxSelectedBg] = kAccentTealMuted;  // closest real Dear ImGui state to the mockup's teal-filled toggle switch (see Physics panel's Checkbox() calls) -- a real custom toggle-switch widget is not this phase's scope
+    colors[ImGuiCol_SliderGrab]         = kAccentTealActive;  // resting grab: accent dimmed a step, so it doesn't fight the full-brightness Active state below
+    colors[ImGuiCol_SliderGrabActive]   = kAccentTealHovered;  // brighter than resting while the grab is actually being dragged -- the clearest "you're mid-drag" cue
+
+    colors[ImGuiCol_Button]       = kBgControl;
+    colors[ImGuiCol_ButtonHovered] = kBgControlHovered;
+    colors[ImGuiCol_ButtonActive]  = kAccentTeal;  // this phase's brief calls this one out explicitly -- matches the mockup's highlighted/active toolbar button
+
+    // Header* drives CollapsingHeader/TreeNode/Selectable/MenuItem -- in
+    // particular, a SELECTED-but-not-hovered Scene/Assets tree row (the
+    // common case: mouse elsewhere, one entity selected) draws with plain
+    // ImGuiCol_Header, exactly the mockup's own `falling_cube` row this
+    // function's own kAccentTealMuted was sampled FROM -- so this one line
+    // reproduces that pixel, not just something close to it.
+    colors[ImGuiCol_Header]        = kAccentTealMuted;
+    colors[ImGuiCol_HeaderHovered] = kAccentTealMutedHovered;
+    colors[ImGuiCol_HeaderActive]  = kAccentTealMutedActive;
+
+    colors[ImGuiCol_Separator]        = kBorderSubtle;
+    colors[ImGuiCol_SeparatorHovered] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.60f);
+    colors[ImGuiCol_SeparatorActive]  = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.90f);
+
+    colors[ImGuiCol_ResizeGrip]        = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.25f);
+    colors[ImGuiCol_ResizeGripHovered] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.55f);
+    colors[ImGuiCol_ResizeGripActive]  = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.85f);
+
+    // Tab* mirrors the Header* family's own reasoning one level up (a docked
+    // panel sharing a dock node with another one, e.g. if a future run ever
+    // tab-groups two of Scene/Assets/Viewport/Inspector): unselected tabs
+    // stay a plain dark neutral, the selected tab picks up the same sampled
+    // muted teal a selected TREE ROW uses, and TabSelectedOverline -- a thin
+    // top-edge accent line Dear ImGui draws only on the focused, selected
+    // tab -- gets the FULL bright accent, a small but real place a
+    // full-saturation teal ends up visible even though this phase's actual
+    // default layout (buildInitialLayout()) never puts two panels in one
+    // tabbed dock node today.
+    colors[ImGuiCol_Tab]                    = kBgSunken;
+    colors[ImGuiCol_TabHovered]             = kAccentTealMutedHovered;
+    colors[ImGuiCol_TabSelected]            = kAccentTealMuted;
+    colors[ImGuiCol_TabSelectedOverline]    = kAccentTeal;
+    colors[ImGuiCol_TabDimmed]              = kBgSunken;
+    colors[ImGuiCol_TabDimmedSelected]      = kAccentTealMuted;
+    colors[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.60f);
+
+    colors[ImGuiCol_DockingPreview] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.55f);
+    colors[ImGuiCol_DockingEmptyBg] = kBgPanel;
+
+    colors[ImGuiCol_TextSelectedBg] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.35f);
+
+    // Phase 15g's own drag-and-drop (Assets tree -> Viewport) is the one
+    // place this engine already draws these two colors every run that
+    // actually drags an asset -- worth getting right, not leaving at
+    // StyleColorsDark()'s generic yellow-orange.
+    colors[ImGuiCol_DragDropTarget]   = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.90f);
+    colors[ImGuiCol_DragDropTargetBg] = ImVec4(kAccentTeal.x, kAccentTeal.y, kAccentTeal.z, 0.15f);
+
+    colors[ImGuiCol_NavCursor] = kAccentTeal;  // keyboard/gamepad nav highlight rect -- imgui.h notes ImGuiCol_NavHighlight is just this entry's pre-1.91.4 name
+
+    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);  // StyleColorsDark()'s own default here is a LIGHT gray dim, which would look wrong behind a dark theme's modal popups
+
+    // Rounding: two families, matching the mockup's own visual hierarchy --
+    // a slightly larger radius for "outer container" corners (a whole
+    // panel, a popup) than for "control" corners (a button, an input field,
+    // a scrollbar grab, a tab) sitting inside one, the same size
+    // relationship the mockup's own panels-vs-buttons rounding shows at a
+    // glance. ChildRounding sits between the two: a child region (e.g. the
+    // texture-picker's scrolling list) reads as a sub-panel, not a full
+    // outer window.
+    style.WindowRounding    = 8.0f;
+    style.PopupRounding     = 8.0f;
+    style.ChildRounding     = 6.0f;
+    style.TabRounding       = 6.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.FrameRounding     = 4.0f;
+    style.GrabRounding      = 4.0f;
+
+    // Border treatment: the mockup's panels/input fields read as flat,
+    // borderless shapes distinguished by FILL color (WindowBg vs FrameBg
+    // above), not by a drawn edge -- so windows/children/frames all get
+    // BorderSize 0. Popups are the one exception: PopupBorderSize stays at
+    // its StyleColorsDark() default of 1.0f, a deliberate keep-not-a-miss --
+    // a popup floats OVER a panel with the exact same fill color family
+    // (kBgPanel-ish), so without SOME edge it would have no visible
+    // boundary against whatever panel is behind it. This applies equally to
+    // the Phase 14f Create-menu popup and the Phase 15f Material "Browse..."
+    // popup -- neither's own rendering code needed a single line changed.
+    style.WindowBorderSize = 0.0f;
+    style.ChildBorderSize  = 0.0f;
+    style.FrameBorderSize  = 0.0f;
+
+    // Spacing: a bit more breathing room than StyleColorsDark()'s own
+    // defaults (WindowPadding 8x8, FramePadding 4x3, ItemSpacing 8x4),
+    // matching how much more generously spaced the mockup's own Properties
+    // panel rows/toolbar buttons look next to Dear ImGui's stock density.
+    style.WindowPadding = ImVec2(10.0f, 10.0f);
+    style.FramePadding  = ImVec2(8.0f, 5.0f);
+    style.ItemSpacing   = ImVec2(8.0f, 8.0f);
+}
+
+// Phase 17c: one Viewport-toolbar icon button -- a small shared helper
+// rather than six near-identical ImGui::Button()/BeginDisabled()/
+// SetTooltip() call sites, the same "extract once a widget+tooltip pattern
+// repeats enough to warrant it" instinct Phase 14f's own
+// disabledCreateMenuItem() lambda already established for the Create menu's
+// Point Light/Directional Light/Camera items (that lambda no longer exists
+// in this file -- Phase 15a/15b/15c made all three of its own items real,
+// one by one -- but README.md's own Phase 14f section still records its
+// exact original shape, which this helper's disabled branch below
+// reproduces almost verbatim).
+//
+// `active`: true pushes ImGuiCol_Button to the CURRENT ImGuiStyle's own
+// ImGuiCol_ButtonActive entry -- read back LIVE from ImGuiStyle rather than
+// a second hardcoded accent-teal literal declared here, so this can never
+// silently drift from whatever applyEditorTheme() (above) actually set that
+// role to; applyEditorTheme() itself already documents ImGuiCol_ButtonActive
+// as "matches the mockup's highlighted/active toolbar button" (see this
+// file's own Phase 17a comment), so reading it back is not a repurposing,
+// it's using that entry for precisely the role its own comment already
+// names. false leaves the button its ordinary un-pushed color.
+//
+// `enabled`: false wraps the button in BeginDisabled()/EndDisabled() --
+// this project's own established "shown per the approved mockup, but
+// BeginDisabled()'d with an explanatory tooltip, because the real feature
+// needs separate, larger scope" precedent. ImGuiHoveredFlags_
+// AllowWhenDisabled is what lets IsItemHovered() still report a hover on a
+// disabled item at all -- Dear ImGui's own default HoveredFlags do not, by
+// design, since a disabled item is not normally meant to respond to the
+// mouse in any way, tooltip included.
+//
+// `tooltip` is shown on hover either way, enabled or disabled -- an
+// icon-only row (no visible text label anywhere) is exactly the kind of UI
+// a tooltip is load-bearing for, not just a courtesy for the disabled
+// half.
+//
+// Returns true the one frame this button was actually clicked. Always
+// false while `enabled` is false -- BeginDisabled() itself already makes
+// Button() report no click for a disabled item (Dear ImGui's own
+// contract), not a second guard this helper adds on top.
+bool toolbarIconButton(const char* strId, char32_t glyph, bool active, bool enabled, const char* tooltip) {
+    const std::string label = iconGlyphUtf8(glyph) + "##" + strId;
+
+    if (active) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+    }
+    if (!enabled) {
+        ImGui::BeginDisabled();
+    }
+    const bool clicked = ImGui::Button(label.c_str());
+    if (!enabled) {
+        ImGui::EndDisabled();
+    }
+    if (active) {
+        ImGui::PopStyleColor();
+    }
+
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tooltip);
+    }
+
+    return clicked;
+}
+
+// Phase 17c: the Viewport panel's own toolbar row -- six icon buttons
+// (grid/lighting/texture-mode/undo/play/pause, left-to-right per the
+// reference mockup -- see README.md's own Phase 17c section).
+//
+// Phase 18a: submits its six buttons, nothing else -- it no longer draws a
+// trailing ImGui::Separator() (17c's original version did) or claims a row
+// of its own inside the Viewport panel's layout. Originally this function
+// WAS called as the very first thing inside the Viewport panel's Begin()/
+// End() block, so the buttons occupied their own row above the rendered 3D
+// image and pushed it down -- the project owner's own explicit complaint
+// ("the toolbar is supposed to be on top of the scene not above it") is
+// exactly that layout. Phase 18a moves the call site to AFTER the panel's
+// ImGui::Image() (see renderDockspaceShell() below), inside
+// renderViewportToolbarOverlay() (further below), which positions this same
+// button row as a floating overlay layered on top of the already-submitted
+// image instead -- see that function's own header comment for the
+// mechanics. This function's own six ImGui::Button() calls, their
+// active/enabled wiring, and their tooltips are otherwise byte-for-byte
+// unchanged from 17c.
+//
+// Two of the six were, through Phase 18e, wired to the exact same
+// Application-owned bool members the F1 debug overlay's own "Render Passes"
+// checkboxes already bind BY ADDRESS (Application::renderDebugUI(),
+// application.cpp) -- `ssaoDisabled`/`ssaoDebugMode`, mutated directly the
+// same "EditorUI mutates Application's own state directly through a
+// reference" shape `selectedEntity`/`cameraCaptureRequested` already
+// establish elsewhere in this same function. That wiring was always purely
+// redundant with the F1 overlay's own checkboxes (the exact same two flags,
+// reachable two ways) rather than a real, DIFFERENT toolbar feature -- see
+// this function's own updated Phase 18g comment below for what replaces it.
+//
+// Phase 18g repurposes those same two buttons for real Wireframe/Solid/
+// Rendered shading-mode control -- see shading_mode.hpp's own header
+// comment for the full three-states-two-buttons design.
+// ssaoDisabled_/ssaoDebugMode_ themselves are UNCHANGED, still real
+// Application members the F1 overlay's own checkboxes still fully own; this
+// toolbar simply stops being a second way to reach them.
+// `editShadingMode` arrives here BY REFERENCE (Application's own
+// editShadingMode_, application.hpp) -- but a click never writes it
+// directly the way `ssaoDisabled = !ssaoDisabled` did; it goes through
+// decideNextEditShadingMode() (shading_mode.hpp) instead, since a 3-states-
+// on-2-buttons radio group is a real small decision (what does clicking
+// "lighting" do if "texture-mode" is currently the active one?), not a bare
+// negation. `effective`, computed once via effectiveShadingMode() below,
+// is what the two buttons' own `active` highlight reads -- NOT
+// `editShadingMode` directly -- so their highlight always honestly reflects
+// what this frame is actually rendering (Rendered, both unhighlighted, the
+// instant Play mode is entered) even while `editShadingMode` itself keeps
+// remembering a Wireframe/Solid choice underneath for Edit mode to resume
+// with later. Both buttons stay `enabled=true` even during Play mode
+// (Application's own confirmed, documented choice -- see
+// application.hpp's own editShadingMode_ comment for why "clickable, just
+// silently updates editShadingMode_ for whenever Edit mode resumes" was
+// picked over BeginDisabled()'ing them): a click during Play mode still
+// calls decideNextEditShadingMode() and still writes `editShadingMode`,
+// it's simply not what THIS frame's `effective` reads from, since
+// `physicsRunning` is true.
+//
+// Two more -- grid, undo -- are still shown (matching the mockup) but
+// BeginDisabled()'d with an explanatory tooltip: this engine has no
+// viewport ground-plane grid overlay and no undo/redo history anywhere
+// today. Verified, not assumed, by a whole-codebase search Phase 17c's own
+// README section records the results of -- every other hit for "grid" is
+// the unrelated PBR sphere test-grid/cluster-culling grid (Phase 9/13a),
+// and "undo" turns up nowhere else at all except transform_hierarchy.hpp's
+// unrelated "there is no 'undo' in this editor" aside. Each would be real,
+// separate, substantial scope, the identical judgment call Phase 14f's own
+// Create-menu Point Light/Directional Light/Camera items already made (see
+// README.md's own Phase 14f section) -- Directional Light/Camera have since
+// both become real (Phase 15b/15c); grid/undo have not.
+//
+// Phase 18b: `play`/`pause` are real now too -- see this class's own Phase
+// 18b README section for the full design. Both `enabled=true`. `physicsRunning`
+// is Application's own new `physicsRunning_` (application.hpp), passed
+// through by reference exactly the way `ssaoDisabled`/`ssaoDebugMode` above
+// already are -- clicking Play sets it true, clicking Pause sets it false,
+// and each button's own `active` highlight reads the SAME live flag rather
+// than a hardcoded stub value (Play highlighted while running, Pause
+// highlighted while stopped -- mutually exclusive by construction, since
+// both read the one bool). No `decideXyz()`-shaped pure function was
+// extracted for this the way `decideMaximizeRestoreToggle()`/
+// `decideCameraCapture()` were for THEIR own state transitions: unlike
+// those two (a toggle that flips relative to its own current value, or a
+// small state machine with multiple triggers/edge cases), each of these two
+// buttons unconditionally sets the SAME one flag to the SAME fixed literal
+// every time it's clicked -- "set true" / "set false" -- which is exactly
+// the "no decision left to make, just an assignment" shape `ssaoDisabled =
+// !ssaoDisabled`/`ssaoDebugMode = !ssaoDebugMode` above already established
+// needs no extracted helper either.
+// Phase 18h: four more trailing parameters, replacing the old permanently-
+// disabled "undo" stub with a real, wired-up undo/redo pair. `canUndo`/
+// `canRedo` are read-only snapshots of Application's own
+// undoStack_.canUndo()/canRedo() this frame -- gate each button's own
+// `enabled` the same way `physicsRunning` already gates Play/Pause's
+// `active` highlight, so they gray out at either end of the history exactly
+// like a real editor's undo/redo buttons do. `undoRequested`/
+// `redoRequested` are set true the frame the corresponding button is
+// clicked -- Application::render() is what actually calls undo()/redo()
+// when either comes back true, immediately after renderDockspaceShell()
+// returns (see that method's own editor_ui.hpp comment).
+void renderViewportToolbar(ShadingMode& editShadingMode, bool& physicsRunning, bool canUndo, bool canRedo,
+                            bool& undoRequested, bool& redoRequested) {
+    toolbarIconButton("grid", kIconGrid, /*active=*/false, /*enabled=*/false,
+                       "Viewport grid overlay -- not implemented yet. This engine has no ground-plane "
+                       "grid-drawing code anywhere today; a real one is separate, later scope.");
+
+    ImGui::SameLine();
+
+    // Phase 18g: `effective` is what BOTH buttons' own `active` highlight
+    // reads from -- see this function's own updated header comment for why
+    // that's deliberately NOT `editShadingMode` directly.
+    const ShadingMode effective = effectiveShadingMode(physicsRunning, editShadingMode);
+
+    // The "sun" slot maps to Wireframe -- an intentional glyph reuse (this
+    // icon set has no dedicated wireframe-cube icon), same as the
+    // Phase 17c-18e version of this button reused it for a different
+    // "lighting-adjacent" concept before it. `active` reads true only when
+    // the EFFECTIVE mode is Wireframe (so Play mode never shows this
+    // highlighted, even if Edit mode had it selected) -- see this
+    // function's own header comment.
+    if (toolbarIconButton(
+            "lighting", kIconDirectionalLight, /*active=*/effective == ShadingMode::kWireframe, /*enabled=*/true,
+            effective == ShadingMode::kWireframe
+                ? "Wireframe: showing only mesh edges (click to return to Rendered). Forced back to Rendered "
+                  "automatically while Play mode is running."
+                : "Wireframe -- click to show only mesh edges, no shading. Forced back to Rendered automatically "
+                  "while Play mode is running.")) {
+        editShadingMode = decideNextEditShadingMode(editShadingMode, /*wireframeButtonClicked=*/true,
+                                                      /*solidButtonClicked=*/false);
+    }
+
+    ImGui::SameLine();
+    // The "image/texture-mode" slot maps to Solid -- objects shaded (basic
+    // lighting still applied) but without their own diffuse/albedo texture,
+    // exactly the "which IMAGE is the Viewport showing" reading this same
+    // slot already had pre-Phase-18g, just honestly repointed at a real
+    // shading mode instead of a raw debug buffer view.
+    if (toolbarIconButton(
+            "texturemode", kIconTexture, /*active=*/effective == ShadingMode::kSolid, /*enabled=*/true,
+            effective == ShadingMode::kSolid
+                ? "Solid: shaded without diffuse textures (click to return to Rendered). Forced back to Rendered "
+                  "automatically while Play mode is running."
+                : "Solid -- click to shade objects without their diffuse textures, keeping basic lighting. Forced "
+                  "back to Rendered automatically while Play mode is running.")) {
+        editShadingMode = decideNextEditShadingMode(editShadingMode, /*wireframeButtonClicked=*/false,
+                                                      /*solidButtonClicked=*/true);
+    }
+
+    ImGui::SameLine();
+    // Phase 18h: real -- click undoes the most recent transform edit, entity
+    // creation, or deletion. `enabled=canUndo` grays this out the same way
+    // BeginDisabled() already grays out the grid button above, exactly at
+    // the bottom of the undo history (a fresh scene, or every undoable
+    // action already undone) rather than being permanently disabled the way
+    // this button was through Phase 18g.
+    if (toolbarIconButton("undo", kIconUndo, /*active=*/false, /*enabled=*/canUndo,
+                           canUndo ? "Undo -- click to undo the last transform edit, entity creation, or deletion."
+                                   : "Undo -- nothing to undo yet.")) {
+        undoRequested = true;
+    }
+
+    ImGui::SameLine();
+    // Phase 18h: redo -- the mirror-image counterpart, real from the moment
+    // it exists (unlike undo, there is no prior "shown but disabled" era for
+    // this button to have had).
+    if (toolbarIconButton("redo", kIconRedo, /*active=*/false, /*enabled=*/canRedo,
+                           canRedo ? "Redo -- click to redo the last undone action."
+                                   : "Redo -- nothing to redo yet.")) {
+        redoRequested = true;
+    }
+
+    ImGui::SameLine();
+    // Phase 18b: real -- click enters Play mode (physics simulation running).
+    // `active` highlights this button exactly while `physicsRunning` is
+    // true, live, the same "read the real flag back, don't hardcode" shape
+    // the lighting/texture-mode buttons above already use for
+    // ssaoDisabled/ssaoDebugMode.
+    if (toolbarIconButton(
+            "play", kIconPlay, /*active=*/physicsRunning, /*enabled=*/true,
+            physicsRunning
+                ? "Play: physics simulation is running (gravity/collision active). Click Pause to stop and "
+                  "return to Edit mode."
+                : "Play -- click to start physics simulation. Entities with useGravity will start falling; "
+                  "click Pause at any time to stop and return to Edit mode.")) {
+        physicsRunning = true;
+    }
+
+    ImGui::SameLine();
+    // Phase 18b: real -- click enters Edit mode (physics simulation
+    // stopped). `active` highlights this button exactly while
+    // `physicsRunning` is false, so Play/Pause are always highlighted
+    // mutually exclusively (both read the SAME one bool, one negated).
+    // Default-active on a fresh Application (physicsRunning_ defaults
+    // false) -- matching the reference mockup's own default appearance,
+    // but now because this really IS the engine's current state, not a
+    // hardcoded stand-in for one (contrast Phase 17c's own version of this
+    // same button, whose header comment this replaces).
+    if (toolbarIconButton(
+            "pause", kIconPause, /*active=*/!physicsRunning, /*enabled=*/true,
+            !physicsRunning
+                ? "Pause: physics simulation is stopped (Edit mode) -- entities stay exactly where placed, free "
+                  "to inspect/select/arrange. Click Play to start simulating."
+                : "Pause -- click to stop physics simulation and return to Edit mode.")) {
+        physicsRunning = false;
+    }
+}
+
+// Phase 18a: draws renderViewportToolbar()'s six buttons as a floating
+// overlay layered ON TOP of the Viewport panel's own already-submitted
+// ImGui::Image() -- see renderViewportToolbar()'s own updated header
+// comment above for what moved and why (the project owner's own complaint:
+// "the toolbar is supposed to be on top of the scene not above it").
+//
+// Same "Viewport" ImGui::Begin()/End() window as the image itself, not a
+// second, independent floating ImGui::Begin() window pinned over the same
+// screen rectangle. Researched against this project's own vendored ImGui
+// source (build/_deps/imgui-src/imgui.cpp/imgui.h), not assumed, before
+// picking between the two techniques the project owner's own brief named:
+//   - A second Begin() window would need ImGuiWindowFlags_NoDocking (this
+//     Viewport panel is itself a dockable panel inside
+//     DockSpaceOverViewport() -- an undecorated floating window positioned
+//     over it would otherwise itself be a valid drop target the user could
+//     accidentally dock something into, or that could itself get dragged),
+//     and its own ImGui::Button() calls are items of a DIFFERENT ImGuiWindow
+//     than the Viewport panel's -- IsAnyItemHovered() (imgui.cpp: `return
+//     g.HoveredId != 0 || g.HoveredIdPreviousFrame != 0;`) is global, not
+//     per-window, so it would actually still work for the double-click
+//     guard below by accident, but only
+//     because that one specific function happens to read global state, not
+//     because the two-window design is otherwise sound here.
+//   - Submitting the buttons as ordinary items of THIS SAME window instead
+//     avoids all of that by construction: they are naturally part of the
+//     Viewport panel's own hoverable content, IsAnyItemHovered() excludes
+//     them from the double-click guard for the exact same reason it already
+//     did in 17c (nothing about that check needed to change), and there is
+//     no second window to accidentally dock into, resize, or have drift out
+//     of sync with the panel's own current rectangle. This is the technique
+//     used below.
+//
+// Re-anchoring: `originScreenPos` is the SAME `panelScreenPos` the caller
+// (renderDockspaceShell(), below) already captures via
+// ImGui::GetCursorScreenPos() fresh every single frame, right after this
+// "Viewport" window's own Begin() -- this panel's actual on-screen
+// rectangle can move or resize any frame the user redocks/resizes it (it is
+// itself a dockable panel inside DockSpaceOverViewport()), so computing the
+// overlay's position as an offset from THIS frame's `originScreenPos`,
+// every frame, rather than caching a screen-space rectangle from any
+// earlier frame, is what keeps it pinned to the panel's current top-left
+// corner instead of drifting or clipping wrong after a redock.
+//
+// The background rect is drawn BEHIND the buttons despite being added to
+// the draw list AFTER them, via ImDrawListSplitter (imgui.h) -- the same
+// public two-channel split/merge idiom Dear ImGui's own Columns/Tables
+// implementation uses for "know a group's own bounding box only after
+// submitting it, but still need to paint something behind that group": the
+// buttons are submitted into channel 1 first (so their own final size,
+// read back via GetItemRectMin()/Max() on the enclosing BeginGroup()/
+// EndGroup(), is known), then the translucent panel is painted into channel
+// 0 sized to that now-known rect, and Merge() reorders the two channels'
+// draw commands back into channel-0-before-channel-1 order in the final
+// list -- behind, not on top of, the buttons -- without needing this
+// function to hardcode the toolbar's own width up front. Both channels are
+// still appended to THIS window's draw list after ImGui::Image()'s own
+// draw command, so the whole overlay (background and buttons alike) still
+// composes on top of the rendered 3D image either way.
+// Post-review fix (after Phase 18a): `outBgMin`/`outBgMax` are new -- the
+// caller's own double-click-to-capture guard (renderDockspaceShell(), below)
+// needs this function's `bgMin`/`bgMax` (the translucent background rect
+// computed further down) to close a real bug -- see that guard's own comment
+// for the full story, and camera_capture.hpp's
+// shouldRequestCameraCaptureFromDoubleClick() for the pure decision this rect
+// now feeds. Written back through these two out-params rather than returned
+// as a struct/pair so every existing call site keeps compiling unchanged
+// except the one that now actually reads them.
+//
+// Post-18a fix (Phase 18b): the project owner asked for this bar HORIZONTALLY
+// CENTERED along the Viewport panel's own top edge (the standard Blender/
+// Unity convention their own brief names), not pinned to the top-left corner
+// the way Phase 18a originally placed it -- same vertical offset as before
+// (`margin` below the panel's own top edge), only the horizontal start
+// position changes. `viewportContentWidth` is the panel's own CURRENT
+// `ImGui::GetContentRegionAvail().x` (renderDockspaceShell()'s own
+// `contentRegion.x`, captured fresh at the top of every single call, same
+// variable Phase 14c's own comment already documents) -- passed in, not
+// re-queried here, since by the time THIS function runs `ImGui::Image()` has
+// already advanced the cursor, so a GetContentRegionAvail() call from inside
+// this function would answer a different, unrelated question (space left
+// below the image) rather than the panel's own full width. `groupWidth`
+// in/out: see its own editor_ui.hpp comment (`toolbarGroupWidthLastFrame_`)
+// for why this frame's centering has to be computed from last frame's real
+// measurement, and why that's an accepted, self-correcting one-frame lag
+// rather than a bug -- this function still updates it with this frame's OWN
+// now-known width before returning, same as `outBgMin`/`outBgMax` above are
+// only knowable this late.
+void renderViewportToolbarOverlay(ShadingMode& editShadingMode, bool& physicsRunning, bool canUndo, bool canRedo,
+                                   bool& undoRequested, bool& redoRequested, ImVec2 originScreenPos,
+                                   float viewportContentWidth, float& groupWidth, ImVec2& outBgMin,
+                                   ImVec2& outBgMax) {
+    // Matches applyEditorTheme()'s own WindowPadding (10,10) as the margin
+    // from the panel's own top edge, and the same value again as the
+    // background rect's own inset around the button group -- reusing an
+    // already-established spacing constant rather than inventing a new
+    // pixel literal for this one overlay.
+    const float margin = ImGui::GetStyle().WindowPadding.x;
+
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    ImDrawListSplitter splitter;
+    splitter.Split(drawList, 2);
+
+    // Channel 1: the real, interactive buttons -- exactly
+    // renderViewportToolbar()'s own six ImGui::Button() calls, unmodified.
+    //
+    // Phase 18b: horizontal centering. `startX` is chosen so a group
+    // `groupWidth` pixels wide (last frame's real measurement, predicting
+    // this frame's) lands centered inside `viewportContentWidth` --
+    // `originScreenPos.x + (viewportContentWidth - groupWidth) * 0.5f`.
+    // Clamped to never start left of `originScreenPos.x + margin`: a
+    // viewport panel shrunk narrower than the toolbar itself would otherwise
+    // put `startX` left of the panel's own edge (a negative centering
+    // offset), which should instead just read as "pinned to the left margin,
+    // same as Phase 18a's original placement," not clipped off-panel.
+    const float startX =
+        std::max(originScreenPos.x + margin, originScreenPos.x + (viewportContentWidth - groupWidth) * 0.5f);
+    splitter.SetCurrentChannel(drawList, 1);
+    ImGui::SetCursorScreenPos(ImVec2(startX, originScreenPos.y + margin));
+    ImGui::BeginGroup();
+    renderViewportToolbar(editShadingMode, physicsRunning, canUndo, canRedo, undoRequested, redoRequested);
+    ImGui::EndGroup();
+    const ImVec2 groupMin = ImGui::GetItemRectMin();
+    const ImVec2 groupMax = ImGui::GetItemRectMax();
+    // This frame's own real, now-known width becomes the PREDICTION for
+    // next frame's `startX` above -- see `toolbarGroupWidthLastFrame_`'s own
+    // editor_ui.hpp comment.
+    groupWidth = groupMax.x - groupMin.x;
+
+    // Channel 0: a translucent panel behind the group just submitted --
+    // reusing this theme's own ImGuiCol_WindowBg (applyEditorTheme()'s
+    // `kBgPanel`, read back LIVE the same way toolbarIconButton()'s own
+    // `active` path already reads ImGuiCol_ButtonActive back live, rather
+    // than a second hardcoded color literal declared here) at a reduced
+    // alpha -- translucent so the rendered 3D scene stays visible as the
+    // actual viewport backdrop around and, faintly, through the bar, not a
+    // large opaque strip obscuring it, while still dark enough that the
+    // button icons/hover states stay legible over a bright rendered
+    // background. ImGuiCol_Border (`kBorderSubtle`) frames it, the same
+    // low-alpha separator treatment every other panel edge in this theme
+    // already uses, so the overlay reads as a distinct floating surface
+    // rather than a hard rectangle pasted over the image.
+    splitter.SetCurrentChannel(drawList, 0);
+    const ImVec4 panelBg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+    const ImU32 overlayBg = ImGui::ColorConvertFloat4ToU32(ImVec4(panelBg.x, panelBg.y, panelBg.z, 0.72f));
+    const ImU32 overlayBorder = ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_Border]);
+    const ImVec2 bgMin(groupMin.x - margin * 0.5f, groupMin.y - margin * 0.5f);
+    const ImVec2 bgMax(groupMax.x + margin * 0.5f, groupMax.y + margin * 0.5f);
+    // WindowRounding (8.0f) -- the same "outer container" radius family
+    // applyEditorTheme()'s own comment gives every full panel/popup, since
+    // this overlay reads as one too, not a smaller "control" like an
+    // individual button.
+    drawList->AddRectFilled(bgMin, bgMax, overlayBg, ImGui::GetStyle().WindowRounding);
+    drawList->AddRect(bgMin, bgMax, overlayBorder, ImGui::GetStyle().WindowRounding);
+
+    splitter.Merge(drawList);
+
+    outBgMin = bgMin;
+    outBgMax = bgMax;
+}
+
+// Phase 17d: the custom title bar's own three window-control buttons
+// (minimize/maximize-or-restore/close) draw plain geometric glyphs -- a
+// line, a rectangle outline (or two overlapping ones for "restore"), and an
+// X -- via ImDrawList primitives, rather than merging three more codepoints
+// into this project's vendored icon font the way Phase 17b/17c's own tree-
+// row/toolbar icons do. Deliberately NOT following that precedent this one
+// time: a window-control glyph is one of the smallest, most universally
+// recognized pieces of UI iconography that exists -- real Windows/macOS/
+// GNOME/KDE title bars, and most cross-platform apps that draw their own
+// (VS Code, Windows Terminal, JetBrains IDEs...), all draw these three
+// shapes procedurally rather than shipping them as font glyphs, because
+// three straight lines/a rectangle outline are simpler to draw directly than
+// to hand-subset, vendor, and keep a THIRD generation of this project's own
+// icon-font atlas synchronized with (re-running Phase 17b's own pyftsubset
+// step a third time, regenerating assets/fonts/editor-icons.ttf again, three
+// more editor_icons.hpp constants/kIconGlyphRanges entries) for shapes this
+// simple. Sized/positioned relative to each button's own item rect
+// (GetItemRectMin()/Max(), below) rather than a fixed pixel size, so they
+// scale correctly if this project's UI font size ever changes -- the same
+// "no hardcoded pixel literal that could drift out of sync with the rest of
+// the UI" instinct editor_icons.hpp's own SizePixels=0.0f comment (Phase
+// 17b) already established for the font-based icons.
+void drawMinimizeGlyph(ImDrawList* drawList, ImVec2 rectMin, ImVec2 rectMax, ImU32 color) {
+    const float centerY = (rectMin.y + rectMax.y) * 0.5f;
+    const float pad = (rectMax.x - rectMin.x) * 0.28f;
+    drawList->AddLine(ImVec2(rectMin.x + pad, centerY), ImVec2(rectMax.x - pad, centerY), color, 1.5f);
+}
+
+void drawMaximizeGlyph(ImDrawList* drawList, ImVec2 rectMin, ImVec2 rectMax, ImU32 color) {
+    const float pad = (rectMax.x - rectMin.x) * 0.28f;
+    drawList->AddRect(ImVec2(rectMin.x + pad, rectMin.y + pad), ImVec2(rectMax.x - pad, rectMax.y - pad), color, 0.0f,
+                       0, 1.5f);
+}
+
+// Two overlapping rectangle outlines -- the standard cross-platform
+// "restore" convention (a smaller square offset toward one corner of a
+// larger one). Deliberately just two plain outlines, not an attempt to
+// "punch a hole" where they overlap the way a real vector icon would --
+// that would need filling the overlap with whatever this button's own
+// current background color happens to be (which changes with hover/press
+// state), a fragile thing to keep in sync versus two outlines that read
+// clearly as "restore" on their own regardless of what's underneath.
+void drawRestoreGlyph(ImDrawList* drawList, ImVec2 rectMin, ImVec2 rectMax, ImU32 color) {
+    const float pad = (rectMax.x - rectMin.x) * 0.32f;
+    const float offset = (rectMax.x - rectMin.x) * 0.16f;
+    drawList->AddRect(ImVec2(rectMin.x + pad + offset, rectMin.y + pad),
+                       ImVec2(rectMax.x - pad + offset, rectMax.y - pad - offset), color, 0.0f, 0, 1.3f);
+    drawList->AddRect(ImVec2(rectMin.x + pad - offset, rectMin.y + pad + offset),
+                       ImVec2(rectMax.x - pad - offset, rectMax.y - pad), color, 0.0f, 0, 1.3f);
+}
+
+void drawCloseGlyph(ImDrawList* drawList, ImVec2 rectMin, ImVec2 rectMax, ImU32 color) {
+    const float pad = (rectMax.x - rectMin.x) * 0.30f;
+    drawList->AddLine(ImVec2(rectMin.x + pad, rectMin.y + pad), ImVec2(rectMax.x - pad, rectMax.y - pad), color,
+                       1.5f);
+    drawList->AddLine(ImVec2(rectMin.x + pad, rectMax.y - pad), ImVec2(rectMax.x - pad, rectMin.y + pad), color,
+                       1.5f);
+}
+
+// A square, otherwise-unlabeled ImGui::Button() -- the real interactive item
+// each window-control button is built from (a real ImGui item with an ID, so
+// IsAnyItemHovered() correctly excludes it from the title bar's own "empty
+// area" drag/double-click detection below -- the identical guard Phase 17c's
+// own Viewport double-click fix already established for the toolbar row's
+// buttons, see this file's own Phase 17c comment on renderDockspaceShell()).
+// Left un-styled (no PushStyleColor()) deliberately -- Dear ImGui's own stock
+// Button/ButtonHovered/ButtonActive colors already give ordinary hover/press
+// feedback for free; unlike toolbarIconButton()'s teal "this toggle is ON"
+// state, a title-bar window-control button has no such persistent on/off
+// state to indicate, so there is nothing here that calls for reusing (or,
+// worse, inventing a new) accent color the way that helper does. In
+// particular, the close button deliberately does NOT hover-highlight red the
+// way many real OS title bars do -- this codebase has no "danger" color
+// defined anywhere (confirmed: renderInspectorPanel()'s own "Delete Object"
+// button, the one other genuinely destructive action in this whole UI, is a
+// plain, unstyled ImGui::Button() too -- see that function's own comment),
+// so inventing one here, for one button, would be exactly the kind of
+// unscoped one-off visual choice Phase 17a's own "one accent teal, reused
+// everywhere, not an unsystematic pass inventing a slightly different color
+// per widget" discipline already rejected elsewhere in this file.
+bool titleBarControlButton(const char* strId, float size) {
+    return ImGui::Button(strId, ImVec2(size, size));
 }
 
 }  // namespace
@@ -499,6 +1777,120 @@ EditorUI::EditorUI(GLFWwindow* window) {
 
     ImGui::StyleColorsDark();
 
+    // Phase 17a: the dark/teal editor theme (colors + rounding + spacing --
+    // see applyEditorTheme()'s own header comment above for the full "why"
+    // and the mockup-sampled color values). Must run AFTER StyleColorsDark()
+    // (it overrides specific entries on top of that baseline, not instead
+    // of it) and can run at any point before the first ImGui::NewFrame() --
+    // placed immediately after StyleColorsDark() rather than after the font
+    // setup below purely because that keeps every ImGuiStyle-related call in
+    // this constructor contiguous; font atlas configuration and style
+    // configuration are independent of each other either way.
+    applyEditorTheme();
+
+    // Phase 17b: this engine's first EXPLICIT font-atlas configuration.
+    // Before this phase, io.Fonts held zero fonts of its own anywhere in
+    // this codebase -- ImFontAtlasBuildMain() (imgui_draw.cpp) auto-calls
+    // AddFontDefault() itself the first time the atlas is ever built if
+    // nothing else already has (`if (atlas->Sources.Size == 0)
+    // atlas->AddFontDefault();`) -- so every row's text has, until now,
+    // always silently been that implicit fallback. Calling AddFontDefault()
+    // here explicitly does two things at once: it gives MergeMode (below)
+    // an existing ImFont to merge into (MergeMode's own contract --
+    // imgui.h -- is "merge into PREVIOUS ImFont... make sure that a font
+    // has already been added before"), and it makes this constructor --
+    // not an implicit, easy-to-miss library fallback -- the one place this
+    // engine's whole font setup actually lives, the natural spot a future
+    // toolbar-icon phase (see editor_icons.hpp's own "Deliberately
+    // general, not hardcoded to tree rows" comment) extends instead of
+    // hunting for.
+    io.Fonts->AddFontDefault();
+
+    // A narrow, explicit glyph-ranges array covering exactly the six
+    // codepoints editor_icons.hpp names -- each its own one-codepoint
+    // {lo, hi} pair, zero-terminated per ImFontConfig::GlyphRanges' own
+    // documented contract (imgui.h) -- built FROM those constants (see
+    // editor_icons.hpp's own header comment for why the codepoints
+    // themselves live there, not here) so this array can never list a
+    // codepoint the row-drawing code doesn't also know about, or vice
+    // versa. `static`: GlyphRanges' own contract is "THE ARRAY DATA NEEDS
+    // TO PERSIST AS LONG AS THE FONT IS ALIVE" (imgui.h) -- a local
+    // automatic-storage array would dangle the moment this constructor
+    // returns, silently corrupting every later glyph lookup against it.
+    //
+    // Researched against the actual vendored ImGui, not assumed (the same
+    // discipline Phase 16's own GLFW-cursor/ImGui-hover research applied):
+    // this project's vendored v1.92.9b-docking build sets
+    // ImGuiBackendFlags_RendererHasTextures (imgui_impl_opengl3.cpp's own
+    // Init()), which routes font baking through a DYNAMIC per-glyph-on-
+    // demand path (ImFontAtlasBuildMain(), imgui_draw.cpp) that bakes
+    // whichever codepoint a draw call actually requests, from whichever
+    // merged source actually has it -- GlyphRanges itself is only consulted
+    // by the LEGACY eager-preload-everything path
+    // (ImFontAtlasBuildLegacyPreloadAllGlyphRanges()), which is skipped
+    // entirely once RendererHasTextures is true. So on THIS build, this
+    // array's real effect is close to redundant -- the vendored subset
+    // font below physically contains only these six glyphs anyway, dynamic
+    // baking or not -- but it's still passed explicitly because (a) it's
+    // the documented, standard MergeMode idiom every Dear ImGui icon-font
+    // integration uses regardless of backend, (b) it costs nothing, and
+    // (c) it keeps this code correct if this project's ImGui version, or
+    // rendering backend, ever changes to one where RendererHasTextures is
+    // false.
+    // Phase 17c: four more one-codepoint pairs appended below, exactly the
+    // way this array's own Phase 17b comment above anticipated ("a future
+    // phase adds one more named char32_t constant... appends it to
+    // editor_ui.cpp's own kIconGlyphRanges array") -- kIconGrid/kIconUndo/
+    // kIconPlay/kIconPause, for the new Viewport toolbar row
+    // (renderViewportToolbar(), above). No entries added for the toolbar's
+    // "lighting"/"texture-mode" buttons -- they reuse kIconDirectionalLight/
+    // kIconTexture verbatim (see ToolbarButton/toolbarButtonIconGlyph()'s
+    // own editor_icons.hpp comment), both already listed below.
+    //
+    // Phase 18h: one more pair, kIconRedo -- see that constant's own
+    // editor_icons.hpp comment.
+    static constexpr ImWchar kIconGlyphRanges[] = {
+        static_cast<ImWchar>(kIconCamera),            static_cast<ImWchar>(kIconCamera),
+        static_cast<ImWchar>(kIconTexture),           static_cast<ImWchar>(kIconTexture),
+        static_cast<ImWchar>(kIconFolder),            static_cast<ImWchar>(kIconFolder),
+        static_cast<ImWchar>(kIconPointLight),        static_cast<ImWchar>(kIconPointLight),
+        static_cast<ImWchar>(kIconDirectionalLight),  static_cast<ImWchar>(kIconDirectionalLight),
+        static_cast<ImWchar>(kIconMesh),              static_cast<ImWchar>(kIconMesh),
+        static_cast<ImWchar>(kIconGrid),              static_cast<ImWchar>(kIconGrid),
+        static_cast<ImWchar>(kIconUndo),              static_cast<ImWchar>(kIconUndo),
+        static_cast<ImWchar>(kIconRedo),              static_cast<ImWchar>(kIconRedo),
+        static_cast<ImWchar>(kIconPlay),              static_cast<ImWchar>(kIconPlay),
+        static_cast<ImWchar>(kIconPause),             static_cast<ImWchar>(kIconPause),
+        0,
+    };
+
+    // MergeMode = true targets the AddFontDefault() ImFont just added above
+    // (Fonts.back(), per MergeMode's own implementation -- imgui_draw.cpp's
+    // ImFontAtlas::AddFont()) -- no ImGui::PushFont() anywhere in this
+    // file's row-drawing code, since the icon glyphs live IN the one
+    // default ImFont every row already draws with. SizePixels is left at
+    // its ImFontConfig default (0.0f, "implicit reference size") rather
+    // than a fixed pixel size -- matching AddFontDefault()'s own implicit
+    // sizing keeps the icon glyphs auto-scaling in lockstep with the base
+    // UI font instead of needing this constructor to hardcode/maintain a
+    // second size constant that could drift out of sync with it.
+    ImFontConfig iconFontConfig;
+    iconFontConfig.MergeMode = true;
+    const std::string iconFontPath = resolveAssetPath("assets/fonts/editor-icons.ttf");
+    ImFont* iconFont =
+        io.Fonts->AddFontFromFileTTF(iconFontPath.c_str(), 0.0f, &iconFontConfig, kIconGlyphRanges);
+    if (iconFont == nullptr) {
+        // Missing/corrupt font file (e.g. a checkout that somehow lost
+        // assets/fonts/) degrades to "rows draw with no icon glyph" -- the
+        // exact pre-Phase-17b look -- rather than crashing the whole
+        // engine over a cosmetic asset, the same "a cosmetic asset failure
+        // is a LOG_WARN, not a fatal error" instinct asset_browser.cpp's
+        // own unreadable-entry handling already established for the
+        // Assets panel itself.
+        LOG_WARN("Editor UI: failed to load icon font \"" + iconFontPath +
+                  "\" -- Scene Hierarchy/Assets Browser rows will render without icon glyphs");
+    }
+
     // install_callbacks = true: see this class's own header comment on why
     // there can only be one ImGui context's worth of GLFW callbacks active
     // for this window, and why this -- not DebugUI -- is the one that
@@ -509,6 +1901,21 @@ EditorUI::EditorUI(GLFWwindow* window) {
     // there is nothing pre-existing for ImGui's callbacks to clobber.
     ImGui_ImplGlfw_InitForOpenGL(window, /*install_callbacks=*/true);
     ImGui_ImplOpenGL3_Init(glslVersionString());
+
+    // Phase 15d: the Assets panel's file/folder tree, built exactly once here
+    // -- see this class's own header comment and asset_browser.hpp's own
+    // "Caching" comment for why a constructor-time build (not a rebuild every
+    // renderDockspaceShell() call) is the correct match for a filesystem
+    // tree that cannot change at runtime today. resolveAssetPath("assets")
+    // resolves relative to this executable's own directory, not the process
+    // cwd -- the same mechanism every other asset path in this engine
+    // already goes through (see paths.hpp), so this works correctly
+    // regardless of where engine_app was actually launched from. Needs no GL
+    // context (unlike the ImGui backend init just above) -- ordered after it
+    // here only because it belongs conceptually with "Phase 15d's own
+    // constructor-time setup," not because of any actual dependency between
+    // the two.
+    assetTree_ = buildAssetTree(resolveAssetPath("assets"));
 
     LOG_INFO("Editor UI initialized (always-on dockspace shell, Phase 14a)");
 }
@@ -559,9 +1966,390 @@ void EditorUI::buildInitialLayout(ImGuiID dockspaceId) {
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
+// Phase 17d: the custom title bar row -- see this class's own header-comment
+// Phase 17d paragraph and TitleBarAction's own comment (editor_ui.hpp) for
+// the full design. Reserves its own strip of screen space at the TOP of the
+// main viewport via ImGui::BeginViewportSideBar(ImGuiDir_Up, ...) -- the
+// exact same internal mechanism ImGui::BeginMainMenuBar() itself uses
+// (imgui_widgets.cpp: `BeginViewportSideBar("##MainMenuBar", viewport,
+// ImGuiDir_Up, height, window_flags)`) -- called from renderDockspaceShell()
+// BEFORE that method's own ImGui::BeginMainMenuBar() call, so the two
+// reservations correctly ADD rather than overlap (BeginViewportSideBar()'s
+// own implementation accumulates each call's height into the viewport's
+// shared BuildWorkInsetMin, imgui_widgets.cpp) -- the File menu bar ends up
+// docked directly beneath this new title bar, and DockSpaceOverViewport()
+// (called after both) sizes the four docked panels into whatever work-rect
+// space remains under both, exactly the same "reserve space first, dockspace
+// reads the shrunk work rect second" relationship the File menu bar already
+// had with the dockspace before this phase -- confirmed by inspection of
+// BeginViewportSideBar()'s own source (this project's vendored
+// build/_deps/imgui-src/imgui_widgets.cpp), not merely assumed, since this
+// headless environment cannot itself distinguish "two bars stacked
+// correctly" from "one bar drawn over the other" in a screenshot as
+// unambiguously as a human eye could (see README.md's own Phase 17d section
+// for the full verification-ceiling accounting).
+void EditorUI::renderTitleBar(bool showCustomTitleBar, bool windowMaximized, std::pair<int, int> windowPos,
+                               TitleBarAction& action) {
+    // See this method's own editor_ui.hpp comment for why NOT drawing
+    // anything at all (not even reserving screen space) is correct here,
+    // rather than e.g. drawing the row but disabling its buttons the way
+    // Phase 17c's own grid/undo/play/pause buttons stay visible-but-inert:
+    // those four are genuinely missing FEATURES this engine could still grow
+    // into later; a native-decorated window is not "missing" a custom title
+    // bar, it already has a real, working one the OS itself drew -- there is
+    // nothing this method could show here that wouldn't just be a confusing,
+    // redundant duplicate sitting directly below/inside the real one.
+    if (!showCustomTitleBar) {
+        return;
+    }
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    // Taller than the plain File-menu-bar row below it (GetFrameHeight()
+    // alone, what BeginMainMenuBar() itself uses) -- this row needs to fit
+    // the app icon/name comfortably, matching the reference mockup's own
+    // visibly taller top strip. A multiplier of GetFrameHeight(), not a fixed
+    // pixel literal, so it scales in lockstep with the base UI font size the
+    // same way drawMinimizeGlyph()/etc.'s own relative sizing above already
+    // does.
+    const float height = ImGui::GetFrameHeight() * 1.6f;
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;
+    if (!ImGui::BeginViewportSideBar("##TitleBar", viewport, ImGuiDir_Up, height, flags)) {
+        ImGui::End();
+        return;
+    }
+
+    // --- Left: app icon + name --------------------------------------------
+    // This project ships no dedicated app-icon image asset anywhere (no
+    // .ico/.png app icon exists in assets/ today) -- a small filled, rounded
+    // square standing in for one, the same "geometry, not a vendored image/
+    // font glyph" choice this file's own drawMinimizeGlyph()/etc. above
+    // already make for the window-control buttons, for the identical reason
+    // (simpler than sourcing/vendoring a real icon asset for one small
+    // swatch). Colored via the SAME live-read accent teal
+    // toolbarIconButton() already reads (ImGuiCol_ButtonActive) -- reusing
+    // the one established accent rather than a second hardcoded literal,
+    // matching applyEditorTheme()'s own "one accent teal, reused everywhere"
+    // discipline (Phase 17a).
+    const float iconSize = 18.0f;
+    const ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();
+    const ImVec2 iconMin(cursorScreenPos.x + 12.0f, cursorScreenPos.y + (height - iconSize) * 0.5f);
+    const ImVec2 iconMax(iconMin.x + iconSize, iconMin.y + iconSize);
+    ImGui::GetWindowDrawList()->AddRectFilled(iconMin, iconMax, ImGui::GetColorU32(ImGuiCol_ButtonActive), 4.0f);
+    ImGui::SetCursorPosX(12.0f + iconSize + 8.0f);
+    ImGui::SetCursorPosY((height - ImGui::GetFontSize()) * 0.5f);
+    // "Engine Studio" -- this project's reference mockup's own name for
+    // itself (README.md's own Phase 17a section already refers to it by this
+    // name descriptively: "a target 'Engine Studio' editor look"), reused
+    // verbatim here as the one place this project actually RENDERS that name
+    // in its own UI. Deliberately NOT the same string as the native OS
+    // window title (main.cpp's own "3D Engine", passed to glfwCreateWindow()
+    // -- still what a taskbar/Alt-Tab switcher shows, since hiding the
+    // native TITLE BAR via GLFW_DECORATED=false does not stop the OS from
+    // tracking the window's title string for those other surfaces) -- a
+    // real, honest, minor inconsistency this phase leaves as-is rather than
+    // silently renaming main.cpp's own long-standing window title to match a
+    // string that only ever existed as a mockup's own on-image label before
+    // this phase, out of scope for what this phase's own brief actually
+    // asked for (custom in-window chrome, not a rebrand of this whole
+    // project's own external-facing window title).
+    ImGui::TextUnformatted("Engine Studio");
+
+    // --- Right: minimize / maximize-restore / close ------------------------
+    const float buttonSize = height;
+    const float buttonsWidth = buttonSize * 3.0f;
+    ImGui::SameLine(ImGui::GetWindowWidth() - buttonsWidth);
+    ImGui::SetCursorPosY(0.0f);
+
+    const ImU32 glyphColor = ImGui::GetColorU32(ImGuiCol_Text);
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+    if (titleBarControlButton("##titlebar_minimize", buttonSize)) {
+        action.minimizeRequested = true;
+    }
+    drawMinimizeGlyph(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), glyphColor);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Minimize");
+    }
+
+    ImGui::SameLine();
+    if (titleBarControlButton("##titlebar_maximize_restore", buttonSize)) {
+        action.maximizeToggleRequested = true;
+    }
+    if (windowMaximized) {
+        drawRestoreGlyph(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), glyphColor);
+    } else {
+        drawMaximizeGlyph(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), glyphColor);
+    }
+    if (ImGui::IsItemHovered()) {
+        // "%s", not the ternary's raw `const char*` passed directly as
+        // `fmt` -- the same non-literal-format-string guard
+        // toolbarIconButton()'s own SetTooltip() call above already follows,
+        // for the identical reason (a computed, not compile-time-constant,
+        // format string).
+        ImGui::SetTooltip("%s", windowMaximized ? "Restore" : "Maximize");
+    }
+
+    ImGui::SameLine();
+    if (titleBarControlButton("##titlebar_close", buttonSize)) {
+        action.closeRequested = true;
+    }
+    drawCloseGlyph(drawList, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), glyphColor);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Close");
+    }
+
+    // --- Drag-to-move + double-click-to-maximize on the empty backdrop ----
+    // `overEmptyArea`: hovering this title-bar window but NOT hovering any
+    // of the three buttons above -- the identical
+    // `ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered()` guard Phase
+    // 17c's own Viewport double-click fix already established for
+    // distinguishing "the empty backdrop" from "an interactive item sitting
+    // on top of it" (see this file's own Phase 17c comment on
+    // renderDockspaceShell(), at the Viewport panel's double-click check).
+    const bool overEmptyArea = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered();
+
+    if (titleBarDragging_) {
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            titleBarDragging_ = false;
+        } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            // See window_chrome.hpp's own header comment for exactly why
+            // this frame's raw io.MouseDelta (not a remembered drag-start
+            // anchor) is the correct input here, and why `windowPos` is
+            // re-queried by Application fresh every frame rather than
+            // tracked locally. Only actually requests a move when the mouse
+            // moved at all this frame -- an idle held-down click reports
+            // std::nullopt, so Application never issues a redundant
+            // glfwSetWindowPos() call to the position the window is already
+            // at.
+            const ImVec2 delta = ImGui::GetIO().MouseDelta;
+            if (delta.x != 0.0f || delta.y != 0.0f) {
+                const WindowPosition newPos = applyDragDelta(windowPos.first, windowPos.second, delta.x, delta.y);
+                action.requestedWindowPos = std::make_pair(newPos.x, newPos.y);
+            }
+        } else {
+            // Defensive: the button is no longer down but no
+            // IsMouseReleased() edge was observed this frame either (e.g.
+            // this window lost input focus mid-drag). Ends the drag rather
+            // than leaving titleBarDragging_ stuck true forever, the same
+            // "don't trust an edge you might have missed, fall back to the
+            // level-triggered truth" instinct this codebase's own Phase 16
+            // Escape/capture bug-fix comment already established for a
+            // different missed-edge hazard.
+            titleBarDragging_ = false;
+        }
+    } else if (overEmptyArea && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        titleBarDragging_ = true;
+    }
+
+    // A double-click's first press also satisfies the IsMouseClicked() check
+    // just above (Dear ImGui's own documented behavior: "note that a
+    // double-click will also report IsMouseClicked() == true" --
+    // imgui.h) -- so a double-click on the empty area briefly starts (and,
+    // one frame later, on the release between the two clicks, immediately
+    // ends) a drag alongside setting maximizeToggleRequested below. Harmless:
+    // the two clicks of a real double-click land within a few pixels of each
+    // other, so the drag this briefly starts moves the window by at most a
+    // few pixels of human hand-jitter before ending on its own -- the same
+    // negligible jitter a real OS's own title bar exhibits on a double-click
+    // in practice, not a bug introduced here.
+    if (overEmptyArea && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        action.maximizeToggleRequested = true;
+    }
+
+    ImGui::End();
+}
+
+// Phase 18i: see this method's own editor_ui.hpp comment for the full
+// design (why a member function, why called unconditionally every frame
+// rather than nested inside `if (ImGui::BeginMenu("File"))`).
+void EditorUI::renderSaveAsPopup(const std::string& currentScenePath, std::optional<std::string>& saveAsRequested) {
+    if (!ImGui::BeginPopup("Save Scene As")) {
+        return;
+    }
+
+    ImGui::TextUnformatted("Scene name:");
+    ImGui::SetNextItemWidth(240.0f);
+    ImGui::InputText("##SaveAsName", saveAsNameBuffer_.data(), saveAsNameBuffer_.size());
+
+    // Live preview/validation, re-derived from the buffer's own current
+    // contents every single frame this popup is open -- sanitizeSceneName()
+    // (scene_file_ops.hpp) is a small, pure function with nothing expensive
+    // in it, so there is no reason to only recompute this on a text-changed
+    // event the way a heavier validation might need to.
+    const std::optional<std::string> sanitized = sanitizeSceneName(std::string(saveAsNameBuffer_.data()));
+    std::string targetPath;
+    bool willOverwrite = false;
+    if (sanitized.has_value()) {
+        targetPath = sceneRelativePathForName(*sanitized);
+        std::error_code existsError;
+        willOverwrite = std::filesystem::exists(resolveAssetPath(targetPath), existsError) && !existsError;
+        ImGui::TextDisabled("Will save to: %s", targetPath.c_str());
+        if (willOverwrite) {
+            // This engine's plain Save Scene has always silently overwritten
+            // its own target file with no confirmation step (see
+            // Application::saveCurrentScene()'s own comment) -- Save As
+            // follows the identical convention, so this is purely an
+            // informational heads-up, not a blocking confirmation the way a
+            // real "Overwrite? Yes/No" dialog would be.
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "A file with this name already exists and will be "
+                                                                    "overwritten.");
+        }
+        if (resolveAssetPath(targetPath) == currentScenePath) {
+            ImGui::TextDisabled("(this is the currently open scene)");
+        }
+    } else {
+        ImGui::TextDisabled("Enter a name using letters, digits, '_', or '-'.");
+    }
+
+    ImGui::BeginDisabled(!sanitized.has_value());
+    if (ImGui::Button("Save")) {
+        saveAsRequested = *sanitized;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
 CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTexture, EntityRegistry& registry,
                                                  std::optional<EntityId>& selectedEntity,
-                                                 const SelectionOutline* outline) {
+                                                 std::optional<EntityId> activeDirectionalLight, bool hasActiveCamera,
+                                                 bool& saveSceneRequested,
+                                                 std::optional<std::string>& textureAssignRequested,
+                                                 std::optional<std::string>& assetDropRequested,
+                                                 bool cameraCaptured, bool& cameraCaptureRequested,
+                                                 ShadingMode& editShadingMode, bool& physicsRunning,
+                                                 bool showCustomTitleBar, bool windowMaximized,
+                                                 std::pair<int, int> windowPos, TitleBarAction& titleBarAction,
+                                                 const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                                                 const glm::mat4& cameraProjection,
+                                                 std::optional<EntityId>& deleteEntityRequested,
+                                                 std::optional<Command>& transformEditCommitted, bool canUndo,
+                                                 bool canRedo, bool& undoRequested, bool& redoRequested,
+                                                 bool& newSceneRequested, std::optional<std::string>& saveAsRequested,
+                                                 const std::string& currentScenePath,
+                                                 std::optional<std::string>& openSceneRequested, GizmoMode gizmoMode) {
+    // Phase 18h: the identical "false/empty every frame except the one
+    // where the real thing actually happened" reset every other
+    // out-parameter here already follows.
+    deleteEntityRequested.reset();
+    transformEditCommitted.reset();
+    undoRequested = false;
+    redoRequested = false;
+    // Phase 18i: the identical reset, for the identical reason -- see this
+    // class's own updated header comment.
+    newSceneRequested = false;
+    saveAsRequested.reset();
+    openSceneRequested.reset();
+    // Phase 17d: the identical "false/empty every frame except the one where
+    // the real thing actually happened" reset every other out-parameter in
+    // this function already follows (see e.g. cameraCaptureRequested just
+    // below). renderTitleBar() (private, above) is called FIRST, before
+    // BeginMainMenuBar() -- see that method's own top comment for exactly why
+    // that ordering is what makes the title bar's own screen-space
+    // reservation stack correctly ABOVE the File menu bar's, rather than
+    // overlapping it.
+    titleBarAction.minimizeRequested = false;
+    titleBarAction.maximizeToggleRequested = false;
+    titleBarAction.closeRequested = false;
+    titleBarAction.requestedWindowPos.reset();
+    renderTitleBar(showCustomTitleBar, windowMaximized, windowPos, titleBarAction);
+
+    // Phase 16: the identical "false every frame except the one where the
+    // real thing actually happened" reset saveSceneRequested/
+    // textureAssignRequested/assetDropRequested below already follow.
+    cameraCaptureRequested = false;
+    // Phase 15f: unconditionally reset at the top of every call, same
+    // "false/empty every frame except the one where the real thing actually
+    // happened" discipline saveSceneRequested (just above, Phase 15e) and
+    // createRequest (below) both already follow -- a click on a popup
+    // Selectable() sets this to a real path; every other frame, including
+    // every frame the popup isn't even open, it stays empty.
+    textureAssignRequested.reset();
+    // Phase 15g: the identical reset, for the identical reason -- see this
+    // method's own Phase 15g comment further down (at the Viewport's new
+    // BeginDragDropTarget() block) for when this actually becomes non-empty.
+    assetDropRequested.reset();
+    // Phase 15e: this engine's first menu bar -- see this class's own Phase
+    // 15e header comment for what/why. ImGui::BeginMainMenuBar() (a real
+    // top-level menu bar spanning the whole viewport width, internally
+    // implemented via BeginViewportSideBar() -- NOT a menu bar on the
+    // dockspace host window DockSpaceOverViewport() builds just below, which
+    // takes no window_flags parameter to request one through at all) is
+    // called before DockSpaceOverViewport(), so its own reservation of screen
+    // space (shrinking ImGui::GetMainViewport()->WorkPos/WorkSize by the menu
+    // bar's height) is already in effect by the time DockSpaceOverViewport()
+    // reads that same viewport's work rect to size its own host window --
+    // confirmed visually, not just assumed (see this phase's own README
+    // section): the four docked panels start just below the menu bar rather
+    // than underneath/overlapping it. Deliberately outside the
+    // `if (!layoutBuilt_)` guard below -- unlike the dockspace's own one-time
+    // DockBuilder split, a menu bar is ordinary immediate-mode content that
+    // must be resubmitted every single frame like any other ImGui:: call, the
+    // same way every panel's own Begin()/End() pair below already is.
+    //
+    // Phase 17d update: no longer literally the first thing this method
+    // does -- renderTitleBar() above now runs before it -- but the ordering
+    // relationship THIS comment is actually about (menu bar reserved before
+    // DockSpaceOverViewport() reads the work rect) is unchanged; the title
+    // bar's own reservation simply stacks on top of both, via the identical
+    // BeginViewportSideBar() mechanism (see renderTitleBar()'s own top
+    // comment above for the full three-way stacking order: title bar, then
+    // File menu bar, then whatever's left for the dockspace).
+    saveSceneRequested = false;
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            // Phase 18i: New Scene -- a plain, immediate menu click, no
+            // confirmation prompt (see Application::newScene()'s own
+            // application.hpp comment for why that's this phase's own
+            // deliberate, documented choice, not an oversight).
+            if (ImGui::MenuItem("New Scene")) {
+                newSceneRequested = true;
+            }
+            // The shortcut string ("Ctrl+S") is display-only -- ImGui
+            // MenuItem() shortcut text is never itself an input binding (see
+            // Dear ImGui's own documentation for MenuItem()); the actual
+            // keyboard shortcut is handled entirely outside this class, in
+            // application.cpp's own run() (see this class's own Phase 15e
+            // header comment for why: a Ctrl+S chord doesn't fit
+            // InputActionMap's existing "OR of alternate single keys"
+            // binding shape). Clicking this item and pressing the real
+            // Ctrl+S chord both end up calling the exact same
+            // Application::saveCurrentScene() either way -- this is just the
+            // second of its two real trigger paths, not a parallel one.
+            if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
+                saveSceneRequested = true;
+            }
+            // Phase 18i: Save As... -- the text buffer is cleared HERE, on
+            // the very click that opens the popup, not once at construction
+            // -- so a previous Save As session's leftover text never lingers
+            // into a fresh one (matching this popup's own "opened fresh
+            // each time" UX, the same reason a real file-save dialog doesn't
+            // pre-fill your last-used filename by default either).
+            if (ImGui::MenuItem("Save As...")) {
+                saveAsNameBuffer_.fill('\0');
+                ImGui::OpenPopup("Save Scene As");
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Open Scene...")) {
+                ImGui::OpenPopup("Open Scene");
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+    // Phase 18i: called EVERY frame, not nested inside
+    // `if (ImGui::BeginMenu("File"))` above -- see renderSaveAsPopup()'s own
+    // editor_ui.hpp comment for exactly why (a popup keeps rendering across
+    // every later frame once opened, well after the menu itself that
+    // launched it has closed).
+    renderSaveAsPopup(currentScenePath, saveAsRequested);
+    renderOpenScenePopup(openSceneRequested);
+
     // DockSpaceOverViewport() is the built-in "just cover the whole main
     // viewport" helper (creates its own invisible host window internally) --
     // simpler than manually building a host window + ImGui::DockSpace()
@@ -612,7 +2400,7 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         ImGui::SameLine();
         ImGui::TextDisabled("(right-click for the same menu)");
         if (ImGui::BeginPopupContextWindow("SceneCreateMenu", ImGuiPopupFlags_NoOpenOverItems)) {
-            createRequest = renderCreateEntityMenuItems();
+            createRequest = renderCreateEntityMenuItems(hasActiveCamera);
             ImGui::EndPopup();
         }
         ImGui::Separator();
@@ -633,7 +2421,22 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
     ImGui::End();
 
     ImGui::Begin("Assets");
-    ImGui::TextWrapped("Asset Browser -- coming in a later Phase 14 sub-phase.");
+    {
+        if (assetTree_.empty()) {
+            // Genuinely empty forest (see asset_browser.hpp's own "Which
+            // assets/ subdirectories are browsable" comment) -- neither
+            // assets/models/ nor assets/textures/ exists under this
+            // executable's own resolved assets/ directory. Not expected in
+            // this project's own tree (both exist -- see the actual
+            // directory listing this phase's own README section cites), but
+            // a defensive, explicit message here is better than a
+            // silently-blank panel if a future run is ever missing both.
+            ImGui::TextWrapped("No browsable assets found under assets/models/ or assets/textures/.");
+        }
+        for (const AssetTreeNode& root : assetTree_) {
+            renderAssetTreeNode(root, selectedAssetPath_);
+        }
+    }
     ImGui::End();
 
     ImGui::Begin("Viewport");
@@ -644,6 +2447,17 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // next frame (see this class's own header comment on why next
         // frame, not this one). Recorded every call, even when the image
         // below is skipped.
+        //
+        // Phase 18a: captured here, BEFORE anything else this panel
+        // submits -- previously (17c) renderViewportToolbar() ran first and
+        // claimed a row of its own, so this call actually measured whatever
+        // vertical space the toolbar row had already eaten into, shrinking
+        // the 3D view by exactly one toolbar row's height. The toolbar is
+        // now a floating overlay drawn AFTER ImGui::Image() below (see
+        // renderViewportToolbarOverlay(), further down in this same block)
+        // rather than a layout row, so this is once again the panel's own
+        // FULL content region, and the image fills the whole Viewport panel
+        // the way it did before 17c's toolbar ever existed.
         const ImVec2 contentRegion = ImGui::GetContentRegionAvail();
         viewportWidth_ = static_cast<int>(contentRegion.x);
         viewportHeight_ = static_cast<int>(contentRegion.y);
@@ -656,6 +2470,11 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // rectangle -- the outline projection below needs both, since the
         // Viewport panel does NOT fill the whole window (Scene/Assets/
         // Inspector occupy the rest, see this class's own Phase 14a layout).
+        // Phase 18a: also exactly the origin renderViewportToolbarOverlay()
+        // below re-anchors the floating toolbar to every frame -- see that
+        // function's own header comment for why a value re-captured here,
+        // fresh every call, rather than cached from any earlier frame, is
+        // what keeps the overlay correctly pinned after a redock/resize.
         const ImVec2 panelScreenPos = ImGui::GetCursorScreenPos();
 
         if (viewportColorTexture != 0 && contentRegion.x > 0.0f && contentRegion.y > 0.0f) {
@@ -674,6 +2493,48 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
             // see README.md's Phase 14c section.
             ImGui::Image(static_cast<ImTextureID>(viewportColorTexture), contentRegion, ImVec2(0.0f, 1.0f),
                          ImVec2(1.0f, 0.0f));
+
+            // Phase 15g: the Viewport's own drop target -- attached to the
+            // SAME ImGui::Image() item just submitted above
+            // (BeginDragDropTarget()'s own contract, imgui.h, is identical to
+            // BeginDragDropSource()'s: it targets whatever item was most
+            // recently submitted). Accepts exactly the "ASSET_PATH" payload
+            // renderAssetTreeNode() above now sets on every Assets-panel
+            // row's own drag source -- AcceptDragDropPayload()'s own `type`
+            // argument must match SetDragDropPayload()'s exactly, which is
+            // why both ends share the one kAssetDragDropPayloadType constant
+            // (this file's own top-of-file comment) rather than each hand-
+            // writing "ASSET_PATH" separately where a typo in either copy
+            // would silently mean drops here never fire at all.
+            //
+            // Deliberately just "any drop anywhere on this Image() widget,"
+            // not a raycast into the 3D scene at the actual drop pixel --
+            // this class draws no 3D content of its own to raycast against
+            // (viewportColorTexture is an opaque, already-rendered color
+            // texture by the time it reaches here, see this class's own
+            // Phase 14c comment), and the one-frame render-to-texture lag
+            // that same phase's own comment documents (this frame's image is
+            // sized to the panel's PREVIOUS frame's dimensions) has no
+            // bearing on this feature either way: there is no pixel-position
+            // reasoning happening here at all, only "was anything dropped on
+            // this panel this frame." See application.cpp's own
+            // spawnEntityFromDroppedModel() comment for why an actual
+            // raycast-based drop-exactly-here placement is a deliberately
+            // separate, out-of-scope feature, not an oversight.
+            //
+            // EditorUI does no classification or mutation of its own here --
+            // `payload->Data` is handed straight back out through
+            // `assetDropRequested` verbatim (still just the flat path
+            // string SetDragDropPayload() copied in, reinterpreted back to a
+            // const char*), the same "report intent, let Application decide
+            // and act" shape createRequest/textureAssignRequested already
+            // establish for this exact reason.
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragDropPayloadType)) {
+                    assetDropRequested = std::string(static_cast<const char*>(payload->Data));
+                }
+                ImGui::EndDragDropTarget();
+            }
         }
         // else: nothing rendered into viewportColorTexture yet, or the
         // panel's content region is currently degenerate (0 in some
@@ -685,58 +2546,559 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // render targets) -- there is nothing meaningful to show yet
         // either way.
 
-        // Phase 14d: the selection outline, drawn on top of the image above
-        // via THIS SAME "Viewport" window's own draw list
-        // (ImGui::GetWindowDrawList()) -- not the global foreground draw
-        // list. Both compose on top of ImGui::Image() (a window's own draw
-        // commands are submitted, and therefore rasterized, in the order
-        // they're issued within that window, and the foreground draw list is
-        // drawn on top of every window besides), but only the WINDOW draw
-        // list is automatically clipped to this window's own visible
-        // rectangle by Dear ImGui -- the foreground list is not clipped to
-        // any one window at all, so a selection near the Viewport panel's own
-        // edge could otherwise paint a stray fragment of dashed line over
-        // whatever panel happens to be docked next to it. Confirmed by this
-        // phase's own headless screenshot (see README.md's Phase 14d
-        // section), not just assumed.
-        if (outline != nullptr && contentRegion.x > 0.0f && contentRegion.y > 0.0f) {
-            // NDC ([-1,1], +Y up) -> this panel's own screen pixels (+Y
-            // down): the standard "u/v in [0,1], then scale by the panel's
-            // own size and offset by its own screen-space origin" mapping --
-            // note the Y flip (1.0f - v), same direction (though a distinct
-            // reason) as ImGui::Image()'s own uv0/uv1 flip just above: NDC's
-            // own +Y-up convention is the opposite of ImGui's own +Y-down
-            // screen-pixel convention.
-            const auto ndcToPanelScreen = [&](float ndcX, float ndcY) {
-                const float u = (ndcX * 0.5f) + 0.5f;
-                const float v = 1.0f - ((ndcY * 0.5f) + 0.5f);
-                return ImVec2(panelScreenPos.x + (u * contentRegion.x), panelScreenPos.y + (v * contentRegion.y));
-            };
-            // outline->ndcMaxY is the NDC-space TOP edge (+Y up), which maps
-            // to the smaller screen-Y (closer to the panel's own top) --
-            // i.e. topLeft pairs ndcMinX with ndcMaxY, not ndcMinY.
-            const ImVec2 topLeft = ndcToPanelScreen(outline->ndcMinX, outline->ndcMaxY);
-            const ImVec2 bottomRight = ndcToPanelScreen(outline->ndcMaxX, outline->ndcMinY);
+        // Phase 18a: the floating toolbar overlay -- called here, AFTER
+        // ImGui::Image() above (present or skipped), so its own draw
+        // commands land later in this window's draw list and therefore
+        // paint ON TOP of the rendered 3D image, not underneath it. Drawn
+        // unconditionally, the same as 17c's original always-visible
+        // toolbar row was, regardless of whether a real image was actually
+        // submitted this frame above (viewportColorTexture == 0 / a
+        // degenerate content region are both early-run/edge conditions --
+        // see the comment on the missing `else` just above -- not states
+        // that should also hide the toolbar itself).
+        // Post-review fix (after Phase 18a): `toolbarBgMin`/`toolbarBgMax`
+        // are new -- written back by renderViewportToolbarOverlay() itself
+        // (its own header comment), and fed into the double-click guard just
+        // below to close a real bug that guard's own comment describes.
+        //
+        // Post-18a fix (Phase 18b): `contentRegion.x` -- the SAME variable
+        // captured above, before ImGui::Image() ran -- is now also passed
+        // through as `viewportContentWidth`, and `physicsRunning_`/
+        // `toolbarGroupWidthLastFrame_` (this class's own new members) are
+        // threaded through by reference too. See
+        // renderViewportToolbarOverlay()'s own updated header comment for
+        // what each does; nothing about `toolbarBgMin`/`toolbarBgMax`
+        // themselves changes here -- they're still just read back from
+        // whatever rect the (now horizontally centered) group actually
+        // occupied this frame.
+        ImVec2 toolbarBgMin;
+        ImVec2 toolbarBgMax;
+        renderViewportToolbarOverlay(editShadingMode, physicsRunning, canUndo, canRedo, undoRequested, redoRequested,
+                                      panelScreenPos, contentRegion.x, toolbarGroupWidthLastFrame_, toolbarBgMin,
+                                      toolbarBgMax);
 
-            // Teal accent, matching the approved mockup's own selection
-            // color direction (a modern dark/teal-accented style) -- not a
-            // pixel-perfect match to any one specific hex value (this
-            // phase's brief explicitly doesn't require that), just a bright,
-            // clearly-not-part-of-the-3D-scene color against this engine's
-            // own rendered content.
-            const ImU32 accentColor = IM_COL32(56, 217, 197, 255);
-            ImDrawList* drawList = ImGui::GetWindowDrawList();
-            addDashedRect(drawList, topLeft, bottomRight, accentColor);
-            addCornerBrackets(drawList, topLeft, bottomRight, accentColor);
+        // Phase 18e: the gizmo's own hit-test/drag handling -- called here,
+        // after the toolbar overlay (so toolbarBgMin/toolbarBgMax are this
+        // frame's real values) and before the camera-capture double-click
+        // check just below, whose own guard this frame's result feeds into
+        // (see `gizmoActiveThisFrame`'s own use there). See updateGizmo()'s
+        // own header comment above for the full design.
+        //
+        // Phase 18j introduced `gizmoMode` picking exactly ONE of
+        // updateGizmo() (translate) / updateGizmoRotate() (rotate) to
+        // actually run this frame -- never both, so the two tools' own
+        // persistent drag state (gizmoDragState_/gizmoRotateDragState_)
+        // could never both be in-progress at once. Phase 18k adds
+        // updateGizmoScale() as the third option (never more than one of
+        // the three runs in a single frame, the identical mutual-exclusion
+        // guarantee, now three-way) -- and, for the FIRST time, `gizmoMode`
+        // can genuinely differ from one frame to the next (Application::
+        // setGizmoMode(), live W/E/R), not just from one whole run to
+        // another the way ENGINE_DEBUG_GIZMO_MODE alone could. That's
+        // exactly why resetAllGizmoDragStates() (this class's own new public
+        // method) exists and is called from setGizmoMode() itself: whichever
+        // of the three tools DOESN'T run this frame keeps its own drag state
+        // completely untouched by this dispatch alone (this switch has no
+        // "reset the ones I'm not calling" logic of its own, deliberately --
+        // see resetAllGizmoDragStates()'s own header comment for why the
+        // single reset call site is on the MODE-CHANGE edge instead, not
+        // here on every frame's dispatch).
+        bool gizmoActiveThisFrame = false;
+        switch (gizmoMode) {
+            case GizmoMode::kRotate:
+                gizmoActiveThisFrame =
+                    updateGizmoRotate(registry, selectedEntity, cameraPosition, cameraView, cameraProjection,
+                                       panelScreenPos, contentRegion, toolbarBgMin, toolbarBgMax,
+                                       transformEditCommitted);
+                break;
+            case GizmoMode::kScale:
+                gizmoActiveThisFrame =
+                    updateGizmoScale(registry, selectedEntity, cameraPosition, cameraView, cameraProjection,
+                                      panelScreenPos, contentRegion, toolbarBgMin, toolbarBgMax,
+                                      transformEditCommitted);
+                break;
+            case GizmoMode::kTranslate:
+            default:
+                gizmoActiveThisFrame =
+                    updateGizmo(registry, selectedEntity, cameraPosition, cameraView, cameraProjection,
+                                panelScreenPos, contentRegion, toolbarBgMin, toolbarBgMax, transformEditCommitted);
+                break;
         }
+
+        // Phase 16: the camera-capture trigger -- a double-click anywhere in
+        // this panel's own content region, gated to only fire while NOT
+        // already captured (see this class's own renderDockspaceShell()
+        // header comment above on `cameraCaptured` for why this exact gate,
+        // and why it's one of three redundant layers against a re-trigger,
+        // not the only one). IsWindowHovered() with no flags reports
+        // whether the mouse is over THIS window's content region
+        // specifically (not blocked by a popup, not actually over a docked
+        // sibling panel that merely overlaps this one on screen), which is
+        // exactly the "scoped to this ONE panel" requirement this feature's
+        // own brief calls out: only Dear ImGui itself knows that, given the
+        // dockspace's current layout, which this project's own scripted
+        // DockBuilder split (buildInitialLayout(), above) can even change
+        // panel boundaries for at runtime via a user's own later
+        // drag-to-rearrange. IsWindowHovered() answers "is the mouse over
+        // this WINDOW," not "over this one ITEM," so submission order
+        // relative to it doesn't itself matter for correctness.
+        //
+        // Phase 17c: `!ImGui::IsAnyItemHovered()` guards against a
+        // double-click landing on a toolbar BUTTON also satisfying
+        // IsWindowHovered() and spuriously ALSO requesting camera capture
+        // on top of whatever that button click already did.
+        // IsAnyItemHovered() reports whether Dear ImGui currently considers
+        // ANY item hovered (imgui.cpp's own definition:
+        // `return g.HoveredId != 0 || g.HoveredIdPreviousFrame != 0;`) --
+        // global state, not scoped to one window -- true for a toolbar
+        // button the mouse is over and false over the plain image backdrop.
+        //
+        // Phase 18a: this check moved from immediately after
+        // renderViewportToolbar() (17c's own placement, when the toolbar
+        // was the first thing submitted) to here, immediately after
+        // renderViewportToolbarOverlay() above, for the identical reason
+        // 17c's own comment already gave: IsAnyItemHovered() only correctly
+        // excludes the toolbar's buttons for a double-click landing on one
+        // of THEM if they have already been submitted THIS frame by the
+        // time this check runs. renderViewportToolbarOverlay() still
+        // submits those same ImGui::Button() calls as items of this exact
+        // "Viewport" window (see that function's own header comment for why
+        // that, rather than a second floating ImGui::Begin() window, was
+        // chosen) -- so this guard needed no change of its own beyond moving
+        // to stay after wherever the toolbar's buttons now happen to be
+        // submitted. (That conclusion turned out to be incomplete -- see the
+        // post-review fix immediately below.)
+        //
+        // Post-review fix (after Phase 18a): `!ImGui::IsAnyItemHovered()`
+        // alone only excludes the toolbar's six BUTTON item rects. It does
+        // NOT exclude renderViewportToolbarOverlay()'s own translucent
+        // BACKGROUND rectangle (that function's `bgMin`/`bgMax`, now handed
+        // back here as `toolbarBgMin`/`toolbarBgMax`) -- the rounded-corner
+        // margin around the buttons and the small ImGui::SameLine() gaps
+        // between them are covered by no button's hover ID at all. A
+        // double-click landing in one of those gaps visually lands on
+        // toolbar chrome, sitting directly on top of the 3D image since
+        // Phase 18a, but was falling through this guard as if it had landed
+        // on empty viewport space and incorrectly requesting camera capture.
+        // `!ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax)` closes
+        // that gap the same way `!IsAnyItemHovered()` already closes the
+        // button case, so the two together now cover the toolbar's entire
+        // visible footprint, not just its individual buttons. The combined
+        // decision is pulled out pure and testable as
+        // engine::shouldRequestCameraCaptureFromDoubleClick()
+        // (camera_capture.hpp) -- see tests/camera_capture_test.cpp for the
+        // case exercising exactly this scenario (a point inside the
+        // background rect but outside every button) headlessly, since a real
+        // double-click gesture landing precisely in a toolbar gap is not
+        // reproducible in this project's own Xvfb environment.
+        //
+        // Phase 18e: also gated on `!gizmoActiveThisFrame` -- a single
+        // click-drag on a gizmo arm must never be misread as the start of a
+        // double-click camera capture, and camera capture must not be
+        // enterable while a gizmo drag is in progress (this phase's own
+        // documented precedence rule: the gizmo wins outright, camera
+        // capture simply isn't evaluated at all this frame). This mirrors
+        // exactly how `toolbarBgMin`/`toolbarBgMax` already exclude the
+        // toolbar's own footprint above -- the gizmo's own on-screen
+        // handles are, from this guard's perspective, just one more piece of
+        // Viewport-panel chrome a double-click can land on without meaning
+        // "start flying the camera."
+        if (!gizmoActiveThisFrame &&
+            shouldRequestCameraCaptureFromDoubleClick(
+                cameraCaptured, ImGui::IsAnyItemHovered(),
+                ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax), ImGui::IsWindowHovered(),
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))) {
+            cameraCaptureRequested = true;
+        }
+
+        // Phase 18d: the selection outline used to be drawn here, on top of
+        // the image above, via this same "Viewport" window's own draw list
+        // (ImGui::GetWindowDrawList()) -- a flat 2D screen-space dashed
+        // rectangle + corner brackets (addDashedRect()/addCornerBrackets(),
+        // this phase's own now-removed Phase 14d helpers), built from the
+        // selected entity's bounding SPHERE alone, with no awareness of its
+        // actual mesh silhouette or of what else in the scene might occlude
+        // it. That entire mechanism -- the `outline`/`SelectionOutline*`
+        // parameter this method used to take, both helpers, and this block --
+        // is gone, replaced by a real 3D silhouette outline Application now
+        // bakes directly into `viewportColorTexture` itself (a selection mask
+        // render + screen-space edge-detection composite, see
+        // application.cpp's renderSelectionMask()/postprocess.frag's own
+        // Phase 18d comments): by the time that texture reaches the
+        // ImGui::Image() call above, the outline is already part of the
+        // rendered image, correctly hugging the selected entity's real shape
+        // and correctly hidden behind whatever else in the scene actually
+        // occludes it -- leaving nothing left for this window's own draw
+        // list to add on top.
     }
     ImGui::End();
 
     ImGui::Begin("Inspector");
-    renderInspectorPanel(registry, selectedEntity);
+    renderInspectorPanel(registry, selectedEntity, activeDirectionalLight, assetTree_, textureAssignRequested,
+                          pendingInspectorTransformEditBefore_, transformEditCommitted, deleteEntityRequested);
     ImGui::End();
 
     return createRequest;
+}
+
+void EditorUI::setDebugMouseOverride(std::optional<glm::vec2> screenPos, bool mouseDown, bool mousePressedThisFrame) {
+    debugMouseScreenPosOverride_ = screenPos;
+    debugMouseDownOverride_ = mouseDown;
+    debugMousePressedOverride_ = mousePressedThisFrame;
+}
+
+bool EditorUI::updateGizmo(EntityRegistry& registry, std::optional<EntityId> selectedEntity,
+                           const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                           const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
+                           const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
+                           std::optional<Command>& transformEditCommitted) {
+    if (!selectedEntity.has_value()) {
+        // Nothing selected -- no gizmo, no interaction. Also drops any
+        // stale in-progress drag rather than leaving gizmoDragState_
+        // pointing at an axis for an entity that's no longer even selected
+        // (e.g. the Inspector's own "Delete Object" fired mid-drag).
+        gizmoDragState_ = GizmoDragState{};
+        return false;
+    }
+    Transform* transform = registry.getComponent<Transform>(*selectedEntity);
+    if (transform == nullptr) {
+        gizmoDragState_ = GizmoDragState{};
+        return false;
+    }
+
+    // World-space gizmo origin -- mirrors Application::renderGizmo()'s own
+    // resolveWorldMatrix()-based placement exactly (see that method's own
+    // Phase 14b comment), so this hit-test always agrees with where the
+    // gizmo is actually drawn.
+    const glm::mat4 worldMatrix = resolveWorldMatrix(registry, *selectedEntity);
+    const glm::vec3 gizmoOrigin = glm::vec3(worldMatrix[3]);
+    const float distanceToCamera = glm::length(cameraPosition - gizmoOrigin);
+    const float axisLength = gizmoAxisLength(distanceToCamera);
+    const float pickTolerance = gizmoPickTolerance(axisLength);
+
+    // This frame's mouse state -- either real Dear ImGui queries, or
+    // ENGINE_DEBUG_GIZMO_DRAG's own synthetic override (setDebugMouseOverride()'s
+    // own header comment). `mouseInViewportImage` mirrors the camera-capture
+    // guard's own conditions exactly (renderDockspaceShell()'s own
+    // shouldRequestCameraCaptureFromDoubleClick() call, further down this
+    // same method) -- only a press that lands on the plain 3D image itself,
+    // never a toolbar button/background or some other overlapping panel, may
+    // start a NEW grab. The debug override always counts as "in the
+    // viewport" -- it's a synthetic aim at real gizmo geometry, computed by
+    // Application from this exact frame's own camera/viewport state (see
+    // that env var's own application.cpp comment), not a click that could
+    // have landed anywhere else.
+    glm::vec2 mouseScreenPos;
+    bool mouseDown = false;
+    bool mousePressedThisFrame = false;
+    bool mouseInViewportImage = false;
+    if (debugMouseScreenPosOverride_.has_value()) {
+        mouseScreenPos = *debugMouseScreenPosOverride_;
+        mouseDown = debugMouseDownOverride_;
+        mousePressedThisFrame = debugMousePressedOverride_;
+        mouseInViewportImage = true;
+    } else {
+        const ImVec2 mousePos = ImGui::GetIO().MousePos;
+        mouseScreenPos = glm::vec2(mousePos.x - panelScreenPos.x, mousePos.y - panelScreenPos.y);
+        mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        mousePressedThisFrame = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        mouseInViewportImage = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+                                !ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax);
+    }
+
+    const Ray ray = screenPointToWorldRay(mouseScreenPos.x, mouseScreenPos.y, contentRegion.x, contentRegion.y,
+                                           cameraView, cameraProjection);
+
+    // Hit-testing only matters for deciding whether to START a new grab
+    // (updateGizmoDrag()'s own "current.axis == kNone" branch, gizmo.hpp) --
+    // it's ignored entirely while already dragging -- so gating it on
+    // `mouseInViewportImage` here only prevents a NEW grab from starting
+    // over a toolbar button/background or another panel; an ALREADY
+    // in-progress drag keeps tracking the ray regardless of hover, the same
+    // "a drag outlives hover" behavior titleBarDragging_ already has (see
+    // renderTitleBar()'s own header comment).
+    const GizmoAxis hoverAxis =
+        mouseInViewportImage ? hitTestGizmoAxes(ray, gizmoOrigin, axisLength, pickTolerance).axis : GizmoAxis::kNone;
+
+    const bool wasDragging = gizmoDragState_.axis != GizmoAxis::kNone;
+    const GizmoDragResult result =
+        updateGizmoDrag(gizmoDragState_, mouseDown, mousePressedThisFrame, hoverAxis, ray, gizmoOrigin);
+
+    if (!wasDragging && result.state.axis != GizmoAxis::kNone) {
+        // Just grabbed this frame -- remember the entity's own LOCAL
+        // Transform::position() right now, the anchor every later frame's
+        // WORLD-space delta gets added onto (see gizmoDragStartLocalPosition_'s
+        // own header comment for exactly why LOCAL, not gizmo.hpp's own
+        // WORLD-space `gizmoOrigin` anchor -- this is the local-vs-world
+        // translation this file's own header comment on renderDockspaceShell()
+        // promises happens here).
+        gizmoDragStartLocalPosition_ = transform->position();
+    }
+
+    if (result.newPosition.has_value()) {
+        const glm::vec3 worldDelta = *result.newPosition - result.state.startEntityPosition;
+        transform->setPosition(gizmoDragStartLocalPosition_ + worldDelta);
+    }
+
+    // Phase 18h: the drag's own RELEASE transition -- wasDragging (a real
+    // axis last frame) but result.state.axis is now kNone (this frame's
+    // updateGizmoDrag() call above just returned to the idle state, per its
+    // own "!mouseDown" release branch, gizmo.hpp) -- is exactly the "a
+    // COMPLETED transform edit just happened" moment this whole feature
+    // needs: a multi-frame drag only ever produces ONE Command, right here,
+    // never one per frame while `result.newPosition` was being applied
+    // above. `before` reuses gizmoDragStartLocalPosition_ (the entity's own
+    // local position as of the grab frame, still valid here -- it's only
+    // ever overwritten by a NEW grab, never mid-drag) paired with the
+    // rotation/scale transform still holds now (neither changes during a
+    // translate-only gizmo drag, so reading them now is exactly as correct
+    // as caching them at grab time would have been); `after` is the
+    // entity's own live Transform, already fully updated by either this
+    // same frame's `result.newPosition` branch above or the previous
+    // frame's last one. Guarded by transformSnapshotsEqual() the same way
+    // renderInspectorPanel()'s own commitIfDeactivated() is, so a grab that
+    // never actually moved the mouse (hoverAxis grabbed, then released with
+    // zero net delta) doesn't push a no-op undo step.
+    if (wasDragging && result.state.axis == GizmoAxis::kNone) {
+        const TransformSnapshot before{gizmoDragStartLocalPosition_, transform->rotation(), transform->scale()};
+        const TransformSnapshot after{transform->position(), transform->rotation(), transform->scale()};
+        if (!transformSnapshotsEqual(before, after)) {
+            transformEditCommitted = makeTransformEditCommand(*selectedEntity, before, after);
+        }
+    }
+
+    gizmoDragState_ = result.state;
+
+    return hoverAxis != GizmoAxis::kNone || gizmoDragState_.axis != GizmoAxis::kNone;
+}
+
+bool EditorUI::updateGizmoRotate(EntityRegistry& registry, std::optional<EntityId> selectedEntity,
+                                  const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                                  const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
+                                  const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
+                                  std::optional<Command>& transformEditCommitted) {
+    if (!selectedEntity.has_value()) {
+        // Nothing selected -- no gizmo, no interaction. Also drops any
+        // stale in-progress drag, the identical reset updateGizmo()'s own
+        // equivalent early-return already applies to gizmoDragState_.
+        gizmoRotateDragState_ = GizmoRotateDragState{};
+        return false;
+    }
+    Transform* transform = registry.getComponent<Transform>(*selectedEntity);
+    if (transform == nullptr) {
+        gizmoRotateDragState_ = GizmoRotateDragState{};
+        return false;
+    }
+
+    // World-space gizmo origin -- mirrors Application::renderGizmo()'s own
+    // resolveWorldMatrix()-based placement exactly, the identical reasoning
+    // updateGizmo()'s own comment above already gives.
+    const glm::mat4 worldMatrix = resolveWorldMatrix(registry, *selectedEntity);
+    const glm::vec3 gizmoOrigin = glm::vec3(worldMatrix[3]);
+    const float distanceToCamera = glm::length(cameraPosition - gizmoOrigin);
+    // Reuses gizmoAxisLength()/gizmoPickTolerance() verbatim -- the same
+    // scaling functions the translate gizmo's own arrows use, applied here
+    // to the ring's own radius/pick tolerance instead of an arrow's own
+    // length, per this phase's own "don't invent a second scaling scheme"
+    // brief.
+    const float ringRadius = gizmoAxisLength(distanceToCamera);
+    const float pickTolerance = gizmoPickTolerance(ringRadius);
+
+    // This frame's mouse state -- the identical real-ImGui-vs-debug-override
+    // shape updateGizmo() above establishes, just also consumed by
+    // ENGINE_DEBUG_GIZMO_ROTATE_DRAG (application.cpp) via the SAME
+    // setDebugMouseOverride() entry point (only one of the two debug drags
+    // is ever actually scripted in a single run, gated by gizmoMode_, but
+    // the override plumbing itself is shared unmodified).
+    glm::vec2 mouseScreenPos;
+    bool mouseDown = false;
+    bool mousePressedThisFrame = false;
+    bool mouseInViewportImage = false;
+    if (debugMouseScreenPosOverride_.has_value()) {
+        mouseScreenPos = *debugMouseScreenPosOverride_;
+        mouseDown = debugMouseDownOverride_;
+        mousePressedThisFrame = debugMousePressedOverride_;
+        mouseInViewportImage = true;
+    } else {
+        const ImVec2 mousePos = ImGui::GetIO().MousePos;
+        mouseScreenPos = glm::vec2(mousePos.x - panelScreenPos.x, mousePos.y - panelScreenPos.y);
+        mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        mousePressedThisFrame = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        mouseInViewportImage = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+                                !ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax);
+    }
+
+    const Ray ray = screenPointToWorldRay(mouseScreenPos.x, mouseScreenPos.y, contentRegion.x, contentRegion.y,
+                                           cameraView, cameraProjection);
+
+    // Same "only gate a NEW grab on mouseInViewportImage, an in-progress
+    // drag keeps tracking regardless of hover" reasoning updateGizmo()'s own
+    // comment above documents.
+    const GizmoAxis hoverAxis = mouseInViewportImage
+                                     ? hitTestGizmoRings(ray, gizmoOrigin, ringRadius, pickTolerance).axis
+                                     : GizmoAxis::kNone;
+
+    const bool wasDragging = gizmoRotateDragState_.axis != GizmoAxis::kNone;
+    const GizmoRotateDragResult result =
+        updateGizmoRotateDrag(gizmoRotateDragState_, mouseDown, mousePressedThisFrame, hoverAxis, ray, gizmoOrigin);
+
+    if (!wasDragging && result.state.axis != GizmoAxis::kNone) {
+        // Just grabbed this frame -- remember the entity's own current
+        // rotation, purely for the undo Command's own `before` snapshot on
+        // release (see this function's own header comment for why this is
+        // NOT a re-applied anchor the way the translate gizmo's own
+        // gizmoDragStartLocalPosition_ is).
+        gizmoRotateDragStartRotation_ = transform->rotation();
+    }
+
+    if (result.deltaAngleDeg.has_value()) {
+        // Composes directly onto the entity's own LIVE rotation --
+        // transform.hpp's own Transform::rotate(), unmodified, the same
+        // method the Inspector's Rotation field/any other caller already
+        // uses to "spin the object a bit more." Never a second, hand-rolled
+        // quaternion multiply.
+        transform->rotate(*result.deltaAngleDeg, gizmoAxisDirection(result.state.axis));
+    }
+
+    // The drag's own RELEASE transition -- the identical "one Command per
+    // completed drag, right here, never one per frame" shape updateGizmo()'s
+    // own Phase 18h comment already documents, guarded by
+    // transformSnapshotsEqual() the same way.
+    if (wasDragging && result.state.axis == GizmoAxis::kNone) {
+        const TransformSnapshot before{transform->position(), gizmoRotateDragStartRotation_, transform->scale()};
+        const TransformSnapshot after{transform->position(), transform->rotation(), transform->scale()};
+        if (!transformSnapshotsEqual(before, after)) {
+            transformEditCommitted = makeTransformEditCommand(*selectedEntity, before, after);
+        }
+    }
+
+    gizmoRotateDragState_ = result.state;
+
+    return hoverAxis != GizmoAxis::kNone || gizmoRotateDragState_.axis != GizmoAxis::kNone;
+}
+
+bool EditorUI::updateGizmoScale(EntityRegistry& registry, std::optional<EntityId> selectedEntity,
+                                 const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                                 const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
+                                 const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
+                                 std::optional<Command>& transformEditCommitted) {
+    if (!selectedEntity.has_value()) {
+        // Nothing selected -- no gizmo, no interaction. Also drops any
+        // stale in-progress drag, the identical reset updateGizmo()'s/
+        // updateGizmoRotate()'s own equivalent early-returns already apply
+        // to gizmoDragState_/gizmoRotateDragState_.
+        gizmoScaleDragState_ = GizmoScaleDragState{};
+        return false;
+    }
+    Transform* transform = registry.getComponent<Transform>(*selectedEntity);
+    if (transform == nullptr) {
+        gizmoScaleDragState_ = GizmoScaleDragState{};
+        return false;
+    }
+
+    // World-space gizmo origin -- mirrors Application::renderGizmo()'s own
+    // resolveWorldMatrix()-based placement exactly, the identical reasoning
+    // updateGizmo()'s/updateGizmoRotate()'s own comments above both already
+    // give.
+    const glm::mat4 worldMatrix = resolveWorldMatrix(registry, *selectedEntity);
+    const glm::vec3 gizmoOrigin = glm::vec3(worldMatrix[3]);
+    const float distanceToCamera = glm::length(cameraPosition - gizmoOrigin);
+    // Reuses gizmoAxisLength()/gizmoPickTolerance() verbatim -- the exact
+    // same distance-based scaling function BOTH other tools' own handles
+    // already use, per this phase's own "don't invent a second scaling
+    // scheme" brief.
+    const float axisLength = gizmoAxisLength(distanceToCamera);
+    const float pickTolerance = gizmoPickTolerance(axisLength);
+
+    // This frame's mouse state -- the identical real-ImGui-vs-debug-override
+    // shape updateGizmo()/updateGizmoRotate() above both establish, just
+    // also consumed by ENGINE_DEBUG_GIZMO_SCALE_DRAG (application.cpp) via
+    // the SAME setDebugMouseOverride() entry point (only one of the three
+    // debug drags is ever actually scripted in a single run, gated by
+    // gizmoMode_, but the override plumbing itself is shared unmodified).
+    glm::vec2 mouseScreenPos;
+    bool mouseDown = false;
+    bool mousePressedThisFrame = false;
+    bool mouseInViewportImage = false;
+    if (debugMouseScreenPosOverride_.has_value()) {
+        mouseScreenPos = *debugMouseScreenPosOverride_;
+        mouseDown = debugMouseDownOverride_;
+        mousePressedThisFrame = debugMousePressedOverride_;
+        mouseInViewportImage = true;
+    } else {
+        const ImVec2 mousePos = ImGui::GetIO().MousePos;
+        mouseScreenPos = glm::vec2(mousePos.x - panelScreenPos.x, mousePos.y - panelScreenPos.y);
+        mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        mousePressedThisFrame = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        mouseInViewportImage = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+                                !ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax);
+    }
+
+    const Ray ray = screenPointToWorldRay(mouseScreenPos.x, mouseScreenPos.y, contentRegion.x, contentRegion.y,
+                                           cameraView, cameraProjection);
+
+    // Reuses hitTestGizmoAxes() UNMODIFIED -- a scale handle's own pickable
+    // geometry is the exact same finite axis segment the translate gizmo's
+    // arrows already use (only the DRAWN tip shape differs, cube vs cone);
+    // see gizmo.hpp's own header comment on this reuse for the full
+    // reasoning. Same "only gate a NEW grab on mouseInViewportImage, an
+    // in-progress drag keeps tracking regardless of hover" rule
+    // updateGizmo()'s own comment above documents in full.
+    const GizmoAxis hoverAxis =
+        mouseInViewportImage ? hitTestGizmoAxes(ray, gizmoOrigin, axisLength, pickTolerance).axis : GizmoAxis::kNone;
+
+    const bool wasDragging = gizmoScaleDragState_.axis != GizmoAxis::kNone;
+    const GizmoScaleDragResult result = updateGizmoScaleDrag(gizmoScaleDragState_, mouseDown, mousePressedThisFrame,
+                                                              hoverAxis, ray, gizmoOrigin, transform->scale());
+
+    if (!wasDragging && result.state.axis != GizmoAxis::kNone) {
+        // Just grabbed this frame -- remember the entity's own current
+        // scale, purely for the undo Command's own `before` snapshot on
+        // release (the identical role gizmoRotateDragStartRotation_ plays
+        // for the rotate gizmo -- NOT a re-applied anchor the way
+        // gizmoDragStartLocalPosition_ is for translate, since
+        // updateGizmoScaleDrag() itself already hands back an ABSOLUTE new
+        // scale every frame, computed from its OWN frozen
+        // GizmoScaleDragState::startEntityScale anchor, not from anything
+        // this caller re-applies).
+        gizmoScaleDragStartScale_ = transform->scale();
+    }
+
+    if (result.newScale.has_value()) {
+        // Assigns the entity's LIVE scale directly to this frame's absolute
+        // result -- the identical "setPosition()-shaped" application
+        // updateGizmo() itself already uses for translate (contrast
+        // updateGizmoRotate()'s own transform->rotate(), which composes an
+        // INCREMENTAL delta instead -- scale, like translate, is computed
+        // fresh from a single fixed anchor every frame, not composed
+        // step-over-step).
+        transform->setScale(*result.newScale);
+    }
+
+    // The drag's own RELEASE transition -- the identical "one Command per
+    // completed drag, right here, never one per frame" shape updateGizmo()'s
+    // own Phase 18h comment already documents, guarded by
+    // transformSnapshotsEqual() the same way.
+    if (wasDragging && result.state.axis == GizmoAxis::kNone) {
+        const TransformSnapshot before{transform->position(), transform->rotation(), gizmoScaleDragStartScale_};
+        const TransformSnapshot after{transform->position(), transform->rotation(), transform->scale()};
+        if (!transformSnapshotsEqual(before, after)) {
+            transformEditCommitted = makeTransformEditCommand(*selectedEntity, before, after);
+        }
+    }
+
+    gizmoScaleDragState_ = result.state;
+
+    return hoverAxis != GizmoAxis::kNone || gizmoScaleDragState_.axis != GizmoAxis::kNone;
+}
+
+void EditorUI::resetAllGizmoDragStates() {
+    // See this method's own editor_ui.hpp header comment for the full
+    // design/why -- unconditional, all three, regardless of which (if any)
+    // was actually mid-drag.
+    gizmoDragState_ = GizmoDragState{};
+    gizmoRotateDragState_ = GizmoRotateDragState{};
+    gizmoScaleDragState_ = GizmoScaleDragState{};
 }
 
 void EditorUI::render() {

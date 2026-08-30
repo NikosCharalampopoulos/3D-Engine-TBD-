@@ -233,7 +233,12 @@ demo path, before `render()`:
    directional light's point of view (`renderShadowPass()`).
 2. Runs SSAO's three screen-space passes (geometry pre-pass, hemisphere-
    kernel occlusion, box blur -- `renderSSAO()`, "Phase 13f"), producing a
-   blurred occlusion texture the color pass below samples.
+   blurred occlusion texture the color pass below samples. Immediately
+   after, if an entity is selected, `renderSelectionMask()` ("Phase 18d")
+   draws just that entity's mesh into a small mask target, depth-discarding
+   against SSAO's own just-finished depth texture so a selected fragment
+   hidden behind some other object is never marked -- a no-op when nothing
+   is selected.
 3. Binds `hdrFramebuffer_` (the multisampled off-screen HDR target) and
    clears it, re-culls every point/spot light against
    `clusterLightCuller_`'s per-cluster AABBs for this frame's camera view (a
@@ -265,7 +270,11 @@ demo path, before `render()`:
 8. Resolves the final image with one fullscreen tonemap/gamma-correct/
    bloom-composite pass (`postProcessShader_` + `postProcessQuad_`) into
    `viewportColorFramebuffer_` -- a dedicated off-screen target sized to the
-   editor's Viewport panel (Phase 14c), not the default framebuffer.
+   editor's Viewport panel (Phase 14c), not the default framebuffer. This
+   same pass also composites ("Phase 18d") the selection outline: a small
+   screen-space edge-detection check against step 2's selection mask, painted
+   in the Phase 17a accent teal wherever a mask/no-mask transition is found,
+   skipped entirely when nothing is selected.
 9. Rebinds the default framebuffer at the window's own real size and clears
    it, then draws `EditorUI`'s always-on dockspace shell
    (Scene/Assets/Inspector placeholder panels, and -- since Phase 14c -- a
@@ -288,16 +297,87 @@ src/                   Engine .cpp sources (main.cpp, window.cpp, application.cp
                        framebuffer.cpp, skybox.cpp, ibl_probe.cpp,
                        hdri_loader.cpp, compute_shader.cpp,
                        cluster_light_culler.cpp, ssao.cpp,
-                       scene_serialization.cpp, scene_loader.cpp, debug_ui.cpp,
-                       input_action_map.cpp, physics.cpp, editor_ui.cpp)
+                       scene_serialization.cpp, scene_loader.cpp -- both
+                       extended Phase 15e with PointLight/DirectionalLight/
+                       CameraComponent (de)serialization and saveScene()'s
+                       first real caller, extended again Phase 15f with
+                       MaterialOverride (de)serialization, debug_ui.cpp,
+                       input_action_map.cpp, physics.cpp, editor_ui.cpp --
+                       extended Phase 15f with the Material Inspector's real
+                       "Browse..." texture picker, extended again Phase 17a
+                       with applyEditorTheme(), extended again Phase 17c with
+                       the Viewport toolbar row (renderViewportToolbar()/
+                       toolbarIconButton()), extended again Phase 17d with the
+                       custom title bar row (renderTitleBar()), extended
+                       again Phase 18a with renderViewportToolbarOverlay()
+                       (draws that same toolbar as a floating overlay on top
+                       of the rendered 3D image instead of a layout row
+                       above it),
+                       light.cpp -- Phase 15a, extended Phase 15b with
+                       DirectionalLight/resolveActiveDirectionalLight(),
+                       scene_hierarchy.cpp -- Phase 14d, asset_browser.cpp --
+                       Phase 15d's buildAssetTree(),
+                       material_override.cpp -- Phase 15f's new
+                       resolveDiffuseTextureOverride(), asset_drop.cpp --
+                       Phase 15g's new classifyAssetDropPath()/
+                       modelBaseNameFromAssetPath(), camera_capture.cpp --
+                       Phase 16's new decideCameraCapture(), editor_icons.cpp
+                       -- Phase 17b's new sceneNodeIconGlyph()/
+                       assetNodeIconGlyph(), the pure GL/ImGui-free half of
+                       icon-font glyph selection, extended Phase 17c with
+                       toolbarButtonIconGlyph(), window_chrome.cpp -- Phase
+                       17d's new applyDragDelta()/decideMaximizeRestoreToggle(),
+                       the pure GLFW/GL/ImGui-free half of the new custom
+                       title bar's drag-to-move/maximize-restore logic,
+                       window.cpp -- extended Phase 17d with the
+                       GLFW_DECORATED hint plus new getWindowPos()/
+                       setWindowPos()/isMaximized()/iconifyWindow()/
+                       toggleMaximizeRestore()/requestClose() wrappers)
 include/engine/        Public engine .h/.hpp headers (window, application, log,
                        gl_debug, version, shader, mesh, camera, transform,
                        texture, material, pbr_material, model, ecs, input,
                        resource_manager, paths, shadow_map, framebuffer, skybox,
                        ibl_probe, hdri_loader, compute_shader,
                        cluster_light_culler, frustum, ssao,
-                       scene_serialization, debug_ui, input_action_map, physics,
-                       editor_ui)
+                       scene_serialization -- extended Phase 15e's schema (see
+                       src/ note above), extended again Phase 15f with the
+                       "materialOverride" block, debug_ui, input_action_map,
+                       physics, editor_ui, light -- Phase 15a's new PointLight
+                       ECS component, extended Phase 15b with DirectionalLight,
+                       camera_component -- Phase 15c's new CameraComponent,
+                       deliberately its own header rather than folded into
+                       light.hpp, asset_browser -- Phase 15d's new
+                       AssetTreeNode/buildAssetTree(), same "own header,
+                       genuinely different kind of thing" precedent,
+                       material_override -- Phase 15f's new MaterialOverride
+                       component/resolveDiffuseTextureOverride(), same
+                       "own header, genuinely different kind of thing"
+                       precedent once more, asset_drop -- Phase 15g's new
+                       AssetDropCategory/classifyAssetDropPath()/
+                       modelBaseNameFromAssetPath(), the pure GL/ImGui-free
+                       half of drag-and-drop, camera_capture -- Phase 16's new
+                       CameraCaptureDecision/decideCameraCapture(), the pure
+                       GL/Window/ImGui-free half of camera input capture,
+                       editor_icons -- Phase 17b's new icon codepoint
+                       constants/sceneNodeIconGlyph()/assetNodeIconGlyph(),
+                       same "own header, genuinely different kind of thing"
+                       precedent once more; scene_hierarchy.hpp's own
+                       SceneTreeNode also gains four new hasModel/
+                       hasPointLight/hasDirectionalLight/hasCamera flags this
+                       phase; editor_icons.hpp extended Phase 17c with four
+                       more codepoint constants (kIconGrid/kIconUndo/
+                       kIconPlay/kIconPause) plus ToolbarButton/
+                       toolbarButtonIconGlyph(), window_chrome -- Phase 17d's
+                       new WindowPosition/applyDragDelta()/
+                       decideMaximizeRestoreToggle(), same "own header,
+                       genuinely different kind of thing" precedent once
+                       more; window.hpp extended Phase 17d with the new
+                       `decorated` constructor parameter/isDecorated()/
+                       getWindowPos()/setWindowPos()/isMaximized()/
+                       iconifyWindow()/toggleMaximizeRestore()/requestClose(),
+                       editor_ui.hpp extended Phase 17d with the new
+                       TitleBarAction struct and renderDockspaceShell()
+                       parameters)
 external/              Vendored small/single-header libs (stb_image, glad)
 assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        postprocess.vert/.frag, pbr.vert/.frag,
@@ -313,12 +393,39 @@ assets/                Shaders (incl. shadow.vert/.frag, skybox.vert/.frag,
                        PBR materials), models (scene.obj + scene.mtl,
                        falling_cube.obj + falling_cube.mtl -- Phase 8e's demo
                        object), scenes/default.json -- Phase 8b's serialized
-                       scene (Phase 8e adds its "falling_cube" entity)
+                       scene (Phase 8e adds its "falling_cube" entity; Phase
+                       15e finally gives it a real in-editor writer, though
+                       its own checked-in content is unchanged by this phase),
+                       fonts/editor-icons.ttf -- Phase 17b's new hand-subsetted
+                       Font Awesome Free icon font (2,160 bytes, 6 glyphs),
+                       re-subsetted Phase 17c to 2,916 bytes/10 glyphs (four
+                       more codepoints for the new Viewport toolbar row),
+                       re-subsetted again Phase 18h to 3,152 bytes/11 glyphs
+                       (one more codepoint, the redo icon) +
+                       LICENSE-font-awesome.txt (its own upstream license text)
 tools/                 Build/run/screenshot scripts, generate_hdri.py (Phase 13e)
-tests/                 scene_serialization_test.cpp (Phase 8b),
+tests/                 scene_serialization_test.cpp (Phase 8b, extended Phase
+                       15e with PointLight/DirectionalLight/CameraComponent
+                       round-trip coverage, extended again Phase 15f with
+                       MaterialOverride round-trip + malformed-input
+                       coverage),
                        input_action_map_test.cpp (Phase 8d),
-                       physics_test.cpp (Phase 8e) + its own CMakeLists.txt
-                       (no longer just the Phase 0 placeholder)
+                       physics_test.cpp (Phase 8e), ecs_test.cpp (Phase 14f),
+                       transform_hierarchy_test.cpp (Phase 14b),
+                       scene_hierarchy_test.cpp (Phase 14d, extended Phase 17b
+                       with component-presence-flag coverage),
+                       light_test.cpp (Phase 15a, extended Phase 15b with
+                       resolveActiveDirectionalLight() coverage),
+                       camera_component_test.cpp (Phase 15c),
+                       asset_browser_test.cpp (Phase 15d),
+                       material_override_test.cpp (Phase 15f),
+                       asset_drop_test.cpp (Phase 15g),
+                       camera_capture_test.cpp (Phase 16),
+                       editor_icons_test.cpp (Phase 17b, extended Phase 17c
+                       with ToolbarButton/toolbarButtonIconGlyph() coverage),
+                       window_chrome_test.cpp (Phase 17d)
+                       + its own CMakeLists.txt (no longer just the Phase 0
+                       placeholder)
 ```
 
 A single executable target (`engine_app`) is built for now. A future phase
@@ -3713,6 +3820,16 @@ frame.
 
 ### Phase 14d: a real Scene Hierarchy panel, click-to-select, and a viewport selection outline
 
+**Superseded in part by Phase 18d, below**: this section's own selection
+outline -- `computeSelectionOutlineNDC()`, the `SelectionOutline` struct, and
+`editor_ui.cpp`'s `addDashedRect()`/`addCornerBrackets()` -- was a flat, 2D
+screen-space rectangle with no awareness of the selected entity's actual mesh
+shape or of what else in the scene might occlude it. Phase 18d removed all of
+it and replaced it with a real, occlusion-correct 3D silhouette outline; see
+that section for the full design and why. The rest of this section -- the
+Scene Hierarchy tree itself, click-to-select, and `selectedEntity_`'s own
+ownership -- is still exactly as described below and unaffected.
+
 Fourth sub-phase of the "Phase 14: full editor UI" arc. The Scene panel's
 placeholder text ("Scene Hierarchy -- coming in Phase 14d") is replaced by a
 real, clickable tree built from `registry_`'s actual entities, and selecting
@@ -4460,6 +4577,5759 @@ already existed.
     `ENGINE_DEBUG_FORCE_DYNAMIC=scene` both log and render exactly as Phase
     14e's own README section already describes -- confirming this phase's
     `ecs.hpp`/`editor_ui.cpp` changes didn't disturb either debug aid.
+- **Post-14f bug-review fix: a child whose world matrix failed to decompose
+  was silently left with a dangling `Parent`, reintroducing the exact
+  teleport bug this function exists to prevent**.
+  `destroyEntityOrphaningChildren()`'s own `registry.each<Parent>(...)` walk
+  (`transform_hierarchy.cpp`) resolved each direct child's world matrix and
+  ran it through `glm::decompose()`, but only pushed the child into its
+  `orphans` vector `if (glm::decompose(...))` succeeded -- and the loop right
+  after, the one that actually calls `removeComponent<Parent>()`, only ever
+  ran for entries that made it into `orphans`. `glm::decompose()` can fail
+  (return `false`) for a fully degenerate matrix -- confirmed, not assumed,
+  by running a handful of scales through it directly: a zero on any single
+  scale axis (e.g. `(0, 1, 1)`) reliably fails, while the Inspector's own
+  0.01 clamp floor does not, so this was never reachable through the
+  Inspector itself (Scale is clamped to `[0.01, 100]`, Phase 14e's own
+  comment) but *is* reachable through a hand-edited or malformed
+  `assets/scenes/*.json` (`scene_loader.cpp` applies no such clamp on load,
+  and `Transform::setScale()` itself is a plain unclamped setter) -- and
+  will become more relevant once real Save Scene functionality (Phase 15e)
+  makes hand-editing scene files less the only way to reach it. On that
+  decompose-fails path, the child's `Parent` component was left pointing at
+  the about-to-be-destroyed entity, which was then destroyed via
+  `registry.destroyEntity(id)` a few lines later -- leaving the child with a
+  dangling `Parent`. `resolveWorldMatrix()`'s own "dangling parent -> treat
+  as effective root" fallback (this file's header comment) then kicked in
+  next frame and reinterpreted the child's stale LOCAL transform as if it
+  were a WORLD transform: a visible teleport, on the one path
+  `destroyEntityOrphaningChildren()` exists specifically to prevent. Fixed by
+  unconditionally orphaning every direct child regardless of decompose
+  success, gating only the Transform-overwrite on a new
+  `hasNewWorldTransform` flag on the (renamed-in-spirit, same-named)
+  `Orphan` struct: every child is now pushed into `orphans` unconditionally,
+  so the post-loop `removeComponent<Parent>()` call -- itself now
+  unconditional rather than reachable only for decompose successes -- runs
+  for all of them; the position/rotation/scale overwrite loop only actually
+  calls `setPosition()`/`setRotation()`/`setScale()` when
+  `hasNewWorldTransform` is true, otherwise leaving the child's existing
+  Transform completely untouched (its current LOCAL values simply become
+  its new, if-slightly-wrong, effective ones -- the same "a visible jump in
+  this one unreachable-today edge case beats silently discarding data or
+  aborting the whole delete" tradeoff this function's own header comment
+  already accepted for the decompose-succeeds case; only the failure case's
+  *orphaning* was ever actually broken). `transform_hierarchy_test.cpp`
+  gained a new case building a parent with `setScale(glm::vec3(0.0f, 1.0f,
+  1.0f))` (confirmed via a standalone check to actually make
+  `glm::decompose()` return `false` on this codebase's own T*R*S matrix
+  layout) and a normal child under it, then asserts the child is still a
+  real root (no `Parent` component) and its Transform is untouched and fully
+  finite after `destroyEntityOrphaningChildren()` -- both per this project's
+  own established "prove the regression test actually catches the bug"
+  practice: reverting just this fix (via `git apply -R` on the isolated
+  `transform_hierarchy.cpp` diff, keeping the new test) reproduces the
+  failure exactly (`FAIL: the child of a degenerate-scale parent is still
+  orphaned to root even though its world matrix failed to decompose -- the
+  core Post-14f bug-review fix`, `transform_hierarchy_test: 1 check(s)
+  failed`), and re-applying the fix (`git apply` on the same diff) restores
+  a clean pass across all 9 `ctest` targets. The already-working
+  decompose-succeeds path (this phase's own two `destroyEntityOrphaningChildren()`
+  test cases above) still passes unchanged, confirming the refactor didn't
+  disturb it. `ENGINE_DEBUG_DELETE=falling_cube` (the normal,
+  non-degenerate case exercised by this section's own headless run above)
+  re-run against the fixed code logs the same `"destroyed entity ... "`
+  line and renders `parented_demo_cube` in the same on-screen position as
+  before, with zero `[ERROR]` lines -- confirming no regression on the path
+  that was already correct.
+
+### Phase 15a: real Point Light entities
+
+Phase 14f's own Create menu left "Point Light"/"Directional Light"/"Camera"
+`BeginDisabled()`'d, with a tooltip explaining each needed real, separate
+scope beyond a menu item. This phase closes the smallest of those three:
+point lights, since `basic.frag`/`pbr.frag` already treat them as a
+`uNumPointLights`-counted array (see `application.cpp`'s pre-existing
+`kPointLights` table), not a single fixed slot the way the directional
+"sun" light is -- making a point light ECS-driven doesn't need a new
+"active X" concept the way Directional Light and Camera still do, so those
+two stay disabled, with updated tooltips explaining why each is still its
+own follow-up.
+
+- **`light.hpp`/`light.cpp`** (new): a `PointLight` component (color +
+  the same `constant`/`linear`/`quadratic` attenuation triple
+  `kPointLights` already uses -- no position field, the same "Transform
+  already has it" precedent `physics.hpp`'s `Collider` sets), a
+  `PointLightSample` struct (a `PointLight`'s fields plus the position
+  pulled from that entity's own `Transform` -- field-for-field identical to
+  `application.cpp`'s old private `PointLightData`, which it replaces), and
+  `collectPointLights(registry, maxTotal, out)`: appends one
+  `PointLightSample` per entity that has both a `Transform` and a
+  `PointLight` to `out`, capped at `maxTotal` (extras silently skipped,
+  warned once). Depends on nothing but `ecs.hpp`/`transform.hpp`/`log.hpp`
+  -- no GL dependency, so `tests/light_test.cpp` exercises it with no live
+  GL context, the same "plain executable, links only the pure logic file
+  it's testing" shape `physics_test.cpp`/`transform_hierarchy_test.cpp`
+  already establish.
+- **`application.cpp`**: `render()` now builds one `pointLightSamples`
+  vector every frame -- `kPointLights`' 3 fixed, hand-tuned entries
+  (completely unchanged; every prior phase's own screenshot-verified
+  lighting baseline still holds) seeded first, then `collectPointLights()`
+  appends any live ECS point lights, up to `kMaxPointLights` (8, matching
+  `MAX_POINT_LIGHTS` in both fragment shaders). That one list now feeds
+  both the clustered-lighting cull (`clusterLightCuller_.cullLights()`) and
+  both shaders' `uPointLights` uniform upload, replacing the old
+  function-local `static` cache the cluster-culling code used to keep for
+  `kPointLights` -- correct pre-Phase-15 (that table never changed at
+  runtime) but wrong now that a user can create/delete point lights mid-run;
+  it's rebuilt fresh every frame instead. `kSpotLights` keeps its own
+  `static` cache -- spot lights aren't part of this phase's scope, still a
+  fixed compile-time table.
+- **`editor_ui.cpp`**: the Create menu's "Point Light" item is real now
+  (returns `CreateEntityKind::kPointLight`, no longer `BeginDisabled()`'d);
+  "Directional Light"'s tooltip no longer says "same reasoning as Point
+  Light" (it isn't, any more) and now explains the single-fixed-uniform-vs.
+  -array distinction above. The Inspector gains a new "Light" section
+  (`ColorEdit3` + three `DragFloat`s for the attenuation triple), shown only
+  for a selected entity with a `PointLight` component, fully live-editable
+  like Transform -- not read-only like Material, since a `PointLight` is a
+  genuinely per-entity `ComponentPool<PointLight>` entry with none of
+  Material's shared-Model-cache mutation hazard.
+- **`application.cpp`'s `spawnEntityFromCreateMenu()`**: `kPointLight`
+  follows Empty's shape (Transform + NameComponent, no ModelComponent --
+  this engine has no light-gizmo mesh to draw) plus a freshly
+  `addComponent<PointLight>()`'d component at its own struct defaults
+  (plain white, `kPointLights`' own (1.0, 0.7, 1.8) attenuation profile) --
+  an immediately-visible starting point the new Inspector section can
+  retune. `ENGINE_DEBUG_CREATE` gains a `pointlight` value, calling this
+  exact same production function so a headless run can prove it without a
+  real mouse, the same precedent every other `ENGINE_DEBUG_CREATE` value
+  already established.
+- **Deliberately not done this phase** (same "real, substantial, separate
+  scope" reasoning Phase 14f itself gave for deferring all three): scene
+  serialization for `PointLight` -- `saveScene()` exists
+  (`scene_serialization.cpp`) but nothing in this engine's UI calls it yet
+  (only `loadScene()` runs, once, at startup), so schema support for a
+  component no live code path would ever write is exactly the kind of
+  speculative, nothing-consumes-it addition this codebase's own established
+  style avoids (see `ecs.hpp`'s `NameComponent`/`physics.hpp`'s
+  mass-field comments for the same instinct applied elsewhere). A future
+  phase that adds a real "Save Scene" UI action should extend
+  `SceneEntityRecord`/`parseSceneRecords()`/`writeSceneRecords()` for
+  `PointLight` (and `scene_loader.cpp`'s registry-building side) at that
+  point, not before.
+- **Verify**: a clean rebuild compiles with **zero new warnings** under
+  `-Wall -Wextra`. `ctest` reports **7/7** (`light_test` new). A baseline
+  `tools/run_headless.sh` run (`ENGINE_MAX_FRAMES=60`, no debug env vars)
+  logs the exact same clustered-lighting occupancy as before this phase
+  (2136 -> 2155/2304 clusters occupied as the camera settles, avg ~3.58
+  lights/occupied cluster) and renders pixel-identical to the pre-Phase-15
+  scene -- confirming `kPointLights`' unchanged 3 entries plus zero ECS
+  point lights in the default scene really do reproduce the old fixed-array
+  behavior exactly. A second run with `ENGINE_DEBUG_CREATE=pointlight` +
+  `ENGINE_DEBUG_SELECT="Point Light"` + `ENGINE_SHOW_DEBUG_UI=1` logs
+  `Created entity "Point Light" (index 3) via the Scene panel's Create
+  menu`, zero `[ERROR]` lines, and the clustered-lighting average rises to
+  ~4.44 lights/occupied cluster -- direct proof the new light is actually
+  reaching the cluster culler, not just sitting inertly in the registry.
+  Inspected as a screenshot: the debug overlay's Scene Entities list shows
+  `Point Light` alongside `scene`/`falling_cube`/`parented_demo_cube`; the
+  Inspector shows it selected, labeled "Empty entity (no model)", with a
+  live Transform and a new "Light" section showing its white default
+  color; the Viewport shows a visibly brighter hotspot near the light's
+  spawn position (in front of the camera, per the existing Create-menu
+  placement heuristic) that isn't present in the baseline screenshot.
+
+### Phase 15b: real Directional Light entities
+
+Phase 15a closed the smaller of the two Create-menu light gaps it inherited
+from Phase 14f; this phase closes the harder one. Unlike a point light,
+`basic.frag`/`pbr.frag` read a single fixed `uLightDirection`/`uLightColor`
+uniform pair (`application.cpp`'s `kLightDirection`/`kLightColor`), not a
+`uNumX`-counted array, and that same pair is also this engine's ONE
+shadow-casting light (`renderShadowPass()`/`computeCascades()`, built
+directly from it). So a Directional Light entity can't just "grow an array
+with live data" the way Point Light could -- there has to be a notion of
+which ONE entity (if any) is actually driving that single uniform pair/
+shadow frustum this frame, which this engine had no notion of before now.
+
+- **`light.hpp`/`light.cpp`**: a new `DirectionalLight` component
+  (`direction` + `color`, mirroring `kLightDirection`/`kLightColor`'s own
+  meaning field-for-field) and `resolveActiveDirectionalLight(registry,
+  active, fallback)`: returns `active`'s own `DirectionalLight` component
+  when `active` is a valid entity that actually has one and its direction
+  hasn't degenerated to (at or near) the zero vector, else `fallback`
+  unchanged. Deliberately NOT an array-oriented `PointLightSample`-shaped
+  type -- there is still only ever one active directional light in the
+  actual rendering pipeline, so the resolved per-frame value has exactly the
+  component's own shape, reused directly rather than duplicated into a
+  bespoke sample struct. `direction` is a plain field, NOT derived from the
+  entity's own `Transform::rotation()` the way a first glance at
+  `PointLight`'s "reuse the Transform" precedent might suggest: the
+  Inspector's Transform section only ever edits a single Rot-Y degree field
+  (Phase 14e), which can never express `kLightDirection`'s own steep
+  downward pitch, so a direct `direction` field (the same precedent
+  `application.cpp`'s pre-existing `SpotLightData` already set) is the only
+  form that's actually editable to something useful. `DirectionalLight{}`'s
+  own defaults are deliberately NOT `kLightDirection`/`kLightColor`'s values
+  (unlike `PointLight{}` mirroring `kPointLights`' shared attenuation
+  profile) -- a point light is additive, so matching an existing light's
+  tuning is a fine "immediately visible" starting point, but a directional
+  light REPLACES `kLightDirection`/`kLightColor` outright once active, so
+  identical defaults would make a freshly created-and-activated entity
+  visually indistinguishable from having done nothing at all. Instead it
+  defaults to a steeper "high noon" angle (still on `kLightDirection`'s own
+  `+x, +z` side, so its shadow stays camera-visible per that constant's own
+  Phase 7a comment) paired with a cool "moonlight" tint, so creating one is
+  immediately, visibly a different light. Depends on nothing but
+  `ecs.hpp`/`transform.hpp` -- no GL dependency, so `tests/light_test.cpp`
+  (extended, not a new file -- same translation unit as
+  `collectPointLights()`) exercises it with no live GL context either.
+- **`application.hpp`/`application.cpp`**: a new `activeDirectionalLight_`
+  member (`std::optional<EntityId>`, default `std::nullopt`) -- "which
+  entity is active" resolves to the simplest rule that fits an engine with
+  no multi-select UI concept anywhere yet: the most recently Create'd
+  Directional Light entity, set unconditionally in
+  `spawnEntityFromCreateMenu()`'s own new `kDirectionalLight` case (Transform
+  + NameComponent, no ModelComponent -- the same shape `kPointLight` already
+  established -- plus a freshly `addComponent<DirectionalLight>()`'d
+  component at its own defaults). `render()` now resolves
+  `resolveActiveDirectionalLight(registry_, activeDirectionalLight_.value_or(EntityId()),
+  DirectionalLight{kLightDirection, kLightColor})` once, before
+  `computeCascades()` runs, and reuses that single result for the cascade
+  build and both `shader_`/`pbrShader_` `uLightDirection`/`uLightColor`
+  uploads -- so the shadow frustum and the shading math can never disagree
+  about which light this frame is actually using. A stale
+  `activeDirectionalLight_` (its entity later deleted) is never explicitly
+  cleared -- `resolveActiveDirectionalLight()` already tolerates a stale id
+  exactly the way `getComponent<T>()` does everywhere else in this codebase,
+  so it silently and correctly falls back to `kLightDirection`/`kLightColor`
+  the next frame with no cleanup required. `ENGINE_DEBUG_CREATE` gains a
+  `directionallight` value, calling this exact same production function.
+- **`editor_ui.hpp`/`editor_ui.cpp`**: the Create menu's "Directional Light"
+  item is real now (returns `CreateEntityKind::kDirectionalLight`, no longer
+  `BeginDisabled()`'d) -- only "Camera" stays disabled, for the reason its
+  own (unchanged, still accurate) tooltip already gives. The Inspector gains
+  a live "Light" section for a selected `DirectionalLight` entity
+  (`ColorEdit3` + `DragFloat3` for direction, no per-axis clamp -- see that
+  section's own comment for why a floor here would be wrong for a direction,
+  unlike Point Light's `Constant` field) that also shows whether THIS entity
+  is the currently active one -- without that line, two Directional Light
+  entities would render identical Inspector sections while only one of them
+  actually affects the scene, a distinction no other component in this
+  engine's Inspector has to account for.
+  `renderDockspaceShell()`/`renderInspectorPanel()` both gain one new
+  read-only `activeDirectionalLight` parameter (Application's own
+  `activeDirectionalLight_`, threaded through the same way `outline` already
+  is) to make that comparison.
+- **Deliberately not done this phase** (same reasoning Phase 15a gave for
+  its own equivalent gaps): Camera stays deferred -- a structurally similar
+  "which entity is active" problem, but for this engine's actual rendered
+  view (a free-fly `Camera` object, not an ECS entity) rather than one
+  uniform pair, different enough in kind to stay its own separately-scoped
+  follow-up, not folded into this one. No explicit "Set Active" UI control
+  either -- "most recently created" is the whole mechanism; a richer rule
+  would need a multi-select concept this engine doesn't have anywhere else
+  yet, and building one just for this would be exactly the kind of
+  speculative UI surface this codebase's own established style avoids. No
+  scene serialization for `DirectionalLight`, for the identical "nothing
+  consumes it yet" reason Phase 15a gave for `PointLight`.
+- **Verify**: a clean rebuild compiles with **zero new warnings** under
+  `-Wall -Wextra`. `ctest` reports **7/7** (`light_test` extended with four
+  new `resolveActiveDirectionalLight()` cases: active-entity-wins,
+  no-active-falls-back, stale/missing-component-falls-back, and
+  degenerate-zero-length-direction-falls-back). A baseline
+  `tools/run_headless.sh` run (`ENGINE_MAX_FRAMES=60`, no debug env vars)
+  logs the byte-identical clustered-lighting occupancy Phase 15a's own
+  baseline recorded (2136 -> 2155/2304 clusters occupied, avg 3.565543 ->
+  3.581903 lights/occupied cluster) and zero `[ERROR]` lines -- confirming
+  a scene with zero Directional Light entities (this engine's own default
+  scene, still true today) renders exactly as it did before this phase, no
+  regression to the one shadow-casting light every prior phase's own
+  screenshot baseline depends on. A second run with
+  `ENGINE_DEBUG_CREATE=directionallight` + `ENGINE_DEBUG_SELECT="Directional
+  Light"` + `ENGINE_SHOW_DEBUG_UI=1` logs `Created entity "Directional
+  Light" (index 3) via the Scene panel's Create menu`, zero `[ERROR]` lines,
+  and the SAME clustered-lighting stats as the baseline (a directional light
+  is correctly outside the point/spot cluster budget entirely, unlike Phase
+  15's point light). Inspected as a screenshot: the debug overlay's Scene
+  Entities list shows `Directional Light` alongside
+  `scene`/`falling_cube`/`parented_demo_cube`; the Inspector shows it
+  selected, labeled "Empty entity (no model)", with a live Transform and a
+  new "Light" section whose color swatch reads `(140, 179, 255)` -- exactly
+  `DirectionalLight{}`'s own default cool tint; the Viewport shows a
+  dramatically different lighting result from the baseline (the warm,
+  low-angle sun's bright hotspot and long shadows are replaced by a cooler,
+  more overhead look), direct visual proof `resolveActiveDirectionalLight()`
+  is actually feeding the shader/shadow pass, not just sitting inertly in
+  the registry.
+
+### Phase 15c: real Camera entities
+
+The third and last of Phase 14f's own `BeginDisabled()`'d Create-menu gaps.
+Unlike either light, a Camera entity turns out not to need an "active"
+resolution mechanism at all: `basic.frag`/`pbr.frag` don't read a
+CameraComponent, and this engine's actual rendered view has come from
+`Application::camera_` -- a free-fly `engine::Camera` object (`camera.hpp`),
+completely independent of the ECS -- since Phase 3, unchanged by this phase.
+So closing this gap the same "smallest correct increment" way Phase 15a/15b
+did meant something narrower than either of them: a real, inspectable,
+creatable `CameraComponent` entity that exists in the scene and does
+nothing else yet. A full "possess this entity, free-fly control transfers
+to it" feature -- deciding what happens to keyboard/mouse input when a
+possessed camera exists, whether/how `camera_` itself gets redirected, and
+eventually a camera-switching keybind and/or multiple viewports -- is real,
+substantial, separate scope of its own, and nothing in this engine's UI can
+exercise any part of it yet (no camera-switching keybind, no multi-viewport,
+nothing that would ever read "which entity is the active camera" except a
+hypothetical future feature). Building any of that now would be exactly the
+kind of speculative, nothing-consumes-it complexity this codebase's own
+established style avoids (see `physics.hpp`'s own `RigidBody` mass-field
+comment, and Phase 15a/15b's own "no scene serialization for a component
+nothing writes yet" precedent above) -- so this phase deliberately does not
+build it, the same way Phase 15a/15b themselves deferred Camera in the first
+place.
+
+- **`camera_component.hpp`** (new, `include/engine/`): a `CameraComponent`
+  holding the three purely-optical properties `engine::Camera`'s own
+  `getProjectionMatrix()` actually depends on -- `fovYDeg`/`nearPlane`/
+  `farPlane`, defaulting to `Camera`'s own 60.0/0.1/100.0 values verbatim
+  (`camera.hpp`'s `fovYDeg_`/`nearPlane_`/`farPlane_`). Deliberately its own
+  header, not folded into `light.hpp` even though that file already narrates
+  this whole Point-Light-then-Directional-Light-then-Camera arc: a camera
+  isn't a light by any stretch (nothing about it feeds `basic.frag`/
+  `pbr.frag`'s lighting math), so growing `light.hpp` to also mean "and also
+  Camera" would leave that file's own name not matching its contents for no
+  real benefit -- the same "a genuinely different KIND of thing gets a new
+  header" precedent `light.hpp`'s own top comment already sets by having
+  split off from `physics.hpp`/`ecs.hpp` in the first place. Deliberately
+  does NOT mirror `Camera`'s `position_`/`yawDeg_`/`pitchDeg_` -- the same
+  "Transform already has it" precedent `PointLight`'s own "no position
+  field" comment establishes -- nor `movementSpeed_`/`mouseSensitivity_`,
+  which describe how free-fly *input* drives a camera, not what a camera
+  optically *is*, and this entity never receives input (see above). No
+  matching `camera_component.cpp` -- like `ecs.hpp`'s own `NameComponent`,
+  this is a plain data struct with no logic function of its own to give one
+  a body.
+- **`editor_ui.hpp`/`editor_ui.cpp`**: the Create menu's "Camera" item is
+  real now (returns `CreateEntityKind::kCamera`, no longer
+  `BeginDisabled()`'d) -- closing out all three of Phase 14f's own deferred
+  items. Unlike Phase 15b's `kDirectionalLight`, this gains **no** new
+  `renderDockspaceShell()` parameter: there is nothing analogous to
+  `activeDirectionalLight` to thread through, since nothing in this engine's
+  rendering pipeline reads a CameraComponent at all. The Inspector gains a
+  new "Camera" section (`DragFloat` for FOV/near/far, `ImGuiSliderFlags_
+  AlwaysClamp`-floored the same way `PointLight`'s own `Constant` field is,
+  so a near plane can never reach zero/negative and corrupt
+  `glm::perspective()`), fully live-editable like the two Light sections
+  before it, with an explicit caption stating it is **not** wired to this
+  engine's actual rendered view -- a documented gap, not a silent one, the
+  same treatment this whole phase's own scope decisions get.
+- **`application.hpp`/`application.cpp`**: `spawnEntityFromCreateMenu()`'s
+  new `kCamera` case follows the identical Transform + NameComponent (no
+  ModelComponent -- no camera-gizmo mesh either) shape `kPointLight`/
+  `kDirectionalLight` already established, plus a freshly
+  `addComponent<CameraComponent>()`'d component at its own struct defaults.
+  Unlike `kDirectionalLight`, that addComponent call is the *entire*
+  post-switch effect -- no second statement, no member assignment. There is
+  **no `activeCameraEntity_`-shaped member anywhere in this class**: `camera_`
+  (the real free-fly `Camera`) and its own `processMovement()`/
+  `processMouseInput()` calls in `update()` are completely untouched by this
+  phase. `ENGINE_DEBUG_CREATE` gains a `camera` value, calling this exact
+  same production function.
+- **Deliberately not done this phase**: everything the "actual design
+  problem" discussion above already names -- no possession/control-transfer
+  mechanism, no camera-switching keybind, no multi-viewport, no
+  `activeCameraEntity_` concept of any kind. Also no scene serialization for
+  `CameraComponent`, for the identical "nothing consumes it yet" reason
+  Phase 15a/15b gave for `PointLight`/`DirectionalLight`. A future phase
+  that actually wants ECS-driven view control should build it on top of
+  this phase's real (if inert) ECS foundation -- deciding then what happens
+  to input when a camera entity is "possessed" and how `camera_` itself gets
+  redirected -- not before.
+- **Verify**: a clean rebuild (`rm -rf build && cmake -B build -S . &&
+  cmake --build build -j`) compiles with **zero warnings** under `-Wall
+  -Wextra`. `ctest` reports **8/8** (`camera_component_test` new -- default-
+  value coverage proving `CameraComponent{}`'s fields genuinely match
+  `Camera`'s own defaults, plus `EntityRegistry` round-trip/independence
+  coverage, the same shape `ecs_test.cpp` already established for a
+  component with no logic function of its own to unit-test directly). A
+  baseline `tools/run_headless.sh` run (`ENGINE_MAX_FRAMES=60`, no debug env
+  vars) logs the byte-identical clustered-lighting occupancy Phase 15a/15b's
+  own baseline recorded (2136 -> 2155/2304 clusters occupied, avg 3.565543
+  -> 3.581903 lights/occupied cluster) and zero `[ERROR]` lines -- and, run
+  three times independently with no code involved in this phase touched at
+  all, produced screenshots differing from each other by only 5-25 pixels
+  out of 480,000 (`compare -metric AE`, none visually distinguishable) --
+  this engine's own inherent software-rasterizer (llvmpipe) run-to-run
+  least-significant-bit noise, present with or without this phase's changes,
+  and the yardstick the next paragraph's own comparison is measured against.
+  A second run with
+  `ENGINE_DEBUG_CREATE=camera` + `ENGINE_DEBUG_SELECT="Camera"` +
+  `ENGINE_SHOW_DEBUG_UI=1` logs `Created entity "Camera" (index 3) via the
+  Scene panel's Create menu`, zero `[ERROR]` lines, and the exact SAME
+  clustered-lighting stats as the baseline -- direct proof a Camera entity
+  contributes nothing to the lighting/rendering pipeline, the expected,
+  correct result for this phase, not a bug. Inspected as a screenshot: the
+  debug overlay's Scene Entities list shows `Camera` alongside
+  `scene`/`falling_cube`/`parented_demo_cube`; the Inspector shows it
+  selected, labeled "Empty entity (no model)", with a live Transform and a
+  new "Camera" section reading `60.0 deg` FOV (`CameraComponent{}`'s own
+  default); the Viewport's rendered content is unaffected by the Camera
+  entity specifically -- a pixel `compare` of the portion of the Viewport
+  panel NOT covered by the F1 debug overlay window does differ from the
+  plain baseline (990 pixels out of 78,000 in the region checked, a small
+  anti-aliasing jitter around sphere silhouettes, larger than the 5-25-pixel
+  run-to-run noise floor established above), but a THIRD run with
+  `ENGINE_SHOW_DEBUG_UI=1` alone -- no `ENGINE_DEBUG_CREATE`, no Camera
+  entity at all -- reproduces that identical jitter (0 differing pixels
+  against the Camera run's own screenshot, in that same region). So the
+  jitter traces entirely to enabling the debug overlay itself (extra ImGui
+  draw calls shifting per-frame timing enough to nudge software-rasterizer
+  antialiasing by roughly a pixel here and there) -- pre-existing engine
+  behavior wholly unrelated to Phase 15c's own changes, not something a
+  Camera entity's presence causes.
+
+With Phase 15c, the "Light/Camera" arc Phase 14f's own Create menu opened is
+now complete: all three originally-`BeginDisabled()`'d items (Point Light,
+Directional Light, Camera) are real, creatable, inspectable ECS entities.
+What differs, deliberately, is how far each one actually reaches into this
+engine's existing systems -- Point Light plugs straight into an existing
+array-shaped uniform, Directional Light needed a brand-new "which one is
+active" concept because it replaces a single fixed uniform pair, and Camera
+needed neither, because nothing downstream reads it yet. Each phase in this
+arc closed exactly the gap in front of it and named the next one explicitly,
+rather than guessing ahead at scope the engine wasn't ready to use.
+
+### Phase 15d: a real Asset Browser
+
+The Assets panel had been a single placeholder line since Phase 14a itself
+(`ImGui::TextWrapped("Asset Browser -- coming in a later Phase 14 sub-phase.")`)
+-- untouched through the entire Phase 14b-14f/15a-15c arc while every other
+editor panel (Scene, Viewport, Inspector) grew real content. With the
+Light/Camera arc closed, this was the next actual gap, so it becomes its own
+whole top-level phase (16), not another Phase 14 sub-phase or folded under
+15 -- the numbering convention this project's own "Development history"
+section has followed consistently: each closed arc's own last sub-phase
+letter is where the next genuinely new arc starts a fresh whole number, the
+same way Phase 8's a-e sub-phases gave way to Phase 9, and 15a-15c now give
+way to 16.
+
+Scope, decided by actually reading what's on disk (`ls -R assets/`) rather
+than assuming: `assets/` holds `models/` (4 `.obj`+`.mtl` pairs),
+`textures/` (flat PNGs plus `skybox/` and `hdri/` subfolders), `shaders/`
+(29 GLSL files), and `scenes/` (one file, `default.json`) -- no separate
+`materials/` directory exists at all (materials live inline in each
+model's own `.mtl` file, loaded as part of the model, not as a standalone
+asset type). Only `models/` and `textures/` are browsable this phase -- see
+`asset_browser.hpp`'s own header comment for the full reasoning, briefly:
+they're the only two asset kinds `ResourceManager` (`resource_manager.hpp`)
+actually loads/caches BY PATH for something a level designer places into a
+scene (`getModel()`/`getTexture()`). `shaders/` is renderer implementation
+detail -- every path under it is a `resolveAssetPath()`'d constant baked
+into `application.cpp`, never something picked per-entity through a
+browser. `scenes/` is the currently-loaded level's own save/load file
+(`scene_serialization.hpp`), not content placed *into* a level the way a
+model or texture is -- `ResourceManager` has no "Scene" cache entry at all,
+which is the real, checked boundary this allowlist mirrors (one entry short
+of ResourceManager's own three -- Shader excluded for the identical
+"engine machinery, not placeable content" reason as `shaders/` itself).
+
+- **`asset_browser.hpp`/`asset_browser.cpp`** (new, `include/engine/` +
+  `src/`): `AssetTreeNode` (name + assets/-relative path + isDirectory +
+  children) and `buildAssetTree(assetsRoot)`, a pure `std::filesystem` walk
+  with no GL/ImGui/ecs.hpp dependency at all -- same "pure data vs.
+  GL/ImGui-facing" split `scene_hierarchy.hpp` established for
+  `buildSceneTree()`, just walking real directories instead of the ECS.
+  `directory_iterator`'s enumeration order is unspecified by the standard,
+  so every directory's entries are sorted (subdirectories before files,
+  alphabetical within each group) before children are built, making the
+  output -- and the Assets panel's own on-screen order -- deterministic
+  regardless of filesystem/platform. A missing category directory
+  (`assets/models/` or `assets/textures/` not existing at all) is silently
+  skipped, not an error: neither is required to exist.
+- **`editor_ui.hpp`/`editor_ui.cpp`**: the Assets panel's placeholder line
+  is replaced by a real tree. `EditorUI` gains two private members:
+  `assetTree_` (the `std::vector<AssetTreeNode>` forest, built exactly
+  **once**, in the constructor, via `buildAssetTree(resolveAssetPath(
+  "assets"))` -- see below for why once, not every frame) and
+  `selectedAssetPath_` (a `std::optional<std::string>` keyed by
+  `AssetTreeNode::relativePath`, the row currently highlighted).
+  `renderAssetTreeNode()` mirrors `renderSceneTreeNode()`
+  (Phase 14d) almost line for line -- same `TreeNodeEx()` flag set, same
+  "click anywhere on the row selects it" `IsItemClicked()` check, same
+  no-icon-glyphs reasoning (this engine's Dear ImGui build carries no icon
+  font -- see `renderSceneTreeNode()`'s own comment) -- kept as a genuinely
+  separate function rather than templated over "anything tree-shaped"
+  because the two node types share no base, their selection state has
+  different types and different owners, and the two panels are likely to
+  diverge further once either grows real functionality. One deliberate
+  difference: asset-tree nodes do **not** get `ImGuiTreeNodeFlags_
+  DefaultOpen` the way scene-tree nodes do -- this engine's own scene has a
+  handful of entities (expand-by-default costs nothing there), but
+  `assets/textures/skybox/` and `assets/textures/hdri/` already show real
+  subfolder structure a level designer would want collapsed by default as a
+  project's content grows.
+- **Caching, not a per-frame rebuild**: unlike `buildSceneTree()` (rebuilt
+  fresh every `renderDockspaceShell()` call, because ECS entities can be
+  created/deleted any frame through the Scene panel's own Create menu),
+  `assetTree_` is built exactly once, in `EditorUI`'s constructor. Nothing
+  in this engine writes into `assets/` at runtime today -- no import
+  feature exists (see below) -- so the tree cannot change between one frame
+  and the next during a single run, and re-walking the filesystem 60+ times
+  a second against a tree already known to be unchanged would be pure waste
+  -- the same "match the cache lifetime to what actually varies" reasoning
+  `resource_manager.hpp`'s own header comment gives for its own
+  get-or-load cache, applied here as "build once" instead of "load once,
+  reuse forever."
+- **Selection is local, cosmetic state, not threaded through like
+  `selectedEntity`**: `selectedAssetPath_` lives on `EditorUI` itself, never
+  passed to or read by `Application`. Nothing outside the Assets panel
+  reads it this phase -- no Inspector wiring, no viewport hookup, no
+  drag-and-drop (see below) -- so there is none of `selectedEntity`'s own
+  cross-panel/cross-frame reason (`application.hpp`'s Phase 14d comment) to
+  make it live anywhere but here.
+- **Deliberately not done this phase** (the same conservative default this
+  whole project's "smallest correct increment" discipline expects, checked
+  against each item on its own merits rather than assumed):
+  - **Drag-and-drop into the Scene/Viewport.** A real, separate, much
+    bigger feature -- no drag-and-drop exists anywhere in this engine's UI
+    today, and building the first one as a side effect of an Asset Browser
+    phase would bury a substantial new capability inside what should be a
+    read-only browsing phase.
+  - **Wiring the Material Inspector's `Browse...` button to this browser.**
+    That button's own existing comment (`editor_ui.cpp`, Phase 14e)
+    already documents exactly why it's `BeginDisabled()`'d: `Model`
+    instances (and therefore their `Material`s) are cached and shared via
+    `ResourceManager` across every entity that loaded the same asset path,
+    so letting the Inspector swap which model/material a live, shared
+    `Material` reference points at would silently repaint every other
+    entity sharing that same cached asset -- a real hazard, not a
+    hypothetical one, given `parented_demo_cube` and `falling_cube` already
+    share `assets/models/falling_cube.obj` in this project's own default
+    scene. Nothing about *building a read-only browser* changes that
+    hazard -- the button stays exactly as `BeginDisabled()`'d as Phase 14e
+    left it, comment untouched.
+  - **Importing new files into `assets/` from outside the project.** This
+    phase browses what's already there; it doesn't add to it. No file
+    dialog, no copy-into-`assets/` operation.
+  - **Thumbnails/previews.** A real separate feature of its own -- texture
+    thumbnails would need their own GPU-upload/caching path (loading every
+    texture in `assets/textures/` just to preview it, whether or not it's
+    ever used in the scene, is a meaningfully different cost profile than
+    `ResourceManager`'s own "load on first actual use" contract), and
+    models have no single obvious preview image at all. Text labels (no
+    icon glyphs, matching `renderSceneTreeNode()`'s own precedent) are
+    enough to identify a row this phase.
+- **Post-16 bug-review fix: an unreadable entry anywhere under
+  assets/models/ or assets/textures/ crashed the WHOLE ENGINE at startup**.
+  The first-pass `buildNode()` used the throwing
+  `fs::is_directory(path)`/`fs::directory_iterator(path)` overloads (no
+  `std::error_code` out-param) for everything below the top-level category
+  check, even though that top-level check itself already used the
+  non-throwing overloads correctly. Reviewer reproduced it directly: a
+  self-referencing symlink one level under a scratch `assets/models/` (a
+  realistic on-disk state -- a stray symlink loop from an install artifact
+  or backup tool, not a hypothetical) makes resolving that entry's type hit
+  `ELOOP` ("Too many levels of symbolic links"), which
+  `fs::is_directory(path)` surfaces as an uncaught `std::filesystem_error`.
+  Because `buildAssetTree()` runs inside `EditorUI`'s constructor, inside
+  `Application`'s own constructor, that exception propagated all the way
+  out of `Application`'s constructor -- `main.cpp`'s top-level `try`/`catch`
+  turned it into `LOG_ERROR("Fatal: ...")` + `EXIT_FAILURE`, taking down the
+  entire engine over a filesystem hiccup confined to one asset subdirectory,
+  not a cosmetic Assets-panel-only bug. Fixed by routing every filesystem
+  query in `buildNode()` through the `std::error_code`-taking overload, the
+  same discipline the top-level category check already modeled: a
+  directory's own `is_directory()` check, its `directory_iterator`
+  construction, advancing that iterator (`operator++`/`increment()` can
+  *also* throw mid-enumeration, not only at construction -- easy to miss,
+  since a plain range-based `for` silently calls the throwing
+  `operator++()`), and the sort comparator's own `is_directory()` calls
+  (used only for display ordering) are all now guarded. An entry whose type
+  can't be determined at all is left out of the returned tree entirely (with
+  a `LOG_WARN` noting what was skipped and why) rather than aborting the
+  whole walk -- see `asset_browser.hpp`'s own new "Unreadable entries never
+  abort the walk" comment for the documented contract, and
+  `asset_browser.cpp`'s `buildNode()`/`tryIsDirectory()` for the mechanics.
+  `asset_browser_test.cpp` gained a matching case: a scratch
+  `assets/models/` containing a real file plus a self-referencing symlink
+  now asserts `buildAssetTree()` returns normally (wrapped in a
+  `try`/`catch` that fails the test outright if it ever throws again) with
+  the readable sibling present and the broken symlink silently absent --
+  confirmed to actually exercise the new code path via the executable's own
+  stdout (`[WARN] Asset Browser: skipping unreadable entry "models/
+  self_loop"...`), not just a passing exit code.
+- **Post-16 bug-review fix (second pass): a permission-denied subdirectory
+  rendered as a silently-empty folder, with no diagnostic anywhere**. The
+  first-pass fix above reached for
+  `fs::directory_options::skip_permission_denied` when constructing
+  `buildNode()`'s `directory_iterator`, reasoning that it would let an
+  EACCES-on-open failure degrade for free. It does degrade -- but that
+  flag's own documented standard-library behavior is to swallow the
+  failure and hand back zero entries WITHOUT ever setting `iterEc`, so
+  `buildNode()`'s own error-handling branch never even ran for this case.
+  The practical effect: a permission-denied directory rendered in the
+  Assets panel as an ordinary, childless leaf row -- no expand arrow, no
+  `LOG_WARN`, nothing -- genuinely indistinguishable, both in the log and
+  in the actual editor GUI, from a directory that is simply, unremarkably
+  empty. A level designer staring at the panel itself (not tailing stdout)
+  had no way to tell those two states apart. Fixed by dropping
+  `skip_permission_denied` entirely: `directory_iterator`'s plain
+  `(path, error_code&)` constructor DOES set `iterEc` on EACCES, so a
+  permission-denied directory now falls through to the exact same
+  `LOG_WARN`-and-continue path (`asset_browser.cpp`'s own `buildNode()`)
+  every other unreadable thing in this file already used -- reported, not
+  silently absorbed, while still never throwing.
+  `asset_browser_test.cpp` gained a matching case, honestly scoped to what
+  this project's own sandboxed environment can actually verify: this test
+  process runs as root (confirmed via `geteuid()`, not assumed), and root
+  bypasses ordinary Linux DAC permission checks -- `chmod 000 dir && ls
+  dir` still succeeds as root, checked directly while writing this fix --
+  so a plain chmod-based test would have silently proven nothing. The test
+  instead forks a short-lived child, drops ONLY that child's effective uid
+  to "nobody" (uid 65534, seteuid -- reversible, process-local, the parent
+  itself stays root throughout) before calling `buildAssetTree()` there, so
+  the OS genuinely enforces the permission against that child process, and
+  reports pass/fail back via its exit code; a non-root environment (or one
+  where the privilege drop itself fails) takes a separate, explicitly
+  labeled path rather than asserting a result it couldn't actually
+  establish. Confirmed to actually exercise the new code path the same way
+  as the symlink case above: running the test binary directly shows
+  `[WARN] Asset Browser: could not list directory "models/locked"
+  (Permission denied)...` before `all checks passed`, not just a green exit
+  code.
+- **Verify**: a clean rebuild (`rm -rf build && cmake -B build -S . &&
+  cmake --build build -j`) compiles with **zero warnings** under `-Wall
+  -Wextra` (`asset_browser.cpp`/`asset_browser_test.cpp` included -- no
+  extra link flag needed for `<filesystem>` on this project's GCC 13
+  toolchain). `ctest` reports **9/9** (`asset_browser_test` new -- category
+  allowlist coverage proving `shaders/`/`scenes/` are excluded even when
+  physically present alongside `models/`/`textures/` in the same scratch
+  tree, recursive nesting, deterministic directories-before-files/
+  alphabetical sort order, a missing single category, a wholly assetless
+  root, a self-referencing symlink degrading gracefully instead of
+  throwing, and (the second post-review addition above) a permission-denied
+  subdirectory being detected/logged rather than silently absorbed, all
+  against a scratch directory under `std::filesystem::temp_directory_path()`
+  -- never this project's own real `assets/` tree, so results never depend
+  on what that directory happens to contain on a given day). A
+  `tools/run_headless.sh` run
+  (`ENGINE_MAX_FRAMES=60 ENGINE_SHOW_DEBUG_UI=1`) logs the byte-identical
+  clustered-lighting occupancy Phase 15a/15b/15c's own baseline recorded
+  (2136 -> 2155/2304 clusters occupied, avg 3.565543 -> 3.581903
+  lights/occupied cluster) and **zero** `[ERROR]` lines across two
+  independent runs -- direct confirmation this phase's changes (Assets
+  panel content only) touch nothing in the rendering/lighting pipeline, the
+  expected result since `buildAssetTree()` never runs anywhere near
+  render(). Inspected as a screenshot: the Assets panel shows two real,
+  collapsed tree rows labeled `models` and `textures` (each with a real
+  expand arrow) in place of the old placeholder sentence, docked in its
+  original Phase 14a position beneath the Scene panel.
+
+### Phase 15e: Save Scene
+
+Every phase from 8b onward built real, live-editable ECS state -- Transform
+drags (14e), Create-menu entities (14f), Point/Directional Light and Camera
+components (15a-15c) -- and every one of them vanished the instant the
+process exited. `saveScene()` has existed since Phase 8b
+(`scene_serialization.hpp`/`scene_loader.cpp`), but nothing in this engine's
+UI had ever called it: `loadScene()` ran once, at startup, and that was the
+only place scene serialization was ever exercised. This phase closes that
+gap -- comparing this engine against what Blender/Unity treat as completely
+foundational, "save the file" is not an optional editor feature, it is the
+feature that makes every other editing feature in Phase 14/15 worth having
+at all.
+
+- **A real Save action, two trigger paths, one implementation.**
+  `Application::saveCurrentScene()` (`application.cpp`) is the single real
+  production function -- it calls `saveScene(registry_, kDefaultScenePath,
+  activeDirectionalLight_.value_or(EntityId()))` and `LOG_INFO`s the result.
+  Three call sites all reach it, the same "debug env var / UI action both
+  call the exact same function" precedent every `ENGINE_DEBUG_CREATE`/
+  `ENGINE_DEBUG_FORCE_STATIC`/etc. value already established:
+  - **Ctrl+S**, checked once per frame in `run()`. Deliberately NOT routed
+    through `inputActionMap_`/`InputState` the way every other action in
+    this class is (including Escape, which IS routed through
+    `InputActionMap::isDown(InputAction::Quit)` despite reading like a raw
+    key check at first glance) -- `input_action_map.hpp`'s own bindings are
+    an OR of alternate single keys for ONE action (e.g. `MoveUp`'s
+    Space-or-E), never an AND of simultaneous keys, and a chord is exactly
+    what Ctrl+S needs. Widening `InputActionMap` to support chords for this
+    one action would be speculative machinery this codebase's own "smallest
+    correct increment" discipline avoids (the identical instinct
+    `physics.hpp`'s own `RigidBody` mass-field comment applies elsewhere) --
+    there is no second chord anywhere else in this engine to design that
+    abstraction against yet. Save is also, semantically, an editor-chrome
+    action, not one of the six camera/window-lifecycle actions
+    `InputActionMap` actually exists to bind. So this is a small,
+    self-contained, edge-triggered (`ctrlSWasDown_`, `application.hpp`) two-
+    key read directly against `window_.isKeyPressed()` instead -- the exact
+    same public method `input_action_map.cpp`'s own `update()` already calls
+    internally, just invoked here directly rather than through that class.
+  - **File > Save Scene**, this engine's first-ever menu bar
+    (`editor_ui.cpp`'s `renderDockspaceShell()`, via `ImGui::
+    BeginMainMenuBar()`). A bare Ctrl+S with zero on-screen affordance would
+    be genuinely undiscoverable in an editor that had no menu bar of any
+    kind before this phase, so this adds the smallest visible surface that
+    fixes that -- one menu, one item -- not a speculative full
+    File/Edit/View/Window structure this engine has no other actions to
+    populate yet. `renderDockspaceShell()` gains one new `bool&
+    saveSceneRequested` out-parameter (unconditionally reset to `false`,
+    then set `true` only if the item was clicked this frame), mirroring
+    `CreateEntityKind`'s own "EditorUI reports intent, Application acts on
+    it" shape -- EditorUI still owns no `ResourceManager`/`registry_` to
+    save from itself. `ImGui::BeginMainMenuBar()` runs BEFORE
+    `DockSpaceOverViewport()` in the same frame so its own reservation of
+    the main viewport's work area (shrinking `WorkPos`/`WorkSize` by the
+    menu bar's height) is already in effect when `DockSpaceOverViewport()`
+    reads that same rect -- confirmed visually (see Verify below), not just
+    assumed.
+  - **`ENGINE_DEBUG_SAVE_SCENE=1`**, checked last of all the constructor's
+    `ENGINE_DEBUG_*` blocks (after CREATE/SELECT/FORCE_STATIC/
+    FORCE_DYNAMIC/DELETE), the same "reads as the last word" ordering
+    `ENGINE_DEBUG_DELETE`'s own comment already explains -- so one headless
+    run can create/select/force/delete entities and then prove Save Scene
+    persists whatever `registry_` ends up holding by the time the
+    constructor returns.
+- **Schema extension, following the exact existing `rigidBody`/`collider`
+  pattern.** `SceneEntityRecord` (`scene_serialization.hpp`) gains three new
+  independently opt-in blocks -- `pointLight`, `directionalLight`, `camera`
+  -- each with its own `has*` flag and per-field defaults duplicated
+  verbatim from `PointLight{}`/`DirectionalLight{}`/`CameraComponent{}`'s
+  own struct defaults (no `#include` of `light.hpp`/`camera_component.hpp`
+  in this pure-data header, the same "match the literal, don't add the
+  dependency" choice `hasRigidBody`'s fields already made for
+  `physics.hpp`). `parseSceneRecords()`/`writeSceneRecords()`
+  (`scene_serialization.cpp`) parse/write each block with the identical
+  present-means-opt-in, absent-field-means-component-default,
+  present-but-malformed-throws contract every existing block already has,
+  reusing `readVec3`/`readFloat`/`readBool` unchanged. `scene_loader.cpp`'s
+  `loadScene()`/`saveScene()` turn these into/out of real `PointLight`/
+  `DirectionalLight`/`CameraComponent` components, the same opt-in-per-entity
+  treatment `RigidBody`/`Collider` already get.
+- **The active directional light round-trips too, via an in-band marker, not
+  a new top-level field.** A saved-and-reloaded Directional Light entity
+  that was driving `uLightDirection`/`uLightColor` before saving needs to
+  become active again on load, or every save would silently revert the
+  scene to `kLightDirection`/`kLightColor`'s fixed fallback the next time it
+  loads -- exactly the regression this phase exists to prevent. Rather than
+  a new `"activeDirectionalLight": "some_name"` top-level field (which would
+  need its own second-pass name resolution exactly like `"parent"` does, for
+  a value that only ever makes sense attached to an entity that already has
+  a `directionalLight` block), the marker lives IN that block: `"active":
+  true`, defaulting to `false` when absent. `loadScene()` gains an optional
+  `EntityId* activeDirectionalLightOut` parameter -- reset to an invalid
+  `EntityId` up front, then set to whichever record's freshly-created entity
+  had `"active": true` (the LAST such record in file order wins if more than
+  one sets it, the identical "last one wins" tolerance `idByName`'s own
+  duplicate-name handling already has, not a schema error -- every
+  referenced concept unambiguously exists, it's just an authored file with
+  more than one candidate). `Application`'s constructor passes
+  `&loadedActiveDirectionalLight` and assigns `activeDirectionalLight_` from
+  it, so a reloaded active sun is active again with no special-casing
+  anywhere else in `render()`. `saveScene()` gains an `EntityId
+  activeDirectionalLight` parameter (the caller's current
+  `activeDirectionalLight_`, or a default-constructed invalid `EntityId`
+  when there is none) and marks exactly the matching entity's own record
+  `"active": true`, every other `DirectionalLight` entity `false`.
+- **`scene_serialization.hpp` forward-declares `EntityId`** (the same
+  pattern `light.hpp` already established for `resolveActiveDirectionalLight()`)
+  purely for these two new parameters' signatures -- the file still has zero
+  `ecs.hpp`/GL dependency, unchanged from every prior phase.
+- **Deliberately not done this phase** (the same "smallest correct
+  increment" discipline every phase in this arc has followed): **Save As** /
+  a new-file-path dialog -- this engine has no native file-dialog library
+  integrated at all, and picking/vendoring one is real, separate scope of
+  its own. **An "unsaved changes" indicator or prompt-before-quit** -- would
+  need dirty-tracking this engine has nowhere else (no undo/redo either, see
+  below), and ESC/window-close already exit unconditionally; adding a
+  confirmation dialog is a UI feature with its own design questions
+  (modal? which panel owns it?) this phase doesn't need to answer to close
+  its own actual gap. **Auto-save.** **Undo/redo.** **Multiple scene files /
+  a scene-switching UI** -- Save always targets the one file this process
+  loaded from (`kDefaultScenePath`, `assets/scenes/default.json` today,
+  matching `loadScene()`'s own hardcoded call site since Phase 8b); there is
+  still exactly one scene file this engine ever reads or writes.
+- **Verify**: a rebuild (`cmake --build build -j`) compiles with **zero new
+  warnings** under `-Wall -Wextra`. `ctest` reports **9/9**
+  (`scene_serialization_test` extended with a Point Light entity, an active
+  Directional Light entity, an inactive second Directional Light entity, and
+  a Camera entity, each with every field deliberately set to a non-default
+  value and round-tripped write-then-read exactly). The real, literal
+  save-then-reload proof (`tools/run_headless.sh`, restoring
+  `assets/scenes/default.json` to its original committed content between
+  every step so the repo's own checked-in baseline stays untouched):
+  1. `ENGINE_MAX_FRAMES=60 ENGINE_DEBUG_CREATE=pointlight
+     ENGINE_DEBUG_SELECT="Point Light" ENGINE_DEBUG_SAVE_SCENE=1` logs
+     `Created entity "Point Light" (index 3) via the Scene panel's Create
+     menu` followed by `Saved scene to
+     ".../build/assets/scenes/default.json"`, zero `[ERROR]` lines.
+     Inspecting the written file directly (`cat`, not just trusting the log
+     line) shows a fourth `entities[]` object, `"name": "Point Light"`, with
+     a real `"pointLight"` block (`"color": [1.0, 1.0, 1.0], "constant":
+     1.0, "linear": 0.699999988079071, "quadratic": 1.7999999523162842]` --
+     `PointLight{}`'s own defaults) and a `"transform"` block whose position
+     matches the Create-menu's own in-front-of-camera placement heuristic.
+  2. A SECOND, wholly independent run -- no `ENGINE_DEBUG_CREATE`/
+     `ENGINE_DEBUG_SAVE_SCENE` at all, just `ENGINE_MAX_FRAMES=60
+     ENGINE_SHOW_DEBUG_UI=1 ENGINE_DEBUG_SELECT="Point Light"` against the
+     now-modified file -- logs `ENGINE_DEBUG_SELECT="Point Light":
+     pre-selecting entity 3` (proof `findEntityByName()` found it, i.e. it
+     really was reconstructed from the file, not left over from the first
+     process) and clustered-lighting occupancy matching the first run's own
+     post-creation reading exactly (2153/2304 clusters occupied, avg
+     4.436600 lights/occupied cluster, vs. 2136/2304 before the light
+     existed) -- the identical "the new light is really reaching the
+     cluster culler" proof Phase 15a's own Verify section used, now
+     achieved from a save/reload round trip instead of same-process
+     creation. Zero `[ERROR]` lines. The screenshot shows the Scene Entities
+     list including `Point Light` alongside `parented_demo_cube`/`scene`/
+     `falling_cube`, the Inspector showing it selected with a live Transform
+     matching the saved position and a "Light" section, and the same bright
+     hotspot in the Viewport the original creation produced.
+  3. The same create-save-reload cycle repeated for `directionallight`
+     (`ENGINE_DEBUG_CREATE=directionallight ENGINE_DEBUG_SAVE_SCENE=1`) --
+     the saved file's `"directionalLight"` block reads `"active": true`
+     verbatim. The independent reload run's screenshot differs from the
+     plain baseline by 124,559 of 480,000 pixels (`compare -metric AE`) --
+     a real, large, unmistakable lighting change, not noise -- direct proof
+     `resolveActiveDirectionalLight()` picked the reloaded entity back up as
+     active rather than silently falling back to `kLightDirection`/
+     `kLightColor`. And for `camera` (`ENGINE_DEBUG_CREATE=camera
+     ENGINE_DEBUG_SAVE_SCENE=1`) -- the saved file's `"camera"` block reads
+     `{"farPlane": 100.0, "fovYDeg": 60.0, "nearPlane":
+     0.10000000149011612}`, `CameraComponent{}`'s own defaults verbatim.
+  4. After every inspection step above, `assets/scenes/default.json` was
+     restored to its original committed content (`git checkout --`) before
+     the next step ran; `git diff -- assets/scenes/default.json` shows
+     nothing at the end.
+  5. A plain baseline (`ENGINE_MAX_FRAMES=60`, no debug env vars) against
+     the restored `default.json` logs clustered-lighting occupancy 2136 ->
+     2153/2304 clusters occupied, avg 3.565543 -> 3.580121 lights/occupied
+     cluster, deterministic and reproducible across repeated runs (not
+     noise) -- close to, but not byte-identical with, Phase 15a-15d's own
+     recorded 2136 -> 2155/2304, avg ... -> 3.581903 baseline. Tracked down,
+     not shrugged off: this phase's own new menu bar reserves screen space
+     at the top of the main viewport (`ImGui::BeginMainMenuBar()`'s own
+     `WorkPos`/`WorkSize` adjustment, see above), so the Viewport panel's
+     reported content region shrinks from Phase 15d's own logged `431x565`
+     to this phase's `431x546` -- 19 fewer pixels tall, the menu bar's own
+     height. That one-frame-late aspect-ratio nudge (`viewportWidth_`/
+     `viewportHeight_`, see `editor_ui.hpp`'s own comment on why viewport
+     sizing is always one frame stale) is enough to shift a couple of
+     cluster boundaries in `ClusterLightCuller`'s per-frame AABB rebuild --
+     2 clusters out of 2304 (0.09%) and a correspondingly tiny shift in the
+     average. This is an expected, deliberate consequence of adding visible
+     UI chrome, not a regression in the lighting/physics/scene-loading code
+     this phase actually touches (which is otherwise a complete no-op for
+     `assets/scenes/default.json`'s own three pre-existing entities -- none
+     of them has a `pointLight`/`directionalLight`/`camera` block, so every
+     new `if (record.has...)` branch this phase added is simply never taken
+     for them). Frustum culling still reads `1/14 -> 0/14` drawables culled,
+     matching Phase 15c/15d's own recorded baseline exactly.
+
+### Phase 15f: Material assignment
+
+The Material Inspector's "Browse..." button had been `BeginDisabled()`'d
+since Phase 14e first built the panel -- its own comment already named the
+exact reason why: a `ModelComponent::model` is a cached, shared
+`std::shared_ptr<Model>` (`ResourceManager::getModel()`, keyed by asset
+path), so every entity that loads the same path shares the exact same
+`Model`, and therefore the exact same `Material` instances Model owns by
+value. Mutating one entity's diffuse texture through the Inspector would
+have silently repainted every other entity sharing that cached `Model` --
+not a hypothetical hazard: this project's own default scene already has
+`falling_cube` and `parented_demo_cube` both loading
+`assets/models/falling_cube.obj`. Phase 15d's own Asset Browser (a real file
+tree over `assets/textures/`) made the missing half of this feature obvious
+-- there was finally something to pick a texture FROM -- but 15d's own
+"Deliberately not done this phase" list explicitly left the Inspector wiring
+for a later phase, precisely because the shared-cache hazard needed a real
+design decision, not a quick wire-up. This phase makes that decision and
+closes the gap.
+
+- **The architectural decision: a per-entity `MaterialOverride` component,
+  not clone-on-edit.** Two designs were on the table (see
+  `include/engine/material_override.hpp`'s own header comment for the full
+  writeup):
+  - **(a) Per-entity override (chosen).** A new, genuinely separate
+    `MaterialOverride` component (`std::shared_ptr<Texture>
+    diffuseTexture` + `std::string diffuseTexturePath`) that, when present
+    on an entity AND non-null, wins over that entity's `ModelComponent::
+    model`'s own baked-in diffuse texture for exactly that entity's own draw
+    call -- resolved by one small, pure function,
+    `resolveDiffuseTextureOverride(registry, id)`. The shared, cached
+    `Model`/`Material` is never mutated: `Material::bind()` grew an optional
+    `const Texture* diffuseOverride` parameter that shadows
+    `diffuseTexture_` for the duration of one call without ever writing to
+    it, and `Model::draw()`/`drawNode()` thread that same optional pointer
+    straight through to every mesh's `bind()` call. `Application::render()`'s
+    `ModelComponent` draw loop calls `resolveDiffuseTextureOverride()` once
+    per entity, so an override on `falling_cube` can never leak into
+    `parented_demo_cube`'s own, separate `draw()` call later in the same
+    loop, even though both calls read the identical shared `Model`.
+    `ResourceManager`'s cache itself is completely untouched -- `getModel()`/
+    `getTexture()` still hand back the exact same shared instances they
+    always have; this override is pure, additive ECS-side state layered on
+    top.
+  - **(b) Clone-on-first-edit (rejected).** Deep-copy the entity's `Model`
+    (or just its `Material`) out of the cache the first time it's edited, so
+    it stops aliasing the shared original. Checked directly against what's
+    actually in `model.hpp`/`material.hpp` before deciding, per this
+    project's own "read first" discipline: both classes are deliberately
+    move-only (`Model(const Model&) = delete`, same for `Material`), each
+    with its own header comment explaining that's a considered choice, not
+    an oversight -- "nothing here currently needs to copy a Material, so the
+    safer/more consistent default... is kept rather than opening that door
+    speculatively." Building this option would mean adding a real
+    copy/clone operation to two GL-resource-owning classes purely to serve
+    one Inspector button, AND would break `ModelComponent::path`'s existing
+    contract (`ecs.hpp`'s own comment: "the asset path `model` was loaded
+    from... a *reloadable* reference") the moment an entity's `Model`
+    diverged from what its own path would reload -- a real complication for
+    Phase 15e's scene serialization, exactly as this phase's own brief
+    predicted. (a) sidesteps both problems entirely, and is a smaller,
+    additive change that fits this codebase's own "smallest correct
+    increment" discipline far better.
+- **Scope: diffuse texture only, `tint`/`shininess` stay read-only,
+  explicitly.** The exact same shared-cache hazard this whole phase exists
+  to solve applies to `tint`/`shininess` too, and the Asset Browser this
+  phase's picker reuses has nothing analogous to "browse for a tint" -- there
+  is no file to pick. Extending `MaterialOverride` with optional
+  tint/shininess fields (plus a plain `ColorEdit3`/`DragFloat` pair writing
+  into them, reusing `bind()`'s own override-argument shape) is the natural
+  next slice, not something this phase's own "Browse..." brief asked for --
+  see `material.hpp`'s own updated Phase 14e comment and the in-panel text
+  itself, which now names the diffuse texture as the one field that's safe
+  to change and says why the other two still aren't.
+- **The Inspector's Material section, made real
+  (`editor_ui.cpp`/`editor_ui.hpp`).** "Browse..." now opens a real popup
+  (`ImGui::OpenPopup("Choose Diffuse Texture")` /
+  `renderTextureBrowsePopup()`) listing every file under
+  `assets/textures/` as a flat `ImGui::Selectable()` list inside a small
+  fixed-size scrolling child -- deliberately not a nested tree or a
+  searchable/filterable control, matching this phase's own "just a working
+  list" brief (drag-and-drop is separate, future Phase 15g scope, exactly as
+  called out). The list is built by walking `assetTree_`, Phase 15d's own
+  already-built forest (`collectTextureFiles()`), not by re-walking the
+  filesystem a second time. Clicking an entry doesn't touch
+  `ResourceManager`/`registry` directly -- `EditorUI` still owns neither
+  (the same "just a Dear ImGui wrapper over data Application owns" role this
+  class has had since Phase 14a) -- it reports the picked path back through
+  `renderDockspaceShell()`'s new `textureAssignRequested` out-parameter, the
+  identical "EditorUI reports intent, Application acts on it" shape
+  `saveSceneRequested`/`CreateEntityKind` already established.
+  `Application::render()` is what turns a non-empty result into a real
+  `resources_.getTexture()` call and a `MaterialOverride` component on
+  `selectedEntity_`, right after `renderDockspaceShell()` returns. The
+  Material section's texture readout now prefers this entity's own override
+  (if present) over the shared `Model`'s baked-in texture -- the identical
+  "override wins if present, else fall back" rule
+  `resolveDiffuseTextureOverride()` applies at draw time, just read here for
+  display -- tagged `[override]` when it's showing one, with a "Clear
+  Override" button (`registry.removeComponent<MaterialOverride>(id)`) next
+  to it so a user isn't left with no way back to the shared material once
+  they've assigned one.
+- **`ENGINE_DEBUG_ASSIGN_TEXTURE=<entity name>:<texture path>`
+  (`application.cpp`)**, unset by default -- the debug-env-var counterpart
+  to the real "Browse..." popup, following this project's established "a
+  debug env var calls the exact same function/does the exact same thing the
+  real UI action does" precedent every other `ENGINE_DEBUG_*` var already
+  sets. Placed in the constructor after `ENGINE_DEBUG_DELETE` (so it can
+  target an entity `CREATE`/`SELECT`/`FORCE_STATIC`/`FORCE_DYNAMIC`/`DELETE`
+  just acted on within the same run) and before `ENGINE_DEBUG_SAVE_SCENE`
+  (so one headless run can assign an override AND prove it survives a save,
+  in one process). The texture path uses the same relative,
+  `resolveAssetPath()`-at-the-call-site convention every other asset path in
+  this engine already uses. An unresolvable entity name, a missing `:`
+  separator, or a texture that fails to load are all handled with a
+  `LOG_WARN`/`LOG_ERROR` and the run continues -- confirmed directly (see
+  Verify below), not just assumed.
+- **Round-trips through Save Scene, from this phase's own start -- not
+  deferred the way `pointLight`/`directionalLight`/`camera` were
+  (`scene_serialization.hpp`/`.cpp`, `scene_loader.cpp`).** Those three were
+  left out of the schema for a phase or two after each component existed
+  because, at the time, nothing yet wrote one through the editor.
+  `MaterialOverride` is different: it's created directly by a live Inspector
+  action the SAME phase it's introduced, so leaving it unserialized would
+  mean Save Scene silently discarding a user's own just-made edit -- a real,
+  immediately user-visible regression, not a "nothing exercises this yet"
+  gap. So `SceneEntityRecord` gains `hasMaterialOverride` +
+  `materialOverrideDiffuseTexturePath`, and the schema gains one more
+  independently opt-in `"materialOverride"` block
+  (`{"diffuseTexture": "assets/textures/foo.png"}`), following the exact
+  `has*`-flag pattern every prior block already established -- with one
+  deliberate difference: unlike `"rigidBody": {}` or `"pointLight": {}`,
+  which are valid, meaningfully-defaulted empty blocks,
+  `"materialOverride"`'s own `"diffuseTexture"` field is REQUIRED once the
+  block is present, since there is no meaningful "empty override" default
+  the way every other block has one. `loadScene()`/`saveScene()`
+  (`scene_loader.cpp`) turn this into/out of a real `MaterialOverride`
+  component the identical way `modelPath`/`ModelComponent::path` already do
+  for the model itself (`resolveAssetPath()` then `resources.getTexture()`
+  on load; the stored relative path, verbatim, on save) -- `saveScene()`
+  only ever writes the block when `diffuseTexture` is actually non-null,
+  matching `resolveDiffuseTextureOverride()`'s own "null means no override"
+  contract exactly, so a stray empty `MaterialOverride` a future caller
+  might add never round-trips as a schema-invalid empty block.
+- **Test coverage, matching this project's established "pure logic function,
+  unit-tested in isolation" pattern.** `resolveDiffuseTextureOverride()`
+  (`material_override.hpp`/`.cpp`) is exactly this phase's own version of
+  `light.cpp`'s `resolveActiveDirectionalLight()`/`collectPointLights()` --
+  a small, pure ECS-pool lookup with no GL/rendering dependency at all, so
+  `tests/material_override_test.cpp` exercises "does entity X's material
+  come from its own override or the shared Model's" (an entity with no
+  `MaterialOverride`; one with a real override; a sibling entity that never
+  had one added, proving no cross-entity leakage; one with a
+  `MaterialOverride` present but a null `diffuseTexture`, proving that
+  correctly still resolves to "no override"; and two simultaneously
+  overridden entities resolving independently) without a live GL context, a
+  real loaded `Texture`, or a Dear ImGui frame -- a custom no-op-deleter
+  `std::shared_ptr<Texture>` aliasing a fake, non-null sentinel address
+  proves pointer identity round-trips correctly without a real,
+  GPU-resident `Texture` object anywhere in the test binary (`Texture`
+  itself needs a live GL context to construct for real). `tests/
+  scene_serialization_test.cpp` gained a tenth fabricated entity (a
+  `materialOverride` block written TOGETHER with a `model` block, the real
+  shape an Inspector-assigned override actually appears in) plus two new
+  malformed-input cases (`"materialOverride"` present but not an object;
+  present but missing its required `"diffuseTexture"` field).
+- **Deliberately NOT done this phase**, the same conservative default this
+  whole project's "smallest correct increment" discipline expects:
+  **drag-and-drop** (a real, separate, much bigger feature -- Phase 15g, per
+  Phase 15d's own already-recorded plan); **tint/shininess editing** (see
+  above -- the identical shared-cache hazard still applies, and the Asset
+  Browser this picker reuses has nothing to browse for a color/scalar with);
+  **a "Save As new material" / material-asset-library concept** (this
+  engine has no standalone material-asset type at all -- Phase 15d's own
+  header comment already notes materials live inline in each model's
+  `.mtl` file, not as a placeable asset kind `ResourceManager` caches on its
+  own); **any change to `ResourceManager`'s own caching model** (no
+  conditional caching, no cache invalidation -- the override layers on top
+  of the existing get-or-load cache exactly as it always worked, never
+  reaches into it); **thumbnails in the texture picker** (the identical
+  "own GPU-upload/caching cost profile, real separate feature" reasoning
+  Phase 15d's own header comment already gives for not thumbnailing the
+  Assets panel itself, restated here for a second picker built directly on
+  top of that same tree).
+- **Post-15f bug-review fix: the override applied to EVERY mesh in a
+  multi-mesh entity, not just the one the Inspector shows.** The first-pass
+  `Model::drawNode()` (`model.cpp`) forwarded `diffuseTextureOverride`
+  unconditionally to every mesh in the whole node subtree, with no per-mesh
+  scoping at all. The Inspector's own Material section only ever displays
+  `Model::primaryMaterial()` -- one representative sample, per that method's
+  own pre-existing comment -- but `assets/models/scene.obj` (the default
+  scene's own "scene" entity) has 3 meshes/4 materials (Table, Box, Pyramid,
+  each visually distinct: brown/black-striped, solid blue, red/black
+  checker). Reviewer reproduced it directly: selecting "scene" in the
+  Inspector and assigning ANY texture override silently replaced the
+  Pyramid's AND the Box's own materials too, even though the Inspector never
+  showed the user more than one texture, and never implied a "Browse..."
+  pick would retexture three unrelated meshes at once. Fixed by scoping the
+  override to apply ONLY to the exact mesh `primaryMaterial()` itself reads
+  from -- a new `Model::kPrimaryMeshIndex` private `static constexpr`
+  (`model.hpp`, always `0`, i.e. `meshes_[0]`, matching
+  `primaryMaterial()`'s own existing "whichever mesh Assimp reported first"
+  behavior) is now the one shared source of truth both `primaryMaterial()`
+  and `drawNode()`'s override check read, so "the mesh the override affects"
+  and "the mesh the Inspector displays" can never independently drift apart.
+  `drawNode()` now passes `diffuseTextureOverride` to `Material::bind()`
+  only when `meshIndex == kPrimaryMeshIndex`; every other mesh in the same
+  node/subtree draws with `nullptr` -- its own original, untouched Material
+  -- regardless of what override is active for that entity.
+  A GL-free unit test isn't feasible for this specific bug (it's about
+  actual per-mesh draw-call behavior in `Model::drawNode()`, which needs a
+  live GL context to even construct a `Mesh`/`Model` -- unlike
+  `resolveDiffuseTextureOverride()`, which is pure ECS-pool lookup with no
+  GL dependency at all and already has `material_override_test.cpp`
+  coverage), so this is verified via a headless screenshot/pixel-diff proof
+  instead -- see "Verify" below for the exact repro and results.
+- **Verify**: `cmake --build build -j"$(nproc)"` compiles with **zero new
+  warnings** under `-Wall -Wextra`. `ctest` reports **10/10**
+  (`material_override_test` new; `scene_serialization_test` extended as
+  described above). `tools/run_headless.sh` proof, run against this
+  project's own real `assets/scenes/default.json` (never modified in the
+  repo -- `git diff -- assets/scenes/default.json` shows nothing at the end,
+  confirmed directly):
+  1. A plain baseline (`ENGINE_MAX_FRAMES=60`, no debug vars) logs
+     clustered-lighting occupancy `2136 -> 2153/2304` clusters occupied, avg
+     `3.565543 -> 3.580121` lights/occupied cluster and frustum culling
+     `1/14 -> 0/14` drawables culled -- byte-identical to Phase 15e's own
+     recorded baseline, zero `[ERROR]` lines -- direct confirmation this
+     phase's changes are a complete no-op for the normal, no-override case
+     (every new `resolveDiffuseTextureOverride()` call in the render loop
+     returns `nullptr` for every entity in this file, since none of its
+     three entities has a `materialOverride` block).
+  2. **The critical sibling-non-corruption proof.**
+     `ENGINE_MAX_FRAMES=10 ENGINE_DEBUG_ASSIGN_TEXTURE="falling_cube:
+     assets/textures/rusted_metal_albedo.png" ENGINE_DEBUG_SELECT=
+     "falling_cube"` logs `ENGINE_DEBUG_ASSIGN_TEXTURE: entity
+     "falling_cube" now overrides its diffuse texture with
+     "assets/textures/rusted_metal_albedo.png"`, zero `[ERROR]` lines, and
+     clustered-lighting occupancy unchanged from the plain baseline (a
+     texture swap touches nothing about light clustering, as expected). The
+     screenshot shows the Inspector's Material section for `falling_cube`
+     reading `Texture: .../rusted_metal_albedo.png (256x256) [override]`,
+     with both "Browse..." and "Clear Override" now real, enabled buttons.
+     A SECOND, independent run against the exact same
+     `ENGINE_DEBUG_ASSIGN_TEXTURE` but `ENGINE_DEBUG_SELECT=
+     "parented_demo_cube"` instead -- the sibling entity that loads the
+     IDENTICAL `assets/models/falling_cube.obj` and therefore points at the
+     exact same cached `Model`/`Material` -- shows that entity's own
+     Material section reading `Texture: .../checker.png (256x256)`, with NO
+     `[override]` tag and no "Clear Override" button, i.e. completely
+     unaffected by the override assigned to its sibling in the same run.
+     This is the exact hazard this whole phase's design exists to solve,
+     and it's confirmed to actually hold, not just architecturally argued
+     for.
+  3. **The save/reload round-trip proof**
+     (`tools/run_headless.sh`, restoring the build directory's own copy of
+     `default.json` between steps -- `assets/scenes/default.json` under
+     `build/` is a plain `POST_BUILD`-copied file, confirmed distinct from
+     the repo's own checked-in copy, which this whole run never touches).
+     `ENGINE_DEBUG_ASSIGN_TEXTURE="falling_cube:assets/textures/
+     rusted_metal_albedo.png" ENGINE_DEBUG_SAVE_SCENE=1` logs `Saved scene
+     to ".../build/assets/scenes/default.json"`; inspecting the written file
+     directly (not just trusting the log line) shows a real
+     `"materialOverride": {"diffuseTexture":
+     "assets/textures/rusted_metal_albedo.png"}` block on exactly the
+     `falling_cube` entity's own record, and NO such block on
+     `parented_demo_cube`'s -- the override that only ever applied to one
+     entity in memory is written back out attached to only that same one
+     entity. A SECOND, wholly independent run -- no
+     `ENGINE_DEBUG_ASSIGN_TEXTURE` at all, just `ENGINE_MAX_FRAMES=10
+     ENGINE_DEBUG_SELECT="falling_cube"` against the now-modified file --
+     logs zero `[ERROR]`/`[WARN]` lines, and its own screenshot shows the
+     Inspector's Material section for the reloaded `falling_cube` reading
+     the identical `.../rusted_metal_albedo.png (256x256) [override]` --
+     direct proof `loadScene()` reconstructs a real `MaterialOverride`
+     component from disk, not just that `saveScene()` wrote plausible-
+     looking JSON.
+  4. Robustness, run and confirmed rather than assumed:
+     `ENGINE_DEBUG_ASSIGN_TEXTURE="nonexistent_entity:assets/
+     textures/checker.png"` logs a `LOG_WARN` ("does not match any entity's
+     name") and the run still completes normally;
+     `ENGINE_DEBUG_ASSIGN_TEXTURE="falling_cube:assets/textures/
+     does_not_exist.png"` logs `Texture`'s own `[ERROR]` (the identical
+     failure `Model`'s own texture loading already surfaces for a bad path)
+     followed by this phase's own `LOG_WARN`, and the run still completes
+     normally with no override actually installed;
+     `ENGINE_DEBUG_ASSIGN_TEXTURE="malformed_no_colon"` (no `:` separator)
+     logs a `LOG_WARN` naming the expected format and is otherwise ignored.
+     None of the three crashes or hangs.
+  5. **The multi-mesh scoping proof (post-bug-review)**, reproducing the
+     reviewer's own repro exactly: `ENGINE_DEBUG_ASSIGN_TEXTURE="scene:
+     assets/textures/scuffed_plastic_albedo.png"` against the `"scene"`
+     entity (3 meshes/4 materials -- Table/Box/Pyramid). Two `ENGINE_MAX_
+     FRAMES=5` runs against the identical unmodified `default.json` (one
+     plain, one with the override) are compared pixel-for-pixel
+     (`compare -metric AE`, ImageMagick) over three hand-picked crop regions
+     of the same two screenshots: the Pyramid's own checker body (interior
+     only, clear of any table-boundary pixels), the Box's own top face
+     (interior only, same), and the Table's own visible top surface. A
+     control comparison (two INDEPENDENT plain-baseline runs, no override on
+     either) established the noise floor for this headless/software-render
+     setup first -- **0** pixels differ in all three crop regions between two
+     unmodified runs, confirming llvmpipe rendering here is fully
+     deterministic run-to-run at this frame count, so any nonzero diff below
+     is real, not timing noise. Result: Pyramid interior **0** px differ,
+     Box top-face interior **0** px differ -- both entities' own materials
+     are byte-identical whether or not `"scene"` has an active override --
+     while the Table's own visible surface differs across **5,675 of 8,800**
+     px in its crop (the dark brown/black-striped wood-grain material
+     visibly replaced by the assigned texture, tinted by Table's own `Kd`).
+     (An earlier, looser pair of crops that happened to also catch a sliver
+     of the Table's own cast-shadow boundary showed small nonzero diffs
+     there too -- correctly re-attributed to the Table's own pixels, not the
+     Pyramid's/Box's, once the crop bounds were tightened to each mesh's
+     own interior; the noise-floor control above is what confirms that
+     re-attribution rather than just asserting it.) This directly confirms
+     the fix: assigning an override to a multi-mesh entity now changes
+     ONLY the mesh `primaryMaterial()` itself shows in the Inspector, never
+     any other mesh sharing that entity.
+  6. **The original sibling-non-corruption proof (item 2 above) re-confirmed
+     unaffected by this fix**: re-run verbatim after the `kPrimaryMeshIndex`
+     fix, same commands, same results (`falling_cube` shows `[override]`
+     `rusted_metal_albedo.png`; `parented_demo_cube` shows the plain
+     `checker.png`, unaffected) -- expected, since `falling_cube.obj` is a
+     single-mesh model (this fix only changes behavior for a model with MORE
+     than one mesh) and the fix touches only `drawNode()`'s own per-mesh
+     override-forwarding, nothing about `resolveDiffuseTextureOverride()` or
+     the ECS/serialization layers the sibling proof exercises.
+
+### Phase 15g: Drag-and-drop
+
+The last item in the Phase 15 arc, and a gap this arc has been explicitly
+naming since Phase 15d first built the Assets panel: no drag-and-drop exists
+anywhere in this engine's UI. Phase 15d's own "Deliberately not done this
+phase" list called it out by name ("Drag-and-drop into the Scene/Viewport...
+no drag-and-drop exists anywhere in this engine's UI today, and building the
+first one as a side effect of an Asset Browser phase would bury a
+substantial new capability inside what should be a read-only browsing
+phase"), and Phase 15f's own list repeated the same forward pointer
+("drag-and-drop (a real, separate, much bigger feature -- Phase 15g, per
+Phase 15d's own already-recorded plan)"). This is that phase: dragging an
+asset from the real, read-only file tree Phase 15d built (`asset_browser.hpp`)
+into the Viewport, the interaction pattern this whole arc's roadmap named
+from the start as Blender's own primary Asset Browser gesture. Built entirely
+on top of two mechanisms that already exist and are left otherwise untouched
+-- Phase 14f's `spawnEntityFromCreateMenu()` for entity creation, and Phase
+15f's `MaterialOverride` component for texture assignment -- not a third,
+parallel way of doing either.
+
+- **Two changes, one shared payload convention.** Every row
+  `renderAssetTreeNode()` draws (`editor_ui.cpp`, Phase 15d) is now also a
+  real Dear ImGui drag source (`ImGui::BeginDragDropSource()`/
+  `SetDragDropPayload()`/`EndDragDropSource()` -- confirmed against the
+  actual vendored `build/_deps/imgui-src/imgui.h`, `v1.92.9b-docking` per
+  `CMakeLists.txt`'s own `GIT_TAG`, rather than assumed from general ImGui
+  knowledge, per this phase's own brief), carrying its own assets/-relative
+  path (`"assets/" + node.relativePath`, the identical
+  `ModelComponent::path`/`MaterialOverride::diffuseTexturePath` string form
+  `renderTextureBrowsePopup()`'s own Phase 15f convention already
+  established) as one flat, null-terminated payload string under a single
+  type tag, `"ASSET_PATH"`. Deliberately uniform across files AND folders --
+  every row, not just leaf files, is a drag source, matching this phase's own
+  brief verbatim -- rather than special-cased per `node.isDirectory`: this
+  function's job is drawing one row, not deciding what a drop of it means
+  downstream. The Viewport panel's `ImGui::Image()` (Phase 14c) is now a
+  matching drop target (`BeginDragDropTarget()`/`AcceptDragDropPayload()`/
+  `EndDragDropTarget()`), reported back through
+  `renderDockspaceShell()`'s new `assetDropRequested` out-parameter -- the
+  identical "EditorUI reports intent, Application acts on it" shape
+  `createRequest`/`textureAssignRequested`/`saveSceneRequested` already
+  establish. EditorUI itself does no classification of what was dropped; see
+  below for why that's a deliberately separate, pure function instead.
+- **Classification is its own small, GL-free pure function, not inline string
+  matching in `editor_ui.cpp` or `application.cpp`.** `asset_drop.hpp`/
+  `asset_drop.cpp` (new) add `classifyAssetDropPath()` (which of
+  `AssetDropCategory::kModel`/`kTexture`/`kUnrecognized` a dropped
+  assets/-relative path names, by top-level folder -- the identical
+  "browsable category = which of assets/models/ or assets/textures/" concept
+  `asset_browser.hpp`'s own allowlist already established, NOT a
+  per-extension check) and `modelBaseNameFromAssetPath()` (the short display
+  name a freshly dropped model's own entity gets, e.g.
+  `"falling_cube.obj"` -> `"falling_cube"`). Both depend on nothing beyond
+  `<string>` -- the same "small, pure, standalone decision" shape
+  `light.hpp`'s `resolveActiveDirectionalLight()`/`collectPointLights()` and
+  `material_override.hpp`'s `resolveDiffuseTextureOverride()` already
+  establish, applied here because Dear ImGui's own payload mechanism carries
+  one flat path string and nothing else -- a real drag has no out-of-band
+  "which action" channel the way each separately-named `ENGINE_DEBUG_*` var
+  below does, so something has to look at the path itself and decide.
+  Classification is by FOLDER, not extension: a model's own sibling `.mtl`
+  file (present in this project's own `assets/models/`, alongside its `.obj`)
+  still classifies as `kModel` -- whether it's actually loadable is a
+  separate, later concern (see the try/catch discussion below), confirmed
+  directly, not just designed for (see Verify).
+- **`Application::spawnPositionedEntity()` -- the Cube/Sphere/Plane
+  placement/Transform/NameComponent/ModelComponent logic, factored out of
+  `spawnEntityFromCreateMenu()`, not duplicated.** This phase's own brief
+  asked for exactly this: reuse `spawnEntityFromCreateMenu()`'s existing
+  model-loading path for an arbitrary dropped path "if you can adapt it...
+  without duplicating its... logic wholesale." `CreateEntityKind` stays a
+  closed enum for the Scene panel's own fixed menu items -- it has no natural
+  slot for an arbitrary path payload -- so the shared logic was pulled into
+  one new private helper, `spawnPositionedEntity(baseName, loadPath,
+  storedPath, originDescription)`, instead: the exact "in front of the
+  camera, floored above the ground" placement heuristic
+  (`kCreateEntityDistanceFromCamera`/`kCreateEntityMinHeight`), the same
+  `uniqueEntityName()`-de-duplicated `NameComponent`, the same optional
+  `ModelComponent` load. `spawnEntityFromCreateMenu()`'s own switch now just
+  picks a `baseName`/`loadPath`/`storedPath` per kind and calls this helper
+  once, then adds whichever kind-specific extra component
+  (`PointLight`/`DirectionalLight`/`CameraComponent`) that kind still needs --
+  behavior for every existing kind is unchanged; only where the logic lives
+  moved. `Application::spawnEntityFromDroppedModel(assetRelativePath)` (new)
+  calls the identical helper for an arbitrary `assets/models/` path.
+- **Placement stays the SAME heuristic, deliberately not a raycast --
+  considered and rejected, not overlooked.** A dropped model is placed the
+  exact same "camera-relative, floored above ground" way Cube/Sphere/Plane
+  already are, not at the actual mouse-cursor position projected into the 3D
+  scene. A real "drop exactly where the mouse points" feature needs genuine
+  ray/scene intersection against the render-to-texture'd Viewport content --
+  this engine has no such machinery at all today (`frustum.hpp`'s
+  `BoundingSphere` culling is a coarse visibility test, not a ray-hit query;
+  building one would mean unprojecting the drop's screen-space position
+  through the camera's inverse view-projection matrix and testing it against
+  every entity's own geometry, a real, separate feature this phase's own
+  "wire up drag-and-drop to what already exists" scope doesn't ask for). The
+  Viewport panel's own one-frame render-to-texture lag (Phase 14c -- this
+  frame's image is sized to the panel's PREVIOUS frame's dimensions) turned
+  out to have no bearing on this decision either way, confirmed by actually
+  reading `renderDockspaceShell()`'s own Viewport body rather than assuming:
+  there is no pixel-position reasoning anywhere in this feature, only "was
+  anything dropped on this panel's `ImGui::Image()` this frame" -- so the lag
+  is simply irrelevant here, not a complication this phase had to work
+  around.
+- **Model drops get their own try/catch; Create-menu kinds still don't --
+  and this asymmetry is load-bearing, not incidental.**
+  `spawnEntityFromCreateMenu()`'s own three model-backed kinds only ever load
+  one of four checked-in, known-good constants
+  (`kCreateCubeModelPath`/etc.), so `spawnPositionedEntity()` itself still
+  does not guard `resources_.getModel()` -- unchanged from before this
+  phase. But a dropped path names an ARBITRARY real file the Asset Browser
+  happened to show, which can include something Assimp cannot import as a
+  scene root at all -- e.g. a model's own sibling `.mtl` file, sitting in the
+  identical `assets/models/` tree as its `.obj`. Reproduced directly, not
+  just anticipated: dropping `assets/models/falling_cube.mtl` without this
+  guard would propagate `Model`'s own `std::runtime_error` all the way out of
+  `render()` uncaught -- the same whole-engine-crash severity Phase 15d's own
+  post-review bug-fix found for an unreadable Asset Browser entry. Fixed by
+  wrapping `spawnEntityFromDroppedModel()`'s own call in a try/catch, LOG_WARN
+  on failure, matching the identical defensive style
+  `ENGINE_DEBUG_ASSIGN_TEXTURE`/the Inspector's own texture "Browse..." pick
+  already use for the equivalent "the asset came from outside this file's own
+  fixed constant list" situation (Phase 15f). See Verify below for the actual
+  repro and confirmation the fix holds.
+- **Texture drops reuse `MaterialOverride` through a THIRD trigger path, not
+  a rewrite of the first two.** `Application::assignDroppedTextureOverride()`
+  (new) does exactly what Phase 15f's Inspector "Browse..." popup handling
+  and `ENGINE_DEBUG_ASSIGN_TEXTURE` already do --
+  `registry_.addComponent<MaterialOverride>()` + `resources_.getTexture()`,
+  wrapped in the identical try/catch/LOG shape -- but is its own function,
+  called by this phase's two new trigger paths (a real Viewport texture drop
+  and its own `ENGINE_DEBUG_DROP_TEXTURE` counterpart) rather than reaching
+  into either of Phase 15f's own two existing call sites. Those stay
+  completely untouched: this is a third, independent trigger for the same
+  underlying mechanism, the identical relationship `ENGINE_DEBUG_CREATE`
+  already has with the real Scene panel's own Create menu for
+  `spawnEntityFromCreateMenu()`. `Model::kPrimaryMeshIndex`'s own scoping fix
+  (Phase 15f's post-review bug fix, `model.cpp`'s `drawNode()`) is untouched
+  by this phase for the same reason it can't be broken by it: this phase
+  never touches `model.cpp`/`drawNode()`/mesh-scoping code at all, only ever
+  adds the same `MaterialOverride` component Phase 15f's own mechanism
+  already resolves correctly per-mesh -- confirmed directly against the
+  multi-mesh `"scene"` entity (Table/Box/Pyramid), not just assumed (see
+  Verify).
+- **`Application::handleViewportAssetDrop()` (new) -- the real dispatcher a
+  drop actually reaches.** Classifies via `classifyAssetDropPath()` and:
+  - `kModel`: always calls `spawnEntityFromDroppedModel()`, regardless of
+    whether an entity happens to already be selected. A model drop ALWAYS
+    creates a new entity, never mutates an existing one -- confirmed directly
+    (see Verify): dropping a model with `falling_cube` selected creates a new
+    entity and leaves `falling_cube`'s own selection/Inspector state
+    completely unaffected.
+  - `kTexture`: calls `assignDroppedTextureOverride()` against
+    `selectedEntity_`, but only if something is actually selected. **The
+    "texture dropped with nothing selected" edge case**: there is nothing to
+    assign it to, so this is a deliberately inert `LOG_WARN` naming the
+    dropped path, not a crash, and not some implicit "guess the nearest
+    entity" behavior this engine has no ray-picking machinery to attempt
+    anyway. The exact branch itself (`handleViewportAssetDrop()`'s own
+    `kTexture`-with-no-selection arm) can only be reached by a genuine mouse
+    drag over the Viewport with nothing selected -- `ENGINE_DEBUG_DROP_TEXTURE`
+    always names an explicit target entity by design (mirroring
+    `ENGINE_DEBUG_ASSIGN_TEXTURE`'s own shape), so it never routes through
+    `selectedEntity_` at all and can't exercise this specific arm headlessly.
+    Verified two ways instead, honestly scoped to what this environment can
+    actually establish (the same "don't assert a result you can't establish"
+    discipline Phase 15d's own root-vs-non-root permission test already
+    modeled): by direct code inspection (the branch is a single `LOG_WARN`
+    call with no GL/registry-mutating statement anywhere near it, so no crash
+    is possible), and by exercising the closest headlessly-reachable
+    equivalent -- `ENGINE_DEBUG_DROP_TEXTURE` naming an entity that does not
+    exist, which takes the identical "no valid assignment target, log and
+    continue" shape and is confirmed clean (see Verify).
+  - `kUnrecognized`: `LOG_WARN`s and does nothing -- reachable in practice
+    only by dragging a bare category folder itself (e.g. `"models"`, or one
+    of `assets/textures/`'s own `skybox`/`hdri` subfolders) rather than a
+    file beneath it, since every row's own payload only ever carries a real
+    path under `assets/models/` or `assets/textures/`.
+- **`ENGINE_DEBUG_DROP_MODEL=<assets/-relative model path>` and
+  `ENGINE_DEBUG_DROP_TEXTURE=<entity name>:<texture path>`
+  (`application.cpp`)**, both unset by default -- this project's own
+  established "a debug env var calls the exact same function the real UI
+  action calls" precedent, applied here because a real mouse drag can't be
+  exercised under Xvfb the way a keyboard-driven env var can.
+  `ENGINE_DEBUG_DROP_MODEL` calls the exact same
+  `spawnEntityFromDroppedModel()` a real model drop's own dispatch branch
+  calls; `ENGINE_DEBUG_DROP_TEXTURE` calls the exact same
+  `assignDroppedTextureOverride()` a real texture drop's own dispatch branch
+  calls. Deliberately their own separate env vars, not reused/overloaded onto
+  `ENGINE_DEBUG_CREATE`/`ENGINE_DEBUG_ASSIGN_TEXTURE` -- each exercises a
+  genuinely different trigger path (this phase's own new Viewport drop
+  target) even though the underlying mechanism each ultimately reaches
+  (`spawnPositionedEntity()`/`MaterialOverride`) is identical to what those
+  older vars already exercise. `ENGINE_DEBUG_DROP_MODEL` is placed
+  immediately alongside `ENGINE_DEBUG_CREATE` (before `ENGINE_DEBUG_SELECT`,
+  so a single run can drop-then-select-and-inspect the new entity);
+  `ENGINE_DEBUG_DROP_TEXTURE` is placed immediately alongside
+  `ENGINE_DEBUG_ASSIGN_TEXTURE` (after `ENGINE_DEBUG_DELETE`, before
+  `ENGINE_DEBUG_SAVE_SCENE`), the identical ordering reasoning each
+  neighboring var's own comment already gives.
+- **Test coverage, matching this project's established "pure logic function,
+  unit-tested in isolation" pattern.** `tests/asset_drop_test.cpp` (new)
+  exercises `classifyAssetDropPath()` (the ordinary model/texture cases;
+  nested subfolders classifying by top-level folder, not depth; a model's
+  own `.mtl` sibling still classifying as `kModel`, folder- not
+  extension-based; a bare category folder with no trailing file correctly
+  falling to `kUnrecognized`; the deliberately-never-browsable
+  `assets/scenes/`/`assets/shaders/` categories; empty/malformed/
+  non-`"assets/"`-rooted input) and `modelBaseNameFromAssetPath()` (ordinary
+  extraction; nested paths; no-extension input; the pathological
+  empty-stem-falls-back-to-`"Model"` case) without a live GL context, a real
+  `ResourceManager`, or a Dear ImGui frame -- `asset_drop.cpp` depends on
+  nothing beyond `<string>`, the identical minimal-dependency shape
+  `asset_browser.cpp` already has for the same reason.
+- **Post-15g bug-review fix: a failed model load from a drop left a
+  permanent "ghost" entity stranded in the registry.** The first-pass
+  `spawnPositionedEntity()` called `resources_.getModel()` LAST -- after
+  `registry_.create()` and both `addComponent<Transform>()`/
+  `addComponent<NameComponent>()` had already run -- exactly mirroring the
+  order the pre-existing Cube/Sphere/Plane code it was factored out of always
+  used. That ordering was harmless for those three callers (they only ever
+  load checked-in, known-good constants that never actually throw), but
+  `spawnEntityFromDroppedModel()`'s own try/catch wraps the WHOLE
+  `spawnPositionedEntity()` call and never gets an `EntityId` back to clean
+  up after a throw partway through it. Reviewer reproduced it directly:
+  `ENGINE_DEBUG_DROP_MODEL="assets/models/falling_cube.mtl"` (a real file the
+  Asset Browser genuinely shows, but not something Assimp can import as a
+  scene root) created a permanent, half-built entity -- a real Transform +
+  NameComponent, no `ModelComponent` -- selectable via `ENGINE_DEBUG_SELECT`,
+  showing up as ordinary Scene Hierarchy clutter, and silently written
+  straight into the scene file by a later Save Scene, surviving even a
+  reload -- silent, permanent data corruption with no error surfaced beyond
+  the original `LOG_WARN`. Fixed by reordering `spawnPositionedEntity()`
+  itself: the (optional) `resources_.getModel()` call now runs FIRST, before
+  `registry_.create()` is ever called, so a throw happens before any registry
+  state exists to leak -- a failed load now leaves `registry_` in EXACTLY the
+  state it was in before the call, no rollback/cleanup logic needed anywhere.
+  Every existing (always-succeeding) caller is behaviorally unaffected, since
+  reordering two calls that can never fail relative to each other has no
+  observable effect -- confirmed directly (see Verify), not just argued for.
+  Not GL-free unit-testable (this is specifically about a real
+  `resources_.getModel()` failure, which needs a live GL context to even
+  construct/fail a `Model`, the same reason Phase 15f's own
+  `kPrimaryMeshIndex` scoping fix used a headless proof instead of a `ctest`
+  case) -- verified via the reviewer's own exact repro instead, both as a
+  log-based proof (no `Created entity` line at all, where one used to appear)
+  and a screenshot of the Scene Entities list (unchanged from the pre-drop
+  baseline) -- see Verify below for both.
+- **Deliberately NOT done this phase**, the same conservative default this
+  whole project's "smallest correct increment" discipline expects every
+  time: **dragging FROM the Scene panel** (reordering/reparenting via drag --
+  a real, separate feature of its own; `renderSceneTreeNode()` gains no new
+  drag source this phase, only `renderAssetTreeNode()` does, and the two
+  panels' tree-rendering functions diverging further this way is exactly the
+  reason `editor_ui.cpp`'s own Phase 15d comment already gave for keeping
+  them two genuinely separate functions rather than one templated helper);
+  **raycast-based "drop exactly where the mouse points in 3D space"
+  placement** (see above -- considered and rejected as real, separate scope,
+  not an oversight); **dragging a model onto an EXISTING entity to
+  merge/replace it** (a model drop always creates a new entity, confirmed
+  directly, never mutates one that's already selected -- see Verify); **any
+  drag source other than the Assets panel's tree rows** (no Scene-panel
+  drag, no OS-level file-manager-to-Viewport drag, neither asked for by this
+  phase's own brief).
+- **Verify**: `cmake --build build -j"$(nproc)"` (clean `rm -rf build &&
+  cmake -B build -S .` rebuild) compiles with **zero warnings** under
+  `-Wall -Wextra` (`asset_drop.cpp`/`asset_drop_test.cpp` included). `ctest`
+  reports **11/11** (`asset_drop_test` new). `tools/run_headless.sh` proof:
+  1. A plain baseline (`ENGINE_MAX_FRAMES=60`, no debug vars), run twice
+     independently, logs the byte-identical clustered-lighting occupancy
+     every Phase 15a-15f baseline already recorded (`2136 -> 2153/2304`
+     clusters occupied, avg `3.565543 -> 3.580121` lights/occupied cluster)
+     and **zero** `[ERROR]` lines across both runs -- direct confirmation
+     this phase's changes are a complete no-op for the normal, no-interaction
+     case, the expected result since neither `classifyAssetDropPath()` nor
+     any of this phase's new `Application::` methods run anywhere near
+     `render()`'s own rendering/lighting pipeline unless a drop/debug var
+     actually fires.
+  2. **The model-drop proof.** `ENGINE_MAX_FRAMES=30 ENGINE_SHOW_DEBUG_UI=1
+     ENGINE_DEBUG_DROP_MODEL="assets/models/sphere.obj"
+     ENGINE_DEBUG_SELECT="sphere"` logs `Created entity "sphere" (index 3)
+     via a Viewport drag-and-drop of "assets/models/sphere.obj"` followed by
+     `ENGINE_DEBUG_SELECT="sphere": pre-selecting entity 3`, zero `[ERROR]`
+     lines. The screenshot's Scene Entities list shows the new `sphere` row
+     alongside `parented_demo_cube`/`scene`/`falling_cube`; the Inspector
+     shows it selected with a real, camera-relative Transform, a `Material`
+     section reading the model's own baked-in `checker.png` texture (no
+     `[override]` -- this is `sphere.obj`'s own material, untouched), and the
+     Viewport shows the new sphere rendered in front of the camera with the
+     dashed selection outline drawn around it -- direct, visual confirmation
+     a dropped model becomes a real, correctly-placed, fully-functional
+     entity, not just a registry-only side effect.
+  3. **The texture-drop proof, reusing Phase 15f's own verification
+     pattern.** `ENGINE_MAX_FRAMES=10 ENGINE_SHOW_DEBUG_UI=1
+     ENGINE_DEBUG_DROP_TEXTURE="falling_cube:assets/textures/
+     rusted_metal_albedo.png" ENGINE_DEBUG_SELECT="falling_cube"` logs
+     `Viewport drag-and-drop: entity falling_cube now overrides its diffuse
+     texture with "assets/textures/rusted_metal_albedo.png"`, zero `[ERROR]`
+     lines. The screenshot's Inspector Material section for `falling_cube`
+     reads `Texture: .../rusted_metal_albedo.png (256x256) [override]`, with
+     a real, enabled "Clear Override" button.
+  4. **The sibling-non-corruption proof, re-run against this new code path
+     specifically** (the exact scenario this phase's own brief called out:
+     "confirm this reaches the same MaterialOverride mechanism without
+     corrupting a sibling"). A SECOND, independent run against the identical
+     `ENGINE_DEBUG_DROP_TEXTURE` but `ENGINE_DEBUG_SELECT="parented_demo_cube"`
+     instead -- the sibling entity loading the IDENTICAL
+     `assets/models/falling_cube.obj` and therefore sharing the exact same
+     cached `Model`/`Material` -- shows that entity's own Material section
+     reading the plain `checker.png (256x256)`, no `[override]` tag, no
+     "Clear Override" button: completely unaffected by the override this
+     run's own `ENGINE_DEBUG_DROP_TEXTURE` assigned to its sibling. Zero
+     `[ERROR]` lines. Confirms Phase 15f's own hazard-closing design holds
+     for this THIRD trigger path exactly as it already did for the first two.
+  5. **The multi-mesh entity sanity check** (`Model::kPrimaryMeshIndex`'s own
+     scoping fix, Phase 15f post-review): `ENGINE_DEBUG_DROP_TEXTURE=
+     "scene:assets/textures/scuffed_plastic_albedo.png"
+     ENGINE_DEBUG_SELECT="scene"` (the 3-mesh/4-material `"scene"` entity)
+     logs the identical `Viewport drag-and-drop: entity scene now overrides
+     its diffuse texture...` line, zero `[ERROR]` lines, and the Inspector
+     reads `scuffed_plastic_albedo.png (256x256) [override]` -- a clean,
+     working assignment via this phase's own new path, exactly as expected
+     given this phase touches nothing in `model.cpp`/`drawNode()`'s own
+     per-mesh scoping at all (only ever adds the same `MaterialOverride`
+     component Phase 15f's own fix already handles correctly). Not a
+     re-run of Phase 15f's own full pixel-diff crop comparison (that proof
+     is about `drawNode()`'s own per-mesh forwarding logic, which this phase
+     never touches, so it cannot regress it) -- this is this phase's own
+     equivalent confirmation that its NEW trigger path reaches the identical,
+     already-fixed mechanism cleanly.
+  6. **The model-drop-with-a-selection proof** (never mutate an existing
+     entity). `ENGINE_MAX_FRAMES=15 ENGINE_SHOW_DEBUG_UI=1
+     ENGINE_DEBUG_SELECT="falling_cube" ENGINE_DEBUG_DROP_MODEL=
+     "assets/models/plane.obj"` logs `Created entity "plane" (index 3) via a
+     Viewport drag-and-drop of "assets/models/plane.obj"` followed by
+     `ENGINE_DEBUG_SELECT="falling_cube": pre-selecting entity 2`, zero
+     `[ERROR]` lines. The screenshot's Scene Entities list shows the new
+     `plane` row added, while the Inspector still shows `falling_cube`
+     selected with its own unaffected Transform/Material (plain
+     `checker.png`, no `[override]`) -- direct confirmation a model drop
+     creates a new entity and leaves whatever was already selected
+     completely untouched, exactly as this phase's own scope requires.
+  7. **Robustness, run and confirmed rather than assumed.**
+     `ENGINE_DEBUG_DROP_TEXTURE="nonexistent_entity:assets/textures/
+     checker.png"` logs a `LOG_WARN` ("does not match any entity's name")
+     and the run completes normally with zero `[ERROR]` lines -- the closest
+     headlessly-reachable equivalent to the "texture dropped with nothing
+     valid to target" edge case discussed above.
+     `ENGINE_DEBUG_DROP_MODEL="assets/models/falling_cube.mtl"` (a real file
+     the Asset Browser genuinely shows, but not something Assimp can import
+     as a scene root) logs `Model`'s own `[ERROR]` ("No suitable reader
+     found for the file format...") followed by this phase's own `LOG_WARN`
+     ("failed to load model... as an entity"), and the run completes
+     normally -- direct, reproduced confirmation of exactly the hazard this
+     phase's own try/catch guard exists to close (see above): without that
+     guard, this exact input crashes the whole engine.
+     `ENGINE_DEBUG_DROP_MODEL="assets/models/does_not_exist.obj"` (a path
+     that doesn't resolve to a real file at all) logs the identical
+     `Model`/this-phase `[ERROR]`/`[WARN]` pair and also completes normally.
+     None of the three crashes or hangs.
+  8. **The post-review ghost-entity fix, verified against the reviewer's own
+     exact repro (`ctest` count unchanged at 11/11 -- this bug and its fix are
+     both about a live `resources_.getModel()` failure, which needs a real GL
+     context, so this is a headless screenshot/log proof, not a new
+     GL-free unit test -- see this phase's own "Post-15g bug-review fix"
+     section above for why).** First, the ORIGINAL pre-fix ordering was
+     temporarily restored and re-run to directly confirm the bug rather than
+     just reason about it: the identical
+     `ENGINE_DEBUG_DROP_MODEL="assets/models/falling_cube.mtl"` command used
+     in item 7 above logged `Model`'s own `[ERROR]` and this phase's own
+     `[WARN]`, exactly as item 7 describes -- but **no `Created entity` line
+     ever appeared, before OR after the fix**, since that `LOG_INFO()` call
+     sits AFTER the (in the pre-fix ordering, throwing)
+     `addComponent<ModelComponent>()` line -- the bug was completely silent
+     in the log, not just under-reported. Adding
+     `ENGINE_DEBUG_SELECT="falling_cube (1)"` to that same pre-fix run,
+     though, resolved successfully (`pre-selecting entity 3`), and the
+     screenshot shows exactly the ghost entity this bug report describes: a
+     real `"falling_cube (1)"` row in the Scene Entities list, selected in
+     the Inspector as `"Empty entity (no model)"` with a live Transform and
+     `"No model on this entity"` -- caught directly, not inferred. The
+     pre-fix ordering was then reverted (restoring the fix committed above)
+     and rebuilt (confirmed identical to the fixed source via `diff` against
+     a saved copy) before any further verification ran. Re-run post-fix: the
+     identical `ENGINE_DEBUG_DROP_MODEL` command still logs the same
+     `Model`/this-phase `[ERROR]`/`[WARN]` pair, and the screenshot's Scene
+     Entities list shows exactly the original three entities
+     (`parented_demo_cube`/`scene`/`falling_cube`) -- no `"falling_cube (1)"`
+     row, no stray fourth entity of any kind. A second, independent run adds
+     `ENGINE_DEBUG_SAVE_SCENE=1` to the same failing drop: `saveScene()`
+     still logs its ordinary `Saved scene to "..."` line, and inspecting the
+     written file directly (not just trusting the log line, the same
+     discipline Phase 15f's own save/reload proof already established) shows
+     exactly three entity records -- `parented_demo_cube`/`scene`/
+     `falling_cube` -- with no fourth, ghost-derived record anywhere in it;
+     the repo's own checked-in `assets/scenes/default.json` is untouched
+     throughout (`git diff -- assets/scenes/default.json` shows nothing),
+     confirmed directly. `ctest` re-run clean (11/11) and a full clean
+     rebuild re-confirmed zero warnings after restoring the fix, so none of
+     this repro-then-revert process left the working tree in a different
+     state than the fix alone would have.
+
+With Phase 15g, the full Phase 15 arc (15a-15g) is now complete: every
+`BeginDisabled()`'d gap Phase 14f's own Create menu and Phase 14e's own
+Material section left behind -- Point Light, Directional Light, Camera, a
+real Asset Browser, Save Scene, material texture assignment, and now
+drag-and-drop -- is real and working. As with the Phase 14 arc before it,
+what differs, deliberately, is how far each sub-phase actually reached:
+15a/15b plugged straight into existing lighting uniforms, 15c added a real
+but inert ECS component nothing downstream reads yet, 15d/15e/15f each
+closed a genuinely new kind of gap (browsing, persistence, per-entity
+material state), and this phase closes the arc by wiring 15d's and 15f's own
+mechanisms together through the one interaction pattern -- drag-and-drop --
+every phase since 15d had already named and deliberately deferred. Each
+phase closed exactly the gap in front of it and named the next one
+explicitly, rather than guessing ahead at scope the engine wasn't ready to
+use.
+
+### Phase 16: camera input capture
+
+A real bug, reported directly by the project owner from using the actual
+Windows build, not something surfaced by this project's own headless
+verification: the free-fly camera responded to keyboard/mouse input
+constantly, whether or not the user was actually trying to fly it.
+`camera_.processMovement()`/`processMouseInput()` had run unconditionally
+from `update()` every single frame since Phase 3 introduced them -- there was
+no concept of "the camera is currently captured" anywhere in this engine.
+Clicking anywhere else in the window, or just passing the mouse over the app
+with no intent to look around at all, moved the camera. This phase adds
+exactly that missing concept: camera input is now INACTIVE by default,
+double-clicking inside the Viewport panel "captures" it (hides the cursor,
+starts feeding WASD/mouse-look to `camera_`), and Escape releases it --
+without also quitting the app the way a bare Escape press already did before
+this phase, a real precedence change to existing behavior this phase's own
+brief called out explicitly, not an oversight.
+
+- **The state machine: one small, pure function, not scattered `if`s.**
+  `engine::decideCameraCapture()` (new `camera_capture.hpp`/`.cpp`) takes
+  exactly three inputs -- the capture state as of the start of a frame,
+  whether Escape was pressed, and whether a Viewport double-click requested
+  entering capture -- and returns the next state plus whether Escape should
+  actually quit the app this frame. This is the one piece of the whole
+  feature with NOTHING to do with a real mouse gesture -- unlike hiding the
+  OS cursor, ImGui's own hover suppression, or the double-click detection
+  itself, "what should happen next given these three facts" has exactly one
+  right answer for any combination of inputs, so it's pulled into its own
+  GL/Window/ImGui-free file, the identical "small, standalone decision,
+  unit-tested in isolation" shape `light.hpp`'s
+  `resolveActiveDirectionalLight()`, `material_override.hpp`'s
+  `resolveDiffuseTextureOverride()`, and `asset_drop.hpp`'s
+  `classifyAssetDropPath()` already establish. The precedence rule itself:
+  Escape pressed while captured EXITS capture and absorbs the press (never
+  also quits); Escape pressed while NOT captured quits, exactly matching
+  Escape's pre-Phase-16 behavior; a double-click request while not captured
+  enters capture; every other combination (including a stray
+  double-click-request while already captured, which the real trigger is
+  independently gated to never actually produce -- see below) is a
+  documented no-op. `tests/camera_capture_test.cpp` exercises all eight
+  `(currentlyCaptured, escapeJustPressed, enterCaptureRequested)`
+  combinations, plus (added post-review, see below) an integration
+  regression driving this function from a real `engine::InputActionMap`
+  across multiple polls of a held key.
+- **`Window::setCursorCaptured(bool)` (`window.hpp`/`.cpp`) -- a thin,
+  policy-free wrapper, matching this class's existing role.** One new method:
+  `glfwSetInputMode(window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED :
+  GLFW_CURSOR_NORMAL)`. `GLFW_CURSOR_DISABLED` both hides the OS cursor and
+  switches GLFW to reporting unbounded relative motion (not clamped to the
+  window) -- exactly what `Camera::processMouseInput()`'s xpos/ypos diffing
+  wants while flying, and why GLFW calls this mode "disabled" rather than
+  just "hidden." `Window` itself makes no decision about WHEN to call this --
+  `Application::setCameraCaptured()` (below) is what decides that, matching
+  every other `Window` method's existing "just GLFW, no policy" shape.
+- **The Viewport panel's own double-click detection, and why "empty space"
+  is currently just "anywhere in the Viewport" -- stated explicitly, not
+  silently assumed.** `editor_ui.cpp`'s `renderDockspaceShell()` checks
+  `ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_
+  Left)` right after this "Viewport" panel's own `ImGui::Begin()` -- called
+  from INSIDE that one panel's own `Begin()`/`End()` block, because only Dear
+  ImGui itself, given the dockspace's current layout (which a user's own
+  later drag-to-rearrange can change at runtime), knows which one panel the
+  mouse is actually over; there is no way to scope this check to "just the
+  Viewport" from outside that block. This engine has NO click-to-select-an-
+  object-in-the-3D-viewport feature at all, today or before this phase --
+  only the Scene Hierarchy tree's own click-to-select (`scene_hierarchy.hpp`)
+  -- so "double-click on empty space" reduces, in practice, to "double-click
+  anywhere inside the Viewport panel," since there is nothing else a click
+  there could possibly hit. A real "double-click ON an object to capture,
+  double-click past one to not" distinction would need the identical
+  ray/scene-intersection machinery Phase 15g's own drag-and-drop placement
+  comment already named as out of scope (`frustum.hpp`'s `BoundingSphere`
+  culling is a coarse visibility test, not a ray-hit query) -- a real,
+  separate feature, not something this phase's "fix the always-on camera
+  input bug" brief asks for. The check is gated to only fire while NOT
+  already captured (`cameraCaptured`, a new read-only-by-value parameter on
+  `renderDockspaceShell()`, the identical shape `activeDirectionalLight`
+  already has) -- belt-and-suspenders alongside `ImGuiConfigFlags_NoMouse`
+  (below), which independently makes `IsWindowHovered()` unable to return
+  true at all while captured, and `decideCameraCapture()`'s own tolerance of
+  a stray request while already captured as a defensive no-op. Reports the
+  result through a new `cameraCaptureRequested` out-parameter, the identical
+  "EditorUI reports intent, Application acts on it" shape
+  `createRequest`/`saveSceneRequested`/`textureAssignRequested`/
+  `assetDropRequested` already establish (Phase 14f/15e/15f/15g) -- followed
+  here rather than inventing a fourth mechanism, per this phase's own brief.
+- **The ImGui/GLFW cursor-mode subtlety -- researched against the actual
+  vendored ImGui, not general/possibly-stale knowledge.** Checked directly
+  against `build/_deps/imgui-src/backends/imgui_impl_glfw.cpp`/`.h` and
+  `imgui.h` (this project's actual vendored `v1.92.9b-docking`, per
+  `CMakeLists.txt`'s own `GIT_TAG`), exactly as this phase's own brief asked:
+  - `ImGui_ImplGlfw_CursorPosCallback()`/`MouseButtonCallback()` do **not**
+    special-case `GLFW_CURSOR_DISABLED` at all -- that file's own changelog
+    header shows a 2022-09-01 change that once ignored mouse data under
+    `GLFW_CURSOR_DISABLED` was explicitly reverted 2023-07-18 ("Revert
+    ignoring mouse data on `GLFW_CURSOR_DISABLED`... User may set
+    `ImGuiConfigFLags_NoMouse` if desired"). So every relative-motion delta
+    GLFW's own disabled cursor mode reports while captured would otherwise
+    still feed `io.MousePos` -- and since GLFW's own virtual cursor position
+    under `GLFW_CURSOR_DISABLED` is explicitly unbounded (not clamped to the
+    window), that fed position can end up anywhere, including back over the
+    Inspector/Scene/Assets panels, letting them receive spurious hover/click
+    input while the user is only trying to fly the camera, not click UI.
+    Fixed exactly the way that changelog entry names: `Application::render()`
+    now sets `io.ConfigFlags |= ImGuiConfigFlags_NoMouse` (imgui.h: "Instruct
+    dear imgui to disable mouse inputs and interactions") while
+    `cameraCaptured_` is true, and clears it otherwise -- toggled right
+    before `editorUI_.newFrame()` each frame (the point `ImGui::NewFrame()`
+    actually computes that frame's own hovered-window/clicked-item state), so
+    Dear ImGui computes zero hover/click for every panel while captured.
+  - `ImGui_ImplGlfw_UpdateMouseCursor()`, by contrast, already special-cases
+    `GLFW_CURSOR_DISABLED` on its own: `if ((io.ConfigFlags &
+    ImGuiConfigFlags_NoMouseCursorChange) || glfwGetInputMode(bd->Window,
+    GLFW_CURSOR) == GLFW_CURSOR_DISABLED) { ...; return; }` -- confirmed
+    directly, not assumed. Once `Window::setCursorCaptured(true)` has put
+    GLFW itself into `GLFW_CURSOR_DISABLED`, this backend already leaves it
+    alone rather than fighting to restore a visible cursor shape underneath
+    it, and that file's own 2026-03-25 changelog entry ("Mouse cursor is
+    properly restored if changed by user app/code while using
+    `glfwSetInputMode(..., GLFW_CURSOR_DISABLED)`... Amend change from
+    2025-12-10") confirms this specific, current vendored version already
+    gets the cursor-SHAPE half of this right on its own. So
+    `ImGuiConfigFlags_NoMouseCursorChange` -- the other flag this phase's own
+    brief flagged as a possible requirement -- turned out NOT to be needed on
+    top of `NoMouse`: only the hover/click-suppression half needed an
+    explicit fix, not the cursor-shape half, a real finding from reading the
+    actual vendored source rather than an assumption either way.
+  - No fighting on the transition either direction: `ImGuiConfigFlags_
+    NoMouse` is a plain bitflag `Application::render()` sets/clears every
+    frame from `cameraCaptured_` (an OR/AND-NOT against the existing
+    `ImGuiConfigFlags_DockingEnable` bit `editorUI_`'s own constructor already
+    set once -- never a blind overwrite), so toggling it never disturbs any
+    other config flag.
+- **No visible camera-snap on either transition: `Camera::
+  resetMouseTracking()`, already built (Phase 3), reused, not reinvented.**
+  `Application::setCameraCaptured()` (new, `application.cpp`/`.hpp`) is the
+  ONE place every real capture-state transition (a Viewport double-click, via
+  `render()`; Escape's own precedence check, via `run()`;
+  `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE`, via the constructor) actually applies
+  its side effects, so none can apply one but forget another: it flips
+  `cameraCaptured_`, calls `window_.setCursorCaptured()`, and calls
+  `camera_.resetMouseTracking()` -- Camera's own Phase-3-vintage "discard the
+  tracked last cursor position so the next `processMouseInput()` call primes
+  instead of jumping" method, whose own header comment already named exactly
+  this kind of transition ("switching into the scripted demo path and later
+  resuming") as its intended use. Without this, the first
+  `processMouseInput()` call after RE-entering capture would diff against
+  whatever position was tracked from BEFORE that capture session ended --
+  stale by however long the camera sat uncaptured, and the OS cursor's own
+  position is free to have moved arbitrarily in between (GLFW re-centers/
+  frees it on each `GLFW_CURSOR_DISABLED`/`GLFW_CURSOR_NORMAL` transition) --
+  producing exactly the "huge jump on first use" bug `processMouseInput()`'s
+  own priming behavior already exists to prevent for a brand-new `Camera`.
+  Reset on BOTH transitions (not just entry) for symmetry/defensiveness, this
+  project's own established style, even though nothing currently reads
+  Camera's tracked position while uncaptured -- `update()` simply stops
+  calling `processMouseInput()` at all in that state (see below).
+- **`update()`'s camera-input branch, now gated on `cameraCaptured_` -- the
+  exact unconditional call site this whole phase exists to fix.** The
+  `else` branch that used to run `camera_.processMovement()`/
+  `processMouseInput()` every frame, no matter what, is now `else if
+  (cameraCaptured_)`; an uncaptured, non-demo-mode frame now does nothing at
+  all for the camera, the documented "camera input inactive by default"
+  behavior this phase's brief asks for. `ENGINE_CAMERA_DEMO`'s and
+  `ENGINE_FRUSTUM_CULL_DEMO`'s own scripted paths are unaffected -- both stay
+  checked FIRST, exactly as before, completely independent of capture state.
+- **`InputState` needed no new mouse field -- but gained one new KEYBOARD
+  field, `escapeJustPressed` (see the post-review bug fix below for why).**
+  The brief flagged `input.hpp`'s current fields (WASD flags,
+  `escapePressed`, cursor position, no mouse-BUTTON state) as worth reading
+  first -- and indeed there is no mouse-click field there, and none was
+  added: the double-click that starts capture is detected entirely inside
+  Dear ImGui's own per-frame state (`IsMouseDoubleClicked()`, fed by the
+  GLFW mouse-button callback `imgui_impl_glfw` already installs), not by
+  `pollInputState()`/`Window::isKeyPressed()`-style polling the way
+  WASD/Escape are -- there is no Camera-facing "was the mouse double-clicked"
+  concept this engine needs outside of EditorUI's own Viewport check.
+  `escapeJustPressed` is a DIFFERENT addition, only discovered necessary
+  during review (see below): `InputActionMap::justPressed(InputAction::
+  Quit)`, the SAME `InputAction::Quit`/Escape binding `escapePressed` already
+  reads, just via the edge-triggered read `toggleDebugUIPressed` already
+  established the precedent for -- `escapePressed` itself stays exactly the
+  level-triggered field it always was, untouched.
+- **Escape's two meanings, threaded through `run()` in ONE place.** The old
+  `if (input.escapePressed) { quit; }` is now a single call:
+  `decideCameraCapture(cameraCaptured_, input.escapeJustPressed,
+  cameraCaptureRequestPending_)`, followed by `setCameraCaptured(decision.
+  captured)` and quitting only if `decision.quitRequested`. The other half of
+  this one call's job: consuming `cameraCaptureRequestPending_`, a new member
+  holding LAST frame's own Viewport double-click (detected inside
+  `render()`'s own ImGui pass, one whole `update()`+`render()` call after
+  Escape's check point in `run()`, which happens first) -- reset to false the
+  instant it's consumed. This costs exactly one frame of latency between a
+  double-click and the camera actually starting to respond, the same
+  "detected in `render()`, acted on starting next frame" latency this class
+  already documents for a freshly created entity and a freshly changed
+  `selectedEntity_`, not a new kind of lag this phase introduces. Escape's
+  own EXIT-capture path, by contrast, has NO added latency -- it's decided
+  and applied at the very top of `run()`, before that frame's `update()`/
+  `render()` even run, so the cursor reappears the same frame the key is
+  pressed.
+- **`ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1`** (`application.cpp`), unset by
+  default -- this project's established "debug env var calls the exact same
+  production function a real interaction would" precedent
+  (`ENGINE_DEBUG_CREATE`/`spawnEntityFromCreateMenu()`,
+  `ENGINE_DEBUG_SAVE_SCENE`/`saveCurrentScene()`, ...), applied to a feature
+  that is fundamentally a real-mouse-gesture and therefore genuinely cannot
+  be reproduced under Xvfb (no real pointer device exists there to
+  double-click with at all). Calls `setCameraCaptured(true)` once, in the
+  constructor, right after `window_` exists -- the exact same function a real
+  double-click calls, exercising the real `Window::setCursorCaptured()` GLFW
+  call and the real per-frame `processMovement()`/`processMouseInput()`
+  gating in `update()`, just without the gesture that would trigger it
+  in a real interactive run.
+- **`ENGINE_DEBUG_SIMULATE_ESCAPE=1`** (`application.cpp`), unset by
+  default -- added specifically because Xvfb has no real keyboard either, so
+  a real physical Escape press can never reach `window_.isKeyPressed()` under
+  headless verification, meaning Escape's own NEW two-meanings precedence
+  would otherwise be provable only by `tests/camera_capture_test.cpp`'s own
+  isolated unit tests, never by `run()`'s own real wiring actually executing
+  either branch. `run()` holds a synthetic Escape press down for
+  `kDebugSimulateEscapeHoldFrames` (5) CONSECUTIVE polls, starting at
+  `kDebugSimulateEscapeFrame` (frame 3) -- injected via `pollInputState()`'s
+  own `forceEscapeDown` parameter (see the post-review bug fix below for why
+  a multi-poll HOLD, not a single-frame injection, is what this needed) --
+  handled by the exact same `InputActionMap::justPressed()`/
+  `decideCameraCapture()`/`setCameraCaptured()` production call chain a real,
+  physically-held Escape press goes through, not a parallel hand-rolled path.
+  Combined with `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1` in the same run, this
+  proves the full "captured -> Escape held for several frames -> uncaptured
+  on the first held frame, does NOT quit on any of the remaining held
+  frames" sequence end-to-end in the real app; alone (not captured), it
+  proves Escape's
+  ORIGINAL "quit" meaning still fires exactly as it always did -- see Verify
+  below for both actual runs.
+- **Deliberately NOT done this phase**, this project's own established
+  "smallest correct increment" discipline applied here too:
+  **double-click-to-select-an-object-in-the-3D-viewport** (this engine has no
+  such feature at all, before or after this phase -- see above; "empty
+  space" is currently just "anywhere in the Viewport" as a direct, documented
+  consequence, not a gap this phase silently papered over); **any change to
+  mouse-look sensitivity, movement speed, or the WASD/Space/Shift binding
+  set** (`InputActionMap`'s own existing bindings, `input_action_map.hpp`,
+  are completely untouched -- this phase only gates WHETHER that existing
+  input reaches the camera, never WHAT it does once it's captured); **a
+  visible on-screen affordance/tooltip hinting "double-click to fly the
+  camera"** (a real, separate small UX addition this phase's own bug-fix
+  brief didn't ask for -- the Viewport panel gains no new visible chrome at
+  all this phase); **right-click-drag or middle-click-pan camera controls**
+  (out of scope -- this phase only fixes the existing WASD+mouse-look path's
+  always-on bug, it doesn't add new control schemes); **remembering capture
+  state across a Save Scene / reload** (capture is transient input-focus
+  state, not scene data -- `scene_serialization.hpp`'s schema gains nothing
+  this phase, matching how `selectedEntity_` itself was never serialized
+  either).
+- **Post-review bug fix: a normal Escape TAP quit the whole app immediately
+  after exiting capture.** `decideCameraCapture()`'s first-pass version took
+  a parameter literally named `escapePressed`, fed directly from
+  `InputState::escapePressed` -- level-triggered by design (see that field's
+  own comment: true for EVERY poll a physical key is held, which for a real
+  human key-press spans many more than one ~16ms-throttled frame, not just
+  one). Reviewer reproduced it directly, running the actual function across
+  simulated consecutive frames with `escapePressed` held true: frame N sees
+  `(captured=true, escapePressed=true)`, correctly exits capture; frame N+1,
+  with the SAME physical key still down, sees `(captured=false,
+  escapePressed=true)` -- indistinguishable from a brand-new press with
+  capture already off -- and quits. A user tapping Escape to get their
+  cursor back closed the whole application instead, making this feature
+  actively worse than the always-on-camera bug it exists to fix.
+  `ENGINE_DEBUG_SIMULATE_ESCAPE` never caught this because its first-pass
+  version injected a synthetic press for exactly ONE frame, which behaves
+  like an edge-triggered signal by construction and could never reproduce a
+  real held key. Fixed by adding a new, genuinely edge-triggered
+  `InputState::escapeJustPressed` field (`input.hpp`/`.cpp` --
+  `InputActionMap::justPressed(InputAction::Quit)`, the SAME binding
+  `escapePressed` already reads, just via the edge-triggered read
+  `toggleDebugUIPressed` already established the precedent for) and renaming
+  `decideCameraCapture()`'s own parameter to `escapeJustPressed` with an
+  explicit "must be edge-triggered" contract in its header comment --
+  `escapePressed` itself is left completely untouched (still level-triggered,
+  still idempotent for its own original "quit" use, still read nowhere else
+  in this codebase) rather than redefined, matching this project's own "add a
+  new field for a new distinct need" precedent. `decideCameraCapture()`'s own
+  branch logic needed NO changes -- every one of its 8 cases was already
+  correct in isolation; the bug was entirely in what got PASSED to it across
+  frames. `ENGINE_DEBUG_SIMULATE_ESCAPE` (`application.cpp`) now holds its
+  synthetic press down for `kDebugSimulateEscapeHoldFrames` (5) CONSECUTIVE
+  polls via `pollInputState()`'s new `forceEscapeDown` parameter -- injected
+  at the same physical-key-query layer a real GLFW event enters at, driving
+  the real `InputActionMap::update()`/`justPressed()` edge-detection across
+  multiple polls, not a hand-rolled stand-in for it. `tests/
+  camera_capture_test.cpp` gained a dedicated integration regression (see
+  below) reproducing the exact bug using a real `engine::InputActionMap`.
+- **Verify**: `cmake --build build -j"$(nproc)"` compiles with **zero
+  warnings** under `-Wall -Wextra` (`camera_capture.cpp`/
+  `camera_capture_test.cpp`/the `input.cpp`/`input.hpp` changes included).
+  `ctest` reports **12/12** (`camera_capture_test` extended, not just its
+  original 8 `(currentlyCaptured, escapeJustPressed, enterCaptureRequested)`
+  pure-logic cases -- a new integration block drives a real
+  `engine::InputActionMap` through a synthetic-but-genuine multi-poll "key
+  held, then released, then pressed again" sequence and asserts
+  `decideCameraCapture()` never quits on any of the still-held polls after
+  exiting capture, only exits capture once on the real edge, and still quits
+  correctly on a genuinely NEW press afterward). `tools/run_headless.sh`
+  proof:
+  1. A plain baseline (`ENGINE_MAX_FRAMES=30`, no debug vars), run three
+     independent times, logs the byte-identical clustered-lighting occupancy
+     every prior phase's own recorded baseline shows (`2136 -> 2153/2304`
+     clusters occupied, avg `3.565543 -> 3.580121` lights/occupied cluster),
+     **`1/14 -> 1/14` frustum culling every time (no drop to 0/14)** -- a
+     claim corrected from an earlier draft of this section that mis-stated
+     this as `1/14 -> 0/14`; reviewer reproduced the actual `1/14 -> 1/14`
+     result and this section now records what three independent runs
+     actually show, not what was assumed. This is a Viewport-panel-sizing
+     artifact this phase's own changes have no bearing on either way (the
+     one culled drawable both before and after the Viewport's layout settles
+     is the PBR sphere grid's own known frustum-edge case at this window
+     size, unrelated to camera capture) -- and **zero** `[ERROR]` lines,
+     direct confirmation this phase's changes are a complete no-op for the
+     ordinary, no-interaction case (camera input was already producing no
+     visible movement under Xvfb's own absent-mouse baseline before this
+     phase either, since every `InputState` flag was already false there --
+     what changed is WHY nothing moves: "inactive by default" now, not
+     "active but nothing to read," but the rendered output is identical
+     either way).
+  2. **`ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1` alone**: logs `Camera capture
+     entered: cursor hidden, WASD + mouse-look now drive the camera`
+     immediately followed by `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE set: starting
+     already captured`, then the ordinary per-frame clustered-lighting/
+     frustum-culling lines, byte-identical to the plain baseline above (a
+     texture-free state toggle touches nothing about lighting/culling, as
+     expected -- including the same `1/14 -> 1/14`, never `0/14`), **zero**
+     `[ERROR]` lines, and the run reaches `ENGINE_MAX_FRAMES` and exits
+     cleanly -- direct confirmation `Window::setCursorCaptured(true)`'s real
+     `glfwSetInputMode(..., GLFW_CURSOR_DISABLED)` call is tolerated fine
+     under Xvfb (no crash, no GLFW error logged), not merely assumed to be.
+  3. **`ENGINE_DEBUG_SIMULATE_ESCAPE=1` alone (not captured)**: logs
+     `ENGINE_DEBUG_SIMULATE_ESCAPE: simulating a HELD Escape press starting
+     frame 3, held for 5 consecutive frame(s)` immediately followed by `ESC
+     pressed, exiting main loop`, and the run exits after exactly 3 frames --
+     well short of `ENGINE_MAX_FRAMES=30` -- confirming Escape's ORIGINAL
+     "quit" meaning still fires exactly as it always did, on the very first
+     held poll, for a user who never captures the camera at all (the loop
+     breaks immediately, so the remaining 4 simulated held frames are never
+     reached in this scenario -- expected, not a gap: idempotency of the
+     ORIGINAL quit path was never in question, only the captured-state exit
+     path below was).
+  4. **`ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1 ENGINE_DEBUG_SIMULATE_ESCAPE=1`
+     together (captured) -- the direct, real-app reproduction of the
+     post-review bug fix above.** Logs capture entering as in (2), then on
+     frame 3 `ENGINE_DEBUG_SIMULATE_ESCAPE: simulating a HELD Escape press
+     starting frame 3, held for 5 consecutive frame(s)` immediately followed
+     by exactly ONE `Camera capture exited: cursor restored, WASD +
+     mouse-look no longer drive the camera` line -- critically, NOT `ESC
+     pressed, exiting main loop`, and no SECOND `Camera capture exited`/quit
+     line anywhere in the log, even though the simulated key stays "held"
+     for 4 more frames (4 through 7) after the one that actually exits
+     capture. The run continues all the way to `ENGINE_MAX_FRAMES=30` and
+     exits via `Reached max frame count`, not via the quit path. This is the
+     exact scenario the reported bug broke -- re-run after the fix, it now
+     survives past the frame where capture exits, all the way to
+     `ENGINE_MAX_FRAMES`, confirmed directly rather than assumed. Zero
+     `[ERROR]` lines across all four runs above.
+  5. **What headless verification could NOT cover, stated plainly rather
+     than silently assumed away**: the real double-click GESTURE itself
+     (Xvfb has no real pointer device to click with at all, so
+     `EditorUI::renderDockspaceShell()`'s own `IsWindowHovered()`/
+     `IsMouseDoubleClicked()` check was never exercised by any of the runs
+     above -- only code-read-confirmed against the actual vendored ImGui
+     source, not screenshot/log-verified the way every other line of this
+     phase was); real mouse-look actually rotating the view (no real cursor
+     motion exists under Xvfb either, matching every prior phase's own
+     documented camera-movement verification limit); and, correspondingly,
+     any visual confirmation of the OS cursor actually disappearing/
+     reappearing on a real display (this environment has no real, human-
+     observable cursor at all -- only GLFW's own internal input-mode state,
+     which the runs above DO confirm transitions correctly and crash-free).
+     A reviewer with access to a real Windows/Linux desktop build is the
+     only way to close this specific gap -- exactly the situation this whole
+     phase exists because of in the first place.
+
+### Phase 17a: base theme
+
+The second item in the "Phase 17: visual design" arc to be BUILT, but the
+first in that arc's own LETTERED order -- placed here, ahead of Phase 17b's
+own section below, to match the arc's real order, even though 17b's icon
+font landed first, chronologically, in this repository (the project owner
+asked for that work out of sequence explicitly; see Phase 17b's own section
+below for its own account of that). Nothing in that already-built 17b needed
+to change for this phase to land -- as 17b's own section already anticipated
+("A future Phase 17a should feel free to restyle around this phase's icons;
+this phase does not restyle around a 17a that doesn't exist yet"), the icon
+glyphs it merged into the shared `ImFont` are plain glyphs with no color of
+their own; they render in whatever `ImGuiCol_Text` currently is, so they
+simply inherit this phase's new (still off-white, barely changed) text color
+along with every other glyph in every panel. 17b's own section is otherwise
+left completely untouched by this phase -- its factual claims (no theme
+existed, `StyleColorsDark()`'s stock palette was unchanged) were all
+accurate as of when it was written, and README.md's own "update, don't
+erase" precedent for a comment that's since gone stale doesn't apply here:
+nothing 17b said is stale, it is just no longer describing the engine's
+*current* state, which is exactly what this new section is for.
+
+The project owner supplied a reference mockup image of a target "Engine
+Studio" editor look: dark background, a teal/cyan accent color, rounded
+panel corners, a clean grouped Properties panel, a top toolbar row, and a
+File/Edit/Objects/View/Window menu bar. This phase's own scope is
+deliberately narrow -- ONLY the base ImGui color palette and panel styling
+(rounding, spacing, border treatment) the mockup implies, extracted by eye
+from the image and applied globally. Explicitly NOT this phase: the toolbar
+row itself (Phase 17c, a separate, later item -- will reuse this phase's
+colors once built), the menu bar beyond what already exists (Phase 15e's
+minimal File menu is structurally untouched -- it just inherits the new
+colors the same passive way every other `ImGui::` call in this codebase
+does), and any custom window chrome/borderless rounded OUTER window border
+(Phase 17d -- real platform-level borderless-window work, much bigger scope,
+and this phase's own `ImGuiStyle` changes have zero effect on the OS
+window's actual title bar/border, which Dear ImGui never draws or controls
+in the first place -- only `EditorUI`'s own `ImGui::Begin()`'d panels are
+"windows" as far as this phase or `ImGuiStyle` are concerned).
+
+- **Where it lives: `applyEditorTheme()`, a new function in `editor_ui.cpp`'s
+  existing anonymous namespace** (the same namespace `collectTextureFiles()`/
+  `renderInspectorPanel()`/etc. already live in), called once from
+  `EditorUI`'s constructor immediately after the `ImGui::StyleColorsDark()`
+  call already there (Phase 14a's own original setup -- before this phase,
+  that one line was the entire extent of this engine's ImGui style
+  configuration; no earlier phase had ever touched `ImGuiStyle` beyond
+  it). A small standalone function rather than inlining ~50 lines directly
+  into the constructor, matching this codebase's own "extract a named,
+  documented function once the logic is substantial enough to deserve one"
+  precedent (`light.hpp`'s `resolveActiveDirectionalLight()`,
+  `asset_drop.hpp`'s `classifyAssetDropPath()`, etc.) -- this one just isn't
+  unit-testable the way those are (see Verify below for why).
+- **Base + override, not "every `ImGuiCol_` from scratch."**
+  `ImGui::StyleColorsDark()` already gives every one of `ImGuiStyle`'s
+  `Colors[ImGuiCol_COUNT]` entries (checked against the actual vendored
+  `build/_deps/imgui-src/imgui.h` `ImGuiCol_` enum and `ImGuiStyle` struct,
+  not assumed from memory -- this vendored `v1.92.9b-docking` build has
+  already renamed several entries a memory-recalled field list would get
+  wrong, e.g. `ImGuiCol_TabActive` -> `ImGuiCol_TabSelected`,
+  `ImGuiCol_NavHighlight` -> `ImGuiCol_NavCursor`, both noted in the header
+  as "[renamed in ...]" aliases this codebase deliberately does NOT use) a
+  coherent, battle-tested dark baseline. `applyEditorTheme()` runs strictly
+  AFTER that call and overrides only the specific entries that need to shift
+  toward the mockup's dark/teal look -- `ImGuiCol_PlotLines`/
+  `ImGuiCol_PlotHistogram` (this engine draws no ImGui plots anywhere),
+  every `ImGuiCol_Table*` (no ImGui tables exist in this codebase),
+  `ImGuiCol_TreeLines` (this engine's `TreeNodeEx()` calls never pass
+  `ImGuiTreeNodeFlags_DrawLines*`), and `ImGuiCol_NavWindowingHighlight`/
+  `ImGuiCol_NavWindowingDimBg`/`ImGuiCol_UnsavedMarker` (no multi-viewport
+  Ctrl+Tab window switcher or unsaved-document markers exist here) are all
+  left exactly as `StyleColorsDark()` set them, deliberately, rather than
+  touched for their own sake.
+- **One accent teal, sampled directly from the mockup, reused everywhere.**
+  Every "this is the highlighted/active thing" role Dear ImGui exposes (a
+  pressed/active button, a selected tree row, an active slider grab, a
+  focused tab's overline, a scrollbar grab being dragged, a drag-drop
+  target...) reuses the exact same base hue rather than an unsystematic pass
+  inventing a slightly different teal per widget family. Its value --
+  **RGB(45, 195, 178), hex `#2DC3B2`** -- was picked with a small offline
+  Python/Pillow script that scanned the mockup image for the most saturated,
+  cleanest (least gradient-blended, least JPEG-artifact-noisy) teal-hued
+  patch anywhere in it, which turned out to be the "Use Gravity" toggle's
+  ON-state knob; the app-icon square and the toolbar's own highlighted
+  button are both visibly the same hue in the mockup but rendered with a
+  gradient/lower saturation that would have made a noisier sample point. A
+  second value, **RGB(28, 52, 54), hex `#1C3436`**, was sampled the same way
+  from the mockup's own selected-Scene-row background (the highlighted
+  `falling_cube` row) and used verbatim for `ImGuiCol_Header`/
+  `ImGuiCol_TabSelected` -- Dear ImGui's real "this row/tab is the selected
+  one, at rest" colors (per `imgui.h`'s own `ImGuiCol_` enum comments) --
+  precisely because sampling that exact mockup pixel and feeding it back
+  into the color that produces the same kind of pixel is the most direct
+  route from "what the mockup shows" to "what this engine now draws," not a
+  coincidence. Most hover/pressed variants of both values are DERIVED (a
+  fixed 15% linear lerp toward white or black, computed once and left as a
+  literal in the source rather than computed at runtime) rather than
+  independently eyeballed, so a hover state can never end up a visibly
+  different hue than the color it's hovering over -- the one exception,
+  `kAccentTealMutedHovered` (editor_ui.cpp), is a hand-picked lighter shade
+  rather than a strict 15% lerp, caught and documented as such by this
+  phase's own bug-review rather than silently left inconsistent with its
+  neighbors' derivation. The panel background
+  colors (`#181B24`/`#0F1217`) were sampled the identical way, from a flat
+  region of the mockup's own Scene/Properties panel background and its
+  menu-bar/status-bar strip respectively.
+- **Rounding/spacing/border treatment**, all checked against the real
+  vendored `ImGuiStyle` struct's actual field names (not guessed): two
+  rounding families -- a larger 8px radius for outer containers
+  (`WindowRounding`/`PopupRounding`) and a smaller 4-6px radius for controls
+  sitting inside one (`FrameRounding`/`GrabRounding` at 4px,
+  `ChildRounding`/`TabRounding`/`ScrollbarRounding` at 6px) -- matching the
+  size relationship the mockup's own panels-vs-buttons rounding shows at a
+  glance. `WindowBorderSize`/`ChildBorderSize`/`FrameBorderSize` are all set
+  to `0.0f`: the mockup's panels and input fields read as flat, borderless
+  shapes distinguished by FILL color, not a drawn edge. `PopupBorderSize` is
+  the one deliberate exception, left at `StyleColorsDark()`'s own `1.0f`
+  default: a popup floats OVER a panel sharing the same background-color
+  family, so without some edge it would have no visible boundary against
+  whatever panel is behind it -- this applies equally to the already-working
+  Phase 14f Create-menu popup and the Phase 15f Material "Browse..." popup,
+  neither of which needed a single line of its own rendering code touched.
+  `WindowPadding`/`FramePadding`/`ItemSpacing` are all nudged up from
+  `StyleColorsDark()`'s own defaults (8x8 / 4x3 / 8x4) to (10x10 / 8x5 /
+  8x8), matching how much more generously spaced the mockup's own Properties
+  panel rows and buttons look next to Dear ImGui's stock density.
+- **Applies to every panel automatically, with zero changes to any panel's
+  own rendering code.** `ImGuiStyle` is one global struct, not per-window
+  state -- every `ImGui::Begin()`'d window (Scene/Assets/Viewport/Inspector,
+  every one of them), the Phase 14f Create-menu popup, the Phase 15f
+  Material "Browse..." texture-picker popup, and the Phase 15e File menu all
+  pick up the new palette/rounding/spacing the instant `applyEditorTheme()`
+  runs, once, at startup -- none of `renderInspectorPanel()`/
+  `renderSceneTreeNode()`/`renderAssetTreeNode()`/etc. above needed a single
+  line changed, because `ImGui::Text()`/`ImGui::Button()`/`ImGui::
+  TreeNodeEx()`/etc. always read the CURRENT `ImGuiStyle` at draw time, not
+  a value baked in at some earlier call site.
+- **Deliberately NOT done this phase** (same "smallest correct increment"
+  discipline as every earlier phase's own list): the toolbar row itself
+  (Phase 17c -- grid/lighting/texture/play-pause buttons, none of which
+  exist yet); the custom window chrome / borderless rounded OUTER window
+  border (Phase 17d -- real OS-level platform work `ImGuiStyle` cannot touch
+  at all); any change to what a panel actually shows or does (this is a
+  restyle, not a feature -- every widget call in `editor_ui.cpp` is
+  byte-for-byte unchanged); and a user-facing theme picker / settings UI --
+  this is one fixed, hardcoded theme, matching this project's own repeated
+  "no speculative configurability nothing asks for" precedent (Phase 15d's
+  own Asset Browser writeup already made the identical call about a
+  drag-and-drop feature nobody had asked for yet).
+- **Verify**: a `-Wall -Wextra` rebuild (including a forced recompile of
+  just `editor_ui.cpp`, to rule out a stale cached object hiding a warning)
+  produced **zero new warnings** -- the one real risk this phase's own brief
+  flagged (a stray unused `constexpr ImVec4` among the several intermediate
+  hover/active color constants `applyEditorTheme()` defines) was caught
+  exactly that way during development and fixed by giving every declared
+  color constant a real call site, rather than by suppressing the warning.
+  `ctest` reports **13/13**, unchanged from Phase 17b's own baseline -- this
+  phase touches zero files any existing test links against, so this was
+  expected, not something the fix above accidentally clawed back. This
+  phase has **no meaningful GL-free unit test of its own**, unlike almost
+  every other phase in this codebase: `applyEditorTheme()` is a direct
+  sequence of `ImGuiStyle&`/`ImVec4` field assignments with no branching, no
+  computed decision, and no pure input-to-output mapping worth isolating the
+  way `sceneNodeIconGlyph()`/`classifyAssetDropPath()`/etc. are -- there is
+  no "given X, produce Y" contract here to assert against, only "does the
+  global struct end up holding literal value Z," which a unit test would
+  just be re-stating the source line back at itself. Noted honestly here
+  rather than inventing a test that would add file count without adding
+  real coverage.
+
+  Two `tools/run_headless.sh` runs (`ENGINE_MAX_FRAMES=60`): a baseline with
+  no debug env vars, and a second with `ENGINE_DEBUG_CREATE=pointlight` +
+  `ENGINE_DEBUG_SELECT="Point Light"` to populate the Inspector panel with
+  real content (Transform/Material/Physics sections, matching the reference
+  mockup's own populated-Inspector shot). Both logged **zero** `[ERROR]`
+  lines and the same clustered-lighting occupancy every prior phase's own
+  baseline has recorded (2136 -> 2153/2304 clusters occupied, avg 3.565543
+  -> ~3.579192 lights/occupied cluster, the same small run-to-run llvmpipe
+  noise Phase 15c's own review already characterized) -- confirming this
+  phase's changes (ImGui style only) touch nothing in the rendering/lighting
+  pipeline itself, exactly as expected for a pass that never calls a single
+  `gl*` function.
+
+  Visually, both screenshots show the dark charcoal-navy background, the
+  teal accent color, and rounded panel/tab corners all genuinely present and
+  reasonably close to the reference mockup's intent: the "Point Light" row
+  in the second screenshot's Scene panel highlights in the sampled muted
+  teal (`#1C3436`) exactly the way the mockup's own selected `falling_cube`
+  row does, and each docked panel's tab header (Scene / Viewport /
+  Inspector) renders filled in that same muted teal -- a second, independent
+  place the one consistent accent shows up beyond just the row highlight.
+  No malformed color (no fully-transparent panel, no NaN-looking flash, no
+  jarring out-of-family hue) and no out-of-range rounding artifact (no
+  self-intersecting or degenerate rounded corner) is visible in either
+  capture.
+
+  **Honest caveats, stated plainly rather than overclaimed**: this
+  container's screenshot capture is software-rendered (Xvfb + llvmpipe),
+  visibly lower-fidelity than the project owner's real Windows/GPU-
+  accelerated build will look -- close-to, not pixel-identical-to, the
+  mockup is the actual bar these screenshots were held to, and final
+  judgment on how well the teal/rounding read still needs the project
+  owner's own eyes on a real build. Separately, this harness has no way to
+  simulate the mouse clicks needed to actually OPEN the Create-menu popup or
+  the Material "Browse..." texture-picker popup (`ENGINE_DEBUG_CREATE`
+  creates an entity directly, bypassing the popup UI entirely) -- both
+  inherit the exact same global `ImGuiStyle` as everything screenshotted
+  above (there is no code path for them to inherit anything else), but
+  neither was independently screenshotted open this phase, so that specific
+  claim rests on the mechanism being global/uniform rather than on a direct
+  visual check of those two popups themselves.
+
+### Phase 17b: icon font
+
+The first item in a new "Phase 17: visual design" arc -- and, deliberately,
+NOT started in that arc's own lettered order. The project owner asked for
+this icon-font work ahead of Phase 17a (a base ImGui color/rounding theme
+pass) explicitly, out of sequence -- so 17a has not been built yet as of
+this phase, and nothing here assumes any part of it: no theme colors, no
+rounding tokens, no styling beyond what this phase's own icons need to
+render legibly on Dear ImGui's stock `StyleColorsDark()` palette (unchanged
+by this phase). A future Phase 17a should feel free to restyle around this
+phase's icons; this phase does not restyle around a 17a that doesn't exist
+yet.
+
+The gap this phase closes was named explicitly, in writing, back in Phase
+14d: `editor_ui.cpp`'s `renderSceneTreeNode()` has carried a "No icon
+glyphs" comment since the day it was written, explaining that Dear ImGui's
+default font only carries the ASCII/Latin-1 glyph range and that adding an
+icon font was real, separate scope Phase 14d's own brief didn't ask for.
+Phase 15d's `renderAssetTreeNode()` inherited the identical gap the day it
+was written, for the identical reason. Every Scene Hierarchy and Assets
+Browser row has been plain, icon-less text through the entire Phase 14/15/16
+arc as a result -- unlike a real Unity/Blender-style editor, where a
+folder/mesh/light/camera icon is the first thing that tells a row's kind
+apart at a glance. This phase finally builds that icon font and wires both
+trees up to it.
+
+- **The font: Font Awesome Free 6.7.2, Solid style, hand-subsetted to six
+  glyphs.** Checked against this project's own established dependency bar
+  (the same permissive-license standard `CMakeLists.txt`'s own
+  `FetchContent` fetches and `external/stb`'s vendored `stb_image.h` already
+  meet): Font Awesome Free's FONT files (as opposed to its SVG/JS icon
+  artwork, which is separately CC BY 4.0 and irrelevant here) are licensed
+  under the SIL Open Font License 1.1 -- permissive, redistribution-friendly,
+  the same family of license as every other checked-in/fetched dependency
+  this project already carries. The upstream release file
+  (`webfonts/fa-solid-900.ttf`, tag `6.7.2`) is ~426 KB and contains roughly
+  1,400 glyphs; this phase's own brief is explicit that merging that whole
+  range would be real, separate, unjustified atlas-memory and vendored-file-
+  size cost for icons this engine would never draw -- "a small, focused icon
+  set covering just what's actually needed... is enough." So the upstream
+  file was subsetted, offline, with `fonttools`'
+  (`pip install fonttools`) `pyftsubset`, down to exactly the six codepoints
+  this phase's two trees need:
+  ```
+  python3 -m fontTools.subset fa-solid-900.ttf \
+    --unicodes=F07B,F1B2,F0EB,F185,F030,F03E \
+    --glyph-names --layout-features='' --no-hinting --desubroutinize \
+    --output-file=editor-icons.ttf
+  ```
+  The result -- checked into `assets/fonts/editor-icons.ttf` -- is **2,160
+  bytes** (7 glyphs: the six named codepoints plus the mandatory `.notdef`),
+  roughly 0.5% of the upstream file's size. `assets/fonts/
+  LICENSE-font-awesome.txt` carries Font Awesome Free's own full, unmodified
+  license text (OFL 1.1 for the font itself, CC BY 4.0 for icon artwork, MIT
+  for code) alongside it -- the OFL's own condition 2 ("Original or Modified
+  Versions... may be bundled... provided that each copy contains the above
+  copyright notice and this license... as stand-alone text files") is what
+  that file satisfies; this project's own subset is a Modified Version under
+  that license (a strict subset of glyphs, nothing added/changed), which the
+  OFL explicitly permits redistributing under the same license, unrenamed
+  (this project never calls its own file "Font Awesome" -- only
+  `editor-icons.ttf`, sidestepping the OFL's Reserved-Font-Name restriction
+  on *that* name entirely).
+- **Where it lives, and why `assets/fonts/` rather than `external/`.** This
+  project's own README "Directory layout" section already draws the line
+  this phase follows: `external/` holds vendored *library source* (GLAD's
+  generated-shape `.c`/`.h`, stb_image's single header) that gets *compiled*
+  into the binary; `assets/` holds runtime *content* the engine *loads by
+  path* at startup (shaders, textures, models, scenes) via
+  `paths.hpp`'s `resolveAssetPath()` and `CMakeLists.txt`'s existing
+  `copy_directory` POST_BUILD step. A font file is loaded by path at
+  startup (`io.Fonts->AddFontFromFileTTF(resolveAssetPath("assets/fonts/
+  editor-icons.ttf"), ...)`) exactly the way a texture or shader is -- it is
+  content, not compiled library source -- so `assets/fonts/` is the correct
+  home, not a new `external/` subdirectory. This also means the existing
+  POST_BUILD `copy_directory` step needed **zero changes**: it already
+  recurses through every subdirectory `assets/` has, `fonts/` included, the
+  same way it already carries `assets/textures/skybox/` and `assets/
+  textures/hdri/` without ever needing to name them individually.
+- **Vendored file, not `FetchContent`'d -- the one real judgment call this
+  phase's brief asked for.** `FetchContent`ing Font Awesome Free's own
+  upstream git repository (rather than hand-subsetting a downloaded release
+  file, as above) was the other option this phase's brief named, and was
+  rejected: that repository is large (icon SVGs, JS, multiple font families,
+  build tooling -- a `git clone` pulls all of it, `FetchContent` has no
+  built-in sparse-checkout), and even a successful full fetch would still
+  need this exact same offline `pyftsubset` step afterward to reach a
+  reasonably-sized file -- `FetchContent` would add real configure-time cost
+  (network + a much bigger clone) for zero benefit over vendoring the
+  already-tiny 2,160-byte result directly, unlike GLFW/GLM/Assimp/nlohmann_
+  json/Dear ImGui above, each of which IS built from its own fetched source
+  every configure (a real, load-bearing reason to fetch, not just historical
+  habit). This is the same reasoning `external/glad/`'s own README writeup
+  gives for vendoring instead of generating: fetch only when the fetch
+  itself does real, repeated work a vendored copy can't; vendor when the
+  artifact is small, stable, and the fetch would just be overhead around it.
+  Network access itself was verified working in this environment before
+  committing to either option (a `curl` against `raw.githubusercontent.com`
+  succeeded) -- vendoring was chosen on its own merits, not because fetching
+  was unavailable.
+- **The six codepoints, and why these specific six.** `editor_icons.hpp`
+  (new, `include/engine/`) names them: `kIconFolder` (0xF07B, "folder"),
+  `kIconMesh` (0xF1B2, "cube"), `kIconPointLight` (0xF0EB, "lightbulb"),
+  `kIconDirectionalLight` (0xF185, "sun"), `kIconCamera` (0xF030, "camera"),
+  `kIconTexture` (0xF03E, "image") -- one per Scene Hierarchy row kind this
+  phase's brief names (ModelComponent/PointLight/DirectionalLight/
+  CameraComponent/empty-organizational) plus one per Assets Browser file
+  category (`asset_drop.hpp`'s existing `AssetDropCategory::kModel`/
+  `kTexture`), with the folder glyph doing double duty for both "an empty
+  Scene row" and "any Assets directory row" -- the same concept
+  ("a group, not a specific piece of content") in both trees.
+- **`editor_icons.hpp`/`editor_icons.cpp`** (new): besides the six codepoint
+  constants, two pure, GL/ImGui-free decision functions --
+  `sceneNodeIconGlyph(hasModel, hasPointLight, hasDirectionalLight,
+  hasCamera)` and `assetNodeIconGlyph(isDirectory, AssetDropCategory)` --
+  each with exactly one right answer given its inputs, the identical "small,
+  standalone decision, unit-tested in isolation" shape `light.hpp`'s
+  `resolveActiveDirectionalLight()`, `material_override.hpp`'s
+  `resolveDiffuseTextureOverride()`, `asset_drop.hpp`'s
+  `classifyAssetDropPath()`, and `camera_capture.hpp`'s
+  `decideCameraCapture()` already establish. `assetNodeIconGlyph()`
+  deliberately reuses `asset_drop.hpp`'s own `AssetDropCategory` enum rather
+  than inventing a second "what kind of asset is this" type -- the exact
+  same classification `editor_ui.cpp`'s Viewport-drop handling (Phase 15g)
+  already derives from an identical `"assets/" + AssetTreeNode::relativePath`
+  string, now reused a second time instead of re-derived a second, possibly-
+  drifting way. Depends on nothing but `<cstdint>` and `asset_drop.hpp`
+  itself, so `tests/editor_icons_test.cpp` exercises both functions --
+  including the precedence order when a `SceneTreeNode` carries more than
+  one flag at once (Model beats every light/camera flag; a light flag beats
+  Camera; PointLight is checked before DirectionalLight -- see that header's
+  own comment for the full reasoning) -- with no live GL context, Dear ImGui
+  frame, or font atlas at all.
+- **`scene_hierarchy.hpp`/`.cpp`**: `SceneTreeNode` gains four new bools --
+  `hasModel`/`hasPointLight`/`hasDirectionalLight`/`hasCamera` -- set once,
+  in `buildSceneTree()`, from the same `registry.getComponent<T>() !=
+  nullptr` checks every other per-entity UI in this engine already does.
+  Computed here rather than re-checked every frame from inside the ImGui-
+  facing row-drawing code, the same "this file already has registry access
+  and already visits every entity once per build" reasoning `name` itself is
+  resolved with. `scene_hierarchy.cpp` now also includes `light.hpp`/
+  `camera_component.hpp` -- both header-only as far as a plain component-
+  presence check needs, so this is **not** a new link dependency:
+  `tests/scene_hierarchy_test.cpp`'s own CMake entry still links only
+  `scene_hierarchy.cpp` itself, no `light.cpp`/`camera_component.cpp`.
+- **`editor_ui.cpp`**: this engine's first EXPLICIT font-atlas
+  configuration. Before this phase, `io.Fonts` held zero fonts of its own
+  anywhere in this codebase -- Dear ImGui's own `ImFontAtlasBuildMain()`
+  auto-calls `AddFontDefault()` the first time the atlas is ever built if
+  nothing else already has, so every row's text has, until now, always
+  silently been that implicit fallback. `EditorUI`'s constructor now calls
+  `io.Fonts->AddFontDefault()` explicitly, then
+  `io.Fonts->AddFontFromFileTTF(resolveAssetPath("assets/fonts/
+  editor-icons.ttf"), 0.0f, &iconFontConfig, kIconGlyphRanges)` with
+  `iconFontConfig.MergeMode = true` -- merging the six icon glyphs directly
+  into the SAME `ImFont` every row already draws with (no
+  `ImGui::PushFont()` needed anywhere in the row-drawing code).
+  `kIconGlyphRanges` is a narrow, explicit `{lo, hi}` pair per codepoint,
+  built FROM `editor_icons.hpp`'s own constants (not a second, hand-copied
+  list) so the atlas merge and the row-drawing code can never silently list
+  a different set of codepoints. A failed font load (a checkout missing
+  `assets/fonts/`) degrades to a `LOG_WARN` and icon-less rows -- the exact
+  pre-Phase-17b look -- rather than crashing the whole engine over a
+  cosmetic asset, the same instinct `asset_browser.cpp`'s own unreadable-
+  entry handling already established.
+  - **Researched against the actual vendored ImGui, not assumed** (the same
+    discipline Phase 16's own GLFW-cursor/ImGui-hover research applied):
+    this project's vendored `v1.92.9b-docking` build sets
+    `ImGuiBackendFlags_RendererHasTextures` (`imgui_impl_opengl3.cpp`'s own
+    `Init()`), which routes font baking through a DYNAMIC per-glyph-on-
+    demand path (`ImFontAtlasBuildMain()`) that bakes whichever codepoint a
+    draw call actually requests, from whichever merged source actually has
+    it. `GlyphRanges` itself is only consulted by the LEGACY eager-preload-
+    everything path (`ImFontAtlasBuildLegacyPreloadAllGlyphRanges()`),
+    skipped entirely once `RendererHasTextures` is true -- so on this
+    build, the narrow glyph-ranges array's real effect is close to
+    redundant (the vendored subset font physically contains only these six
+    glyphs anyway). It's still passed explicitly because it's the
+    documented, standard `MergeMode` idiom regardless of backend, costs
+    nothing, and keeps this code correct if the rendering backend ever
+    changes to one where `RendererHasTextures` is false.
+  - `SizePixels` is left at its `ImFontConfig` default (0.0f, "implicit
+    reference size") rather than a fixed pixel constant -- matching
+    `AddFontDefault()`'s own implicit sizing keeps the icon glyphs
+    auto-scaling in lockstep with the base UI font instead of this
+    constructor needing to hardcode/maintain a second size constant that
+    could drift out of sync with it.
+- **`renderSceneTreeNode()`/`renderAssetTreeNode()`** (`editor_ui.cpp`):
+  each row's label is now `"<icon>  <name>"` -- one space-padded icon glyph
+  (UTF-8-encoded by this file's own new `iconGlyphUtf8()` helper) ahead of
+  the existing text, still exactly one `TreeNodeEx()` call/one selectable
+  row, so `IsItemClicked()`/drag-and-drop/everything else either function
+  already did needed **no** further change to keep working with the icon
+  folded into the same label string. `renderSceneTreeNode()`'s icon comes
+  from `sceneNodeIconGlyph()` fed by the node's own four new flags;
+  `renderAssetTreeNode()`'s comes from `assetNodeIconGlyph()` fed by
+  `node.isDirectory` and `classifyAssetDropPath("assets/" +
+  node.relativePath)` -- the identical `assetPath` string this function
+  already needed to build for Phase 15g's own drag-and-drop payload, now
+  computed once and reused for both instead of built twice. Both
+  functions' own long-standing "No icon glyphs" header comments are
+  updated (not deleted) to record that this phase is what closed the gap
+  they used to explain, matching this project's own "update, don't erase, a
+  stale comment" precedent (e.g. Phase 15b's Directional-Light tooltip).
+- **Deliberately general, not hardcoded to tree rows.** This phase's own
+  brief is explicit that a LATER item in this arc (the toolbar --
+  grid/lighting/texture/play-pause toggle icons) will want to merge more
+  icons into the same font/atlas. Nothing here forces that to be awkward: a
+  future phase adds one more named `char32_t` constant to
+  `editor_icons.hpp`, appends it to `editor_ui.cpp`'s own
+  `kIconGlyphRanges` array, and merges cleanly into the exact same `ImFont`
+  this phase's own `AddFontFromFileTTF()`/`MergeMode` call already builds --
+  no rearchitecting of the merge mechanism itself, just "one more
+  codepoint" each time.
+- **Deliberately NOT done this phase**: the toolbar itself (grid/lighting/
+  texture/play-pause toggle buttons) -- a separate, later item in this arc,
+  named explicitly in this phase's own brief as out of scope even though it
+  will reuse this phase's font infrastructure. Phase 17a's base ImGui color/
+  rounding theme pass -- not yet built, not assumed by anything here (see
+  this section's own opening paragraph). Custom window chrome -- untouched.
+  A procedural vector-icon system drawn with raw `ImDrawList` primitives (an
+  alternative this phase's own brief explicitly rejected as a materially
+  different, larger, more speculative approach than a font-atlas merge, the
+  standard, well-trodden Dear ImGui pattern for this).
+- **Verify**: a clean rebuild (`rm -rf build && cmake -B build -S . &&
+  cmake --build build -j"$(nproc)"`) compiles with **zero warnings** under
+  `-Wall -Wextra` (`editor_icons.cpp`/`editor_icons_test.cpp` included).
+  `ctest` reports **13/13** (`editor_icons_test` new -- exhaustive coverage
+  of both glyph-selection functions including the multi-flag precedence
+  cases; `scene_hierarchy_test` extended with one entity per component kind
+  plus a genuinely empty one, proving `buildSceneTree()` itself sets each
+  of the four new flags correctly from the registry, independent of
+  `sceneNodeIconGlyph()`'s own precedence logic). A baseline
+  `tools/run_headless.sh` run (`ENGINE_MAX_FRAMES=60`, no debug env vars)
+  logs the same clustered-lighting occupancy every prior phase's own
+  baseline has recorded (2136 -> 2153-2155/2304 clusters occupied, avg
+  3.565543 -> ~3.580 lights/occupied cluster, the same small run-to-run
+  llvmpipe noise Phase 15c's own review already characterized) and **zero**
+  `[ERROR]` lines -- confirming this phase's changes (font atlas + row
+  labels only) touch nothing in the rendering/lighting pipeline itself.
+  Inspected as screenshots (`ENGINE_SHOW_DEBUG_UI=1` for the baseline; four
+  further runs with `ENGINE_DEBUG_CREATE=pointlight`/`directionallight`/
+  `camera`/`empty` + a matching `ENGINE_DEBUG_SELECT`, each logging its own
+  `Created entity "..." via the Scene panel's Create menu` with zero
+  `[ERROR]` lines):
+  - The Scene panel shows a real cube glyph next to `scene`/`falling_cube`/
+    `parented_demo_cube` (this engine's default scene's own `ModelComponent`
+    entities), a real lightbulb glyph next to a freshly created "Point
+    Light" row, a real sun glyph next to "Directional Light", a real camera
+    glyph next to "Camera", and a real folder glyph next to "Empty" -- five
+    distinct, correctly-shaped glyphs (a lightbulb outline, an eight-point
+    sunburst, a camera body, a folder, a wireframe cube), not tofu/missing-
+    glyph boxes, confirming the font merge and per-row glyph selection are
+    both correct end to end.
+  - The Assets panel shows real folder glyphs next to the `models`/
+    `textures` category rows (and, expanded, next to `textures/hdri/` and
+    `textures/skybox/`), real cube glyphs next to every file under
+    `models/` (`.obj`/`.mtl` alike -- matching `classifyAssetDropPath()`'s
+    own "classified by folder, not extension" contract), and real image
+    glyphs next to `textures/hdri/sky.hdr` and `textures/skybox/back.png` --
+    the same "vendored subset font actually contains a well-formed, sensibly
+    designed glyph, not a corrupt/placeholder one" confirmation, independent
+    of the Scene panel's own five.
+
+### Phase 17c: toolbar
+
+The third item in the "Phase 17: visual design" arc, and the first built in
+this arc's own lettered order rather than out of it (17a landed before 17b
+chronologically but after it in letter order, for reasons that phase's own
+section explains; 17c needed no such reordering -- both 17a's theme and
+17b's icon-font infrastructure were already in place). The project owner
+supplied a reference mockup showing a toolbar row docked at the top of the
+Viewport panel: six icon buttons -- a grid toggle, a sun/lighting toggle, an
+image/texture toggle, an undo arrow, and a play button plus a separate
+pause button (shown highlighted/active in teal). This phase builds that
+row.
+
+- **The real problem this phase's own brief named up front: most of these
+  icons have no real, already-built feature behind them.** Before writing
+  a single button, this phase searched the WHOLE codebase (not just
+  recalled prior phases' own summaries) for a viewport ground-plane grid
+  overlay, an edit-history/undo-stack, and a play/pause/restart
+  simulation-state concept. **None of the three exist anywhere in this
+  engine, confirmed directly**: every other hit for "grid" is the unrelated
+  PBR sphere test-grid (Phase 9) or the cluster-light-culling grid (Phase
+  13a) -- a different "grid" entirely, nothing to do with a viewport
+  overlay; "undo"/"redo" turn up nowhere except `transform_hierarchy.hpp`'s
+  own unrelated Phase 14f aside ("there is no 'undo' in this editor" --
+  cited as the REASON Phase 14f chose orphan-to-root over cascading
+  delete, not a feature that exists); "play"/"pause"/"restart" turn up
+  nowhere except `editor_ui.hpp`'s own long-standing Phase 14a comment
+  ("no real inspector..., no Play/Pause/Restart or other toolbar/menu-bar
+  chrome"), which this phase's own header-comment update (below) records as
+  still substantially true. This engine's physics/rendering simply run
+  continuously from the moment `engine_app` starts -- there is no
+  "stopped"/"running" state anywhere to toggle at all.
+- **What IS real: `Application::ssaoDisabled_`/`ssaoDebugMode_` (Phase
+  13f)** -- plain `bool` members `Application::render()` already re-reads
+  every frame, already toggleable from the F1 debug overlay's own "Render
+  Passes" checkboxes (`Application::renderDebugUI()`, Phase 8c/13f: `ImGui::
+  Checkbox("Disable SSAO (ENGINE_SSAO_DISABLE)", &ssaoDisabled_)` and
+  `ImGui::Checkbox("SSAO debug view: raw occlusion buffer",
+  &ssaoDebugMode_)`). Two of this toolbar's six buttons are wired to these
+  exact members -- not a parallel copy of the state, the SAME
+  `Application`-owned `bool`s, now exposed through a SECOND, always-visible
+  UI surface in addition to (not instead of) the F1 overlay:
+  - **The "sun" button -> `ssaoDisabled_`, mapped honestly, not forced.**
+    Screen-space AMBIENT OCCLUSION is fundamentally a LIGHTING technique
+    (it darkens ambient/indirect light in creases and contact points), so a
+    button that toggles it fits the mockup's own "lighting toggle" slot on
+    its own merits, not because it was the only spare flag available.
+    Clicking it flips `ssaoDisabled_`; the button reads "active" (drawn in
+    the accent teal) exactly when SSAO is currently disabled -- the
+    ordinary toggle-button convention of "highlighted = the alternate state
+    is engaged," not "highlighted = the default."
+  - **The "image" button -> `ssaoDebugMode_`, mapped just as honestly.**
+    Toggling it swaps the Viewport panel's own rendered picture between the
+    ordinary shaded scene and `ssaoRaw_`'s raw occlusion buffer shown
+    directly (`postprocess.frag`'s Phase 13f `uSSAODebug` uniform) -- a
+    literal "which IMAGE is on screen" toggle, exactly what an "image/
+    texture toggle" icon should mean, confirmed visually (see Verify below:
+    the whole Viewport genuinely turns into a grayscale ambient-occlusion
+    render when this button is active, not a no-op).
+  - `ssrDisabled_`/`clusterDebugMode_` (the other two Phase 13 render-pass
+    flags) are deliberately NOT wired to a toolbar button this phase --
+    the mockup shows six buttons, not eight, and this phase doesn't grow
+    the row past what the mockup calls for just because more real flags
+    happen to exist. Both stay exactly as toggleable as they already were,
+    via the F1 debug overlay alone.
+- **What is NOT real: grid, undo, play, pause -- shown per the mockup, but
+  `BeginDisabled()`'d with an explanatory tooltip.** The exact same
+  precedent this codebase already established for this exact situation:
+  Phase 14f's own Create-menu `disabledCreateMenuItem()` lambda (no longer
+  in `editor_ui.cpp` -- Phase 15a/15b/15c made all three of its own
+  Point-Light/Directional-Light/Camera items real, one by one -- but this
+  section, like that one, records the honest state at the time it was
+  written) showed "Point Light"/"Directional Light"/"Camera" per an
+  approved mockup while `BeginDisabled()`'ing each with a tooltip
+  explaining exactly what real, separate scope was missing, rather than
+  either half-building a fake feature or silently dropping a menu item the
+  mockup showed. This phase's own `toolbarIconButton()` helper
+  (`editor_ui.cpp`) reproduces that same shape for a plain `ImGui::Button()`
+  instead of a `MenuItem()`: `BeginDisabled()`/`EndDisabled()` around the
+  button, `ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)` (the
+  flag that lets a hover still register on a disabled item at all) gating
+  an `ImGui::SetTooltip()` naming exactly what's missing -- "this engine has
+  no ground-plane grid-drawing code anywhere today," "no edit-history/
+  undo-stack concept," "no play/pause/restart simulation-state concept...
+  physics simply runs continuously once the app starts." Every button, real
+  or disabled, gets a tooltip -- an icon-only row with no visible text
+  label anywhere is exactly the UI shape a tooltip is load-bearing for, not
+  a courtesy reserved for the disabled half.
+- **The pause button is drawn highlighted (accent teal) despite being
+  disabled -- deliberately, matching the mockup's own visual exactly,
+  without pretending that highlight means anything real.** The reference
+  mockup shows Pause, specifically, in the same highlighted state Play/
+  grid/undo are not shown in. This phase reproduces that pixel-level
+  detail (`toolbarIconButton("pause", kIconPause, /*active=*/true,
+  /*enabled=*/false, ...)`) rather than either dropping the mockup's own
+  visual choice or, worse, inventing a real `isPaused_` flag whose only
+  purpose would be to make one screenshot match a picture -- the tooltip
+  text says so explicitly ("shown highlighted to match the reference
+  mockup's own default state, not because this engine actually tracks a
+  paused/running flag").
+- **The active/teal "toggled on" style is read back LIVE from `ImGuiStyle`,
+  not a second hardcoded color literal.** `applyEditorTheme()` (Phase 17a)
+  already sets `ImGuiCol_ButtonActive` to the accent teal, with a comment
+  explicitly calling that role out as "matches the mockup's highlighted/
+  active toolbar button." Rather than declaring a second `kAccentTeal`
+  constant in a second location that could silently drift from the first,
+  `toolbarIconButton()`'s `active=true` path does
+  `ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors
+  [ImGuiCol_ButtonActive])` -- using that entry for precisely the purpose
+  its own Phase 17a comment already named, guaranteed to track any future
+  palette tweak automatically instead of needing a second edit.
+- **Where the row lives, and why it changes a Phase 16 interaction check.**
+  `renderViewportToolbar()` (new, `editor_ui.cpp`'s existing anonymous
+  namespace) is called as the very FIRST thing inside the Viewport panel's
+  `Begin()`/`End()` block (`renderDockspaceShell()`), before the panel's
+  content-region size is captured -- so it reads as chrome docked to the
+  TOP of the 3D view (matching the mockup's own placement: inside/above the
+  viewport, not a separate always-visible top-level bar the way the Phase
+  15e File menu is), and the 3D image below is correctly sized to whatever
+  vertical space is left under it. This is this panel's first-ever content
+  besides the plain `ImGui::Image()` -- which matters for Phase 16's own
+  double-click-to-capture-the-camera check, also in this same block:
+  `ImGui::IsWindowHovered()` answers "is the mouse over this WINDOW," not
+  "over empty space in it," so without a further guard, double-clicking a
+  toolbar BUTTON would ALSO satisfy that check and spuriously request
+  camera capture on top of whatever the button click already did -- a real
+  interaction bug this phase's own research caught before it shipped, not
+  a hypothetical. Fixed with one added condition,
+  `!ImGui::IsAnyItemHovered()` (true exactly when the mouse is over some
+  ImGui item -- a toolbar button included -- false over the plain image
+  backdrop), checked AFTER `renderViewportToolbar()` has already submitted
+  this frame's buttons so it needs no knowledge of the toolbar's own
+  layout/button count to correctly exclude just that row.
+- **The pure half: `ToolbarButton`/`toolbarButtonIconGlyph()`
+  (`editor_icons.hpp`/`.cpp`), tested in isolation.** The same "small,
+  standalone decision, unit-tested with no live GL context/ImGui frame/font
+  atlas at all" shape `sceneNodeIconGlyph()`/`assetNodeIconGlyph()` (Phase
+  17b) already establish -- given one of the toolbar's six buttons (a new
+  `enum class ToolbarButton`), which codepoint does its icon draw.
+  `kLighting`/`kTextureMode` deliberately return `kIconDirectionalLight`/
+  `kIconTexture` verbatim -- the SAME constants a Scene row with a
+  DirectionalLight / an Assets row under `assets/textures/` already draw --
+  rather than a second, visually-near-duplicate "toolbar sun"/"toolbar
+  image" codepoint, so the vendored font subset (below) only needed FOUR
+  new glyphs, not six, for a six-button row. `tests/editor_icons_test.cpp`
+  gained six new assertions (one per `ToolbarButton` enumerator), including
+  two that specifically pin `kLighting`/`kTextureMode` to the REUSED
+  constants -- a future edit that accidentally gave either its own new
+  codepoint instead of reusing the tree-row one would fail exactly those
+  two lines. This is genuinely the only pure logic this phase's own UI
+  wiring has to extract: unlike `sceneNodeIconGlyph()`'s real
+  multi-flag precedence problem, a toolbar button's identity IS its whole
+  input (no combination of "which buttons are present" to resolve between)
+  -- but it's still a real "given X, produce exactly one Y" contract worth
+  isolating from the ImGui-facing code that calls it, the same reasoning
+  Phase 17b's own README section already gives for
+  `assetNodeIconGlyph()`'s simpler, `isDirectory`-first switch.
+- **The icon font: four new codepoints, re-subsetted into the SAME vendored
+  file, from the SAME upstream release.** Phase 17b's own `pyftsubset`
+  command re-run against the identical upstream `fa-solid-900.ttf` (Font
+  Awesome Free 6.7.2, Solid, tag `6.7.2` -- the same file that produced the
+  original six-glyph subset, not a re-download), with four more codepoints
+  added to `--unicodes`:
+  ```
+  python3 -m fontTools.subset fa-solid-900.ttf \
+    --unicodes=F07B,F1B2,F0EB,F185,F030,F03E,F00A,F0E2,F04B,F04C \
+    --glyph-names --layout-features='' --no-hinting --desubroutinize \
+    --output-file=editor-icons.ttf
+  ```
+  `F00A` ("table-cells", the classic grid-of-squares glyph), `F0E2`
+  ("arrow-rotate-left", Font Awesome's own "undo" glyph), `F04B` ("play"),
+  `F04C` ("pause") -- `editor_icons.hpp`'s own new `kIconGrid`/`kIconUndo`/
+  `kIconPlay`/`kIconPause` constants, one each. `F185`/`F03E` (sun/image)
+  were already in the original six-codepoint list and needed no new subset
+  entry at all -- see `ToolbarButton`'s own comment above for why the
+  toolbar reuses them rather than requesting a second copy. The result --
+  checked into `assets/fonts/editor-icons.ttf`, replacing Phase 17b's own
+  2,160-byte file -- is **2,916 bytes, 11 glyphs** (the ten named
+  codepoints plus the mandatory `.notdef`), still a small fraction of the
+  ~426 KB upstream release file. `editor_ui.cpp`'s own `kIconGlyphRanges`
+  array (the `EditorUI` constructor's font-atlas merge, Phase 17b) grew
+  four more one-codepoint `{lo, hi}` pairs, built FROM the same
+  `editor_icons.hpp` constants as before -- exactly the "one more
+  codepoint each time, no rearchitecting the merge mechanism itself" path
+  Phase 17b's own "Deliberately general, not hardcoded to tree rows"
+  section said a future toolbar phase would take.
+  **Verified both ways, not just assumed**: an offline Pillow render of
+  each of the four new codepoints against the freshly-subsetted font
+  confirmed well-formed, correctly-shaped glyphs (a 3x3 grid, a
+  counter-clockwise undo arrow, a play triangle, two pause bars) before
+  this file was ever checked in; a SECOND offline render of the ORIGINAL
+  six codepoints against the SAME freshly-subsetted file confirmed all six
+  still render exactly as before (folder/cube/lightbulb/sun/camera/image,
+  no regressions) -- both checks independent of, and prior to, the
+  in-engine headless screenshot proof below.
+- **Deliberately NOT done this phase** (the same "smallest correct
+  increment" discipline every earlier phase's own list already follows): a
+  real viewport grid overlay, a real undo/redo stack, or real play/pause/
+  restart simulation state (see this section's own opening paragraph for
+  why -- each is genuinely separate, substantial scope, not a corner cut);
+  wiring `ssrDisabled_`/`clusterDebugMode_` to a toolbar button (the
+  mockup shows six buttons, not eight -- see above); the custom window
+  chrome/borderless rounded outer window border (Phase 17d, separate --
+  untouched by this phase, same as 17a/17b's own scope notes already say);
+  and a configurable/rearrangeable toolbar (this is one fixed row in one
+  fixed order, matching this project's own repeated "no speculative
+  configurability nothing asks for" precedent -- Phase 17a's own theme-
+  picker call, Phase 15d's own drag-and-drop call, made the identical
+  judgment for the identical reason).
+- **Verify**: a rebuild (including a forced recompile of every touched
+  file -- `editor_ui.cpp`/`editor_icons.cpp`/`application.cpp`/
+  `editor_icons_test.cpp` -- to rule out a stale cached object hiding a
+  warning) produced **zero new warnings** under `-Wall -Wextra`. `ctest`
+  reports **13/13** -- unchanged from Phase 17b's own baseline count,
+  since `editor_icons_test` (already an existing target) is EXTENDED with
+  six new `ToolbarButton` assertions rather than needing a new target of
+  its own.
+
+  Three `tools/run_headless.sh` runs (`ENGINE_MAX_FRAMES=60`): a plain
+  baseline, one with `ENGINE_SSAO_DISABLE=1`, one with
+  `ENGINE_SSAO_DEBUG=1`. All three logged **zero** `[ERROR]` lines and the
+  same clustered-lighting occupancy every prior phase's own baseline has
+  recorded (2151/2304 clusters occupied, avg 3.576476 lights/occupied
+  cluster -- the same small run-to-run llvmpipe noise Phase 15c's own
+  review already characterized), confirming this phase's changes (a Dear
+  ImGui toolbar plus two direct `bool&` re-bindings of already-existing
+  state) touch nothing in the rendering/lighting pipeline itself beyond
+  the two flags it's honestly documented as touching.
+
+  **How the two real buttons were proven to actually toggle their
+  underlying flag, and why no new `ENGINE_DEBUG_*` var was added for
+  it**: this phase's own brief offered a choice -- add a new debug var to
+  headlessly exercise a real click on a toolbar button, OR rely on the
+  existing `ENGINE_SSAO_DISABLE`/`ENGINE_SSAO_DEBUG` env vars, since they
+  set the EXACT SAME `Application::ssaoDisabled_`/`ssaoDebugMode_` members
+  the toolbar buttons now also read/write. **The second option was taken.**
+  A new debug var simulating a click would only ever prove "this code path,
+  when driven by an env var instead of a mouse, flips the same bool" --
+  strictly weaker evidence than what the existing vars already give: a
+  screenshot with `ENGINE_SSAO_DISABLE=1` set shows the "lighting" toolbar
+  button rendered in the active/teal state (confirmed -- see the crop
+  below), and a screenshot with `ENGINE_SSAO_DEBUG=1` set shows the
+  "texture-mode" button ALSO rendered active/teal AND the entire Viewport
+  panel genuinely showing the raw grayscale SSAO occlusion buffer instead
+  of the normal shaded scene -- direct visual proof that the toolbar's own
+  `active` styling and Application's real rendering behavior are reading
+  the identical underlying state, without needing to fabricate a mouse
+  click at all. (This engine's headless harness genuinely has no way to
+  simulate an actual mouse click on an ImGui widget -- the same honest
+  limitation Phase 17a's own Verify section already recorded for the
+  Create-menu/Material "Browse..." popups.)
+
+  Inspected as screenshots, all three confirming real glyphs render (not
+  tofu/missing-glyph boxes) at their correct positions, left to right
+  exactly matching the mockup's own ordering:
+  - **Baseline**: grid (3x3 squares), sun/lighting (a sunburst, NOT
+    highlighted -- SSAO on, the default), image/texture-mode (a picture
+    icon, NOT highlighted -- SSAO debug view off, the default), undo (a
+    counter-clockwise arrow), play (a triangle), pause (two vertical bars,
+    highlighted teal per the mockup's own visual -- see this section's own
+    "pause button" paragraph above for why that's still `BeginDisabled()`'d
+    despite the highlight).
+  - **`ENGINE_SSAO_DISABLE=1`**: identical row, except the "lighting"
+    button is now ALSO rendered highlighted/teal -- the toolbar's own
+    active-state read of `ssaoDisabled_` tracking the env-var-set value
+    correctly.
+  - **`ENGINE_SSAO_DEBUG=1`**: identical row, except the "texture-mode"
+    button is now ALSO rendered highlighted/teal, and (see above) the
+    Viewport's own rendered picture is visibly the raw occlusion buffer,
+    not the normal scene -- both the toolbar's own active-state read AND
+    the real rendering effect confirmed from the SAME screenshot.
+
+  The four disabled buttons (grid/undo/play/pause) render visibly dimmed
+  relative to the two real, enabled buttons in every screenshot -- Dear
+  ImGui's own `BeginDisabled()` contract (a `style.DisabledAlpha`,
+  default 0.60, multiplier applied to every color an item under it draws
+  with) applied automatically, the identical mechanism Phase 14f's own
+  Point-Light/Directional-Light/Camera items rendered dimmed with before
+  Phase 15a/15b/15c made each real in turn. **One honest caveat, the same
+  shape as Phase 17a's own popup caveat**: this headless harness has no
+  cursor to hover with, so the disabled buttons' own tooltip TEXT was
+  never itself captured in a screenshot -- what IS verified is that the
+  code path producing it (`BeginDisabled()` +
+  `IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)` +
+  `SetTooltip()`) is the exact, already-proven-correct pattern this
+  codebase's own Phase 14f Create-menu items used for two full phases
+  (15a/15b's own build) before anyone could interactively confirm THEIR
+  tooltips either, and that every disabled button's own `enabled=false`
+  genuinely prevents `ImGui::Button()` from ever reporting a click (Dear
+  ImGui's own documented `BeginDisabled()` contract, not a second guard
+  this phase's own code adds on top).
+
+### Phase 17d: window chrome
+
+The fourth and last item in the "Phase 17: visual design" arc. The project
+owner supplied a reference mockup showing a borderless window with rounded
+outer corners and a custom-drawn top bar -- the "Engine Studio" app icon/name
+on the left, and (implicitly, standard for this kind of app, matching every
+other real editor's own chrome even though the mockup's own crop doesn't show
+it explicitly) minimize/maximize/close controls on the right -- replacing the
+OS's own native window title bar entirely. Every earlier item in this arc
+named this as explicitly out of its own scope: Phase 17a's own section called
+it "real platform-level borderless-window work, much bigger scope"; Phase 17c
+repeated the identical line almost verbatim. This is that phase.
+
+**Read this section's own "Honest verification ceiling" subsection below
+before treating anything here as more thoroughly proven than it is** -- this
+is the one phase in the whole Phase 15-17 body of work that genuinely cannot
+get the same kind of headless-screenshot-based proof every other phase in
+this project has had, and this section says so plainly rather than
+overclaiming.
+
+- **The real constraint this phase's own brief set, and why it shaped every
+  design choice below.** This project's own dev/CI environment is a headless
+  Linux container (Xvfb, no real window manager -- confirmed directly: `ps`
+  inside this container shows no window manager process of any kind running
+  alongside Xvfb, only the X server itself and whatever client app connects
+  to it). The project owner's actual target is a real Windows desktop this
+  environment cannot reach at all. Two consequences follow directly:
+  1. **Nothing about "does dragging/resizing/minimizing/maximizing/closing
+     actually FEEL right on a real desktop" can be verified here**, at any
+     level beyond code-reading and logical soundness -- there is no real
+     mouse, no real window manager compositing real window decorations, and
+     no real user's hand on a trackpad. Every claim in this section's own
+     Verify subsection is scoped accordingly.
+  2. **No Windows-specific platform code was written that this environment
+     cannot compile-check.** Making a GLFW window borderless
+     (`GLFW_DECORATED = GLFW_FALSE`) is well known to also remove the OS's
+     own native edge-drag resize handles on at least some platforms/window
+     managers -- restoring that properly on Windows normally needs custom
+     `WM_NCHITTEST` handling via the native Win32 window handle
+     (`glfwGetWin32Window()`), which needs `_WIN32`/Windows headers this
+     Linux container has none of -- not even a way to build-check a
+     `#ifdef _WIN32` branch here, since the preprocessor would simply never
+     enter it. Rather than ship an untested, possibly-broken `#ifdef _WIN32`
+     block behind a compile flag nothing in this environment ever exercises,
+     **this phase implements only the portable, cross-platform-buildable
+     pieces** (a custom-drawn title bar; window dragging via
+     `glfwSetWindowPos()`-delta-tracking each frame, which compiles and is
+     logically testable on any platform GLFW supports) and **documents native
+     edge-drag-to-resize as a known, accepted, real gap** a future
+     Windows-specific phase would need to close with proper hit-testing --
+     not papered over, not silently dropped.
+
+- **Borderless by default now, with a real escape hatch back to the OS's own
+  native decorations.** `window.hpp`'s `Window` constructor gains a
+  `decorated` parameter (default `true`, GLFW's own out-of-the-box behavior --
+  the identical "class defaults to the old/native behavior, main.cpp's own
+  call site decides what a real interactive run actually wants" shape
+  Phase 14a's own `maximized` parameter already established), setting the
+  `GLFW_DECORATED` window hint before creation (must happen before
+  `glfwCreateWindow()`, confirmed against the actual vendored
+  `build/_deps/glfw-src/include/GLFW/glfw3.h`, not assumed from general
+  knowledge -- same discipline every earlier phase's own GLFW-hint research
+  already followed). `main.cpp` is what actually flips the real interactive
+  default to borderless (`kDefaultWindowDecorated = false`), with a new
+  `ENGINE_WINDOW_DECORATED` env var as the documented, real escape hatch back
+  to native decorations -- unlike `ENGINE_WINDOW_WIDTH`/`HEIGHT`'s own
+  headless-only motivation, this one exists for a real user on a real
+  desktop: if the native-edge-resize gap above (or anything else about this
+  new chrome) turns out to be a problem on someone's actual Windows box, they
+  can get the OS's own title bar/border/resize handles back with one env var,
+  no source change, no rebuild.
+
+- **Headless capture: confirmed unaffected, not just assumed.** Xvfb runs no
+  window manager at all in this environment, so `GLFW_DECORATED` has no
+  window manager to hand decoration-drawing instructions to in the first
+  place -- there was every reason to expect this to be a non-issue, and it
+  was verified directly rather than left as an assumption: `tools/
+  run_headless.sh` (unmodified) was run both with the new borderless default
+  and with `ENGINE_WINDOW_DECORATED=1` forcing native decorations back on;
+  both produced identical, successful `xwd`-based screenshot captures with
+  **zero** `[ERROR]` lines (see Verify below). No escape hatch was needed for
+  the headless harness itself -- `ENGINE_WINDOW_DECORATED` exists purely for
+  a real desktop user, per the point above, not because headless capture
+  needed one.
+
+- **The custom title bar row: `renderTitleBar()`, a new private `EditorUI`
+  member function (`editor_ui.cpp`), not a free function in that file's
+  existing anonymous namespace.** Every other per-frame render helper in that
+  file (`renderViewportToolbar()`, `toolbarIconButton()`) is a free function
+  taking all the state it needs as parameters; this one needs access to this
+  class's OWN persistent cross-frame state (`titleBarDragging_`, a new
+  private `bool`) to know whether a drag is still in progress on a frame
+  where the cursor may not even be hovering the title bar's own window rect
+  any more (a fast drag can easily out-run the window being repositioned
+  under it for a frame or two) -- the identical reason `buildInitialLayout()`
+  is already a member function rather than a free one (it needs
+  `layoutBuilt_`).
+  - **Stacks correctly above the Phase 15e File menu bar, confirmed by
+    reading Dear ImGui's own source, not merely assumed.** The title bar
+    reserves its own strip of screen space at the top of the main viewport
+    via `ImGui::BeginViewportSideBar("##TitleBar", viewport, ImGuiDir_Up,
+    height, flags)` -- the EXACT SAME internal mechanism
+    `ImGui::BeginMainMenuBar()` itself already uses (confirmed directly
+    against this project's own vendored `build/_deps/imgui-src/
+    imgui_widgets.cpp`: `BeginMainMenuBar()`'s own implementation is just
+    `BeginViewportSideBar("##MainMenuBar", viewport, ImGuiDir_Up, height,
+    window_flags)`). `BeginViewportSideBar()`'s own implementation
+    accumulates each call's height into the viewport's shared
+    `BuildWorkInsetMin` (an ADD, not an overwrite), so calling it once for
+    the new title bar and then letting `renderDockspaceShell()`'s own
+    pre-existing `ImGui::BeginMainMenuBar()` call run right after correctly
+    stacks the two: the File menu bar ends up docked directly beneath the
+    title bar, and `DockSpaceOverViewport()` (called after both) sizes the
+    four docked panels into whatever work-rect space remains under both --
+    exactly the same "reserve space first, dockspace reads the shrunk work
+    rect second" relationship the File menu bar already had with the
+    dockspace before this phase, just with one more reservation stacked on
+    top. Confirmed visually too, not just by source inspection -- see Verify
+    below.
+  - **App icon/name on the left**: a small filled, rounded square (colored
+    via the SAME live-read accent teal `toolbarIconButton()` already reads,
+    `ImGuiCol_ButtonActive` -- reusing the one established accent rather than
+    a second hardcoded literal, matching `applyEditorTheme()`'s own "one
+    accent teal, reused everywhere" discipline from Phase 17a) standing in
+    for a dedicated app-icon image asset, which this project has never
+    vendored -- simpler than sourcing/vendoring one for a single small
+    swatch, the same "geometry, not a vendored asset" choice this phase makes
+    for the window-control glyphs below, for the identical reason. The name
+    itself is **"Engine Studio"** -- this project's reference mockup's own
+    name for itself, which Phase 17a's own README section already used
+    descriptively ("a target 'Engine Studio' editor look") without ever
+    actually rendering it anywhere in the UI; this phase is the first to put
+    that string on screen. Deliberately left DIFFERENT from the native OS
+    window title (`main.cpp`'s own `"3D Engine"`, passed to
+    `glfwCreateWindow()` and still what a taskbar/Alt-Tab switcher shows,
+    since hiding the native TITLE BAR via `GLFW_DECORATED=false` does not
+    stop the OS from tracking the window's title string for those other
+    surfaces) -- a real, honest, minor inconsistency left as-is rather than
+    silently renaming `main.cpp`'s own long-standing window title to match a
+    string that, before this phase, only ever existed as a label inside a
+    mockup image: out of scope for what this phase's own brief actually
+    asked for (custom in-window chrome, not a rebrand of this whole
+    project's own external-facing window title).
+  - **Minimize/maximize-restore/close: plain `ImDrawList`-drawn geometry (a
+    line, a rectangle outline, an X), not three more codepoints merged into
+    this project's vendored icon font.** A deliberate departure from Phase
+    17b/17c's own established "add codepoints, re-subset the font" precedent
+    for new icons, and the mockup's own brief explicitly left this call open
+    ("your call, justify it"). The justification: a window-control glyph is
+    one of the smallest, most universally recognized pieces of UI iconography
+    that exists -- real Windows/macOS/GNOME/KDE title bars, and most
+    cross-platform apps that draw their own (VS Code, Windows Terminal,
+    JetBrains IDEs...), all draw these three shapes procedurally rather than
+    shipping them as font glyphs, because three straight lines/a rectangle
+    outline are simpler to draw directly than to hand-subset, vendor, and
+    keep a THIRD generation of `assets/fonts/editor-icons.ttf` synchronized
+    with (re-running Phase 17b's own `pyftsubset` step a third time,
+    regenerating that file again, three more `editor_icons.hpp` constants/
+    `kIconGlyphRanges` entries) for shapes this simple. The maximize/restore
+    button draws whichever of its two glyphs matches `Window::isMaximized()`
+    (a live `glfwGetWindowAttrib(..., GLFW_MAXIMIZED)` read, not a
+    separately-tracked app-side bool that could drift from what the OS
+    actually did) -- a single rectangle outline for "maximize," two
+    overlapping rectangle outlines for "restore," the standard cross-platform
+    convention for that state.
+  - **No red hover on the close button, deliberately.** Many real OS title
+    bars hover their close button red; this phase's three window-control
+    buttons all use Dear ImGui's own plain, un-pushed `Button`/`ButtonHovered`
+    colors instead, close button included. Checked directly, not assumed:
+    this codebase has no "danger"/destructive-action color defined ANYWHERE
+    today -- `renderInspectorPanel()`'s own "Delete Object" button, the one
+    other genuinely destructive action in this whole UI, is a plain,
+    unstyled `ImGui::Button()` too. Inventing a new red accent here, for one
+    button, would be exactly the kind of unscoped one-off visual choice
+    Phase 17a's own "one accent teal, reused everywhere, not an unsystematic
+    pass inventing a slightly different color per widget" discipline already
+    rejected elsewhere in this file -- and this phase's own brief was
+    explicit about reusing the established teal, not inventing new colors.
+  - **Drawn ONLY when the OS's native decorations are OFF -- a real
+    correctness fix, not a hypothetical.** The first working version of this
+    phase drew the custom title bar unconditionally, regardless of the
+    `decorated` flag -- caught during this phase's own review, not by any
+    headless screenshot (Xvfb's own lack of a window manager means
+    `GLFW_DECORATED=true` looks IDENTICAL to `GLFW_DECORATED=false` in every
+    screenshot this environment can produce, since neither ever gets a real
+    native title bar drawn around it here either way -- confirmed directly:
+    the two screenshots described below are pixel-for-pixel indistinguishable
+    from each other in their own chrome). On a REAL desktop with a real
+    window manager, that first version would have drawn this project's custom
+    title bar directly below/alongside a REAL native OS title bar the instant
+    someone used the `ENGINE_WINDOW_DECORATED=1` escape hatch -- a redundant,
+    broken-looking double title bar, defeating the entire point of an escape
+    hatch meant to be a clean revert. Fixed by giving `Window` a new
+    `isDecorated()` accessor (the constructor's own `decorated` argument,
+    remembered verbatim) and threading `!window_.isDecorated()` into
+    `renderDockspaceShell()`'s new `showCustomTitleBar` parameter:
+    `renderTitleBar()` now reserves zero screen space and draws nothing at
+    all when the OS's native decorations are on, so the File menu bar goes
+    back to being the very top row exactly as it was before this phase --
+    confirmed visually (see Verify below), not just by reading the fixed
+    code.
+
+- **Dragging: `glfwSetWindowPos()`-delta-tracking, the portable technique
+  this phase's own brief prescribed.** Clicking and holding on the title
+  bar's own empty area (not on any of the three buttons -- detected via
+  `ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered()`, the IDENTICAL
+  guard Phase 17c's own Viewport double-click fix already established for
+  distinguishing "the empty backdrop" from "an interactive item sitting on
+  top of it") and moving the mouse moves the whole OS window. The actual
+  per-frame math is pulled into a new, pure, GL/GLFW/ImGui-free function --
+  `window_chrome.hpp`'s `applyDragDelta(currentWindowX, currentWindowY,
+  mouseDeltaX, mouseDeltaY)` -- the same "small, standalone decision,
+  unit-tested in isolation" shape `light.hpp`/`asset_drop.hpp`/
+  `camera_capture.hpp`/`editor_icons.hpp` already establish, and the ONE
+  piece of this whole feature that genuinely IS pure input-in/output-out
+  logic with nothing GLFW-specific about it. Takes this frame's raw mouse
+  MOVEMENT DELTA (Dear ImGui's own `io.MouseDelta`), not an absolute
+  screen-space cursor position anchored to when the drag started: GLFW's own
+  `glfwGetCursorPos()` (and Dear ImGui's `io.MousePos`, fed by the identical
+  callback) is window-relative, not global-desktop-relative, so an
+  anchor-based design would need extra queries and extra opportunities for
+  them to observe the window having moved a partial frame apart from each
+  other; a per-frame delta added onto the window's own CURRENT position
+  (re-queried fresh via `glfwGetWindowPos()` every frame, never cached) needs
+  no drag-start anchor to remember at all and self-corrects for anything the
+  OS/window manager does to the window's position on its own between frames
+  (edge-snapping, a multi-monitor drag crossing a DPI boundary) that a
+  once-computed anchor could otherwise silently drift out of sync with. See
+  `window_chrome.hpp`'s own header comment for the full "why not an anchor"
+  reasoning and `window_chrome.cpp`'s own comment on `std::lround()` (not
+  truncation) for why small sub-pixel deltas round symmetrically in both
+  directions rather than silently biasing drags toward "stuck" on their
+  negative-delta frames.
+- **Double-clicking the empty title-bar area toggles maximize/restore** --
+  the standard OS convention, sharing the identical `overEmptyArea` guard
+  drag detection above already computes. `window_chrome.hpp`'s
+  `decideMaximizeRestoreToggle(currentlyMaximized)` (a one-line `!` under the
+  hood, but pulled into its own named, tested function for the same
+  documentation/contract-pinning reason `decideCameraCapture()`'s own
+  simpler branches are each individually asserted in `camera_capture_test`
+  rather than trusted by inspection -- a future edit that accidentally
+  inverted this one line fails a test immediately instead of silently
+  maximizing on a double-click that was supposed to restore) decides which
+  direction; `Window::toggleMaximizeRestore()` is what actually calls
+  `glfwMaximizeWindow()`/`glfwRestoreWindow()`. The maximize/restore BUTTON
+  and the empty-area double-click both funnel into the identical
+  `TitleBarAction::maximizeToggleRequested` flag and the identical
+  `Window::toggleMaximizeRestore()` call on the Application side -- one
+  gesture, one outcome, decided by one function, the same discipline
+  `decideCameraCapture()` (Phase 16) already established for Escape's own
+  two meanings.
+- **Close and Escape-while-uncaptured quit both end `run()`'s main loop, but
+  via two genuinely different mechanisms -- not one shared shutdown path.**
+  `Window::requestClose()` is a one-line wrapper around
+  `glfwSetWindowShouldClose(window_, GLFW_TRUE)` -- the exact same internal
+  GLFW flag `Window::shouldClose()` already reads at the top of
+  `Application::run()`'s own `while (!window_.shouldClose())` loop, and the
+  exact flag GLFW itself has always set automatically the instant a user
+  clicked a NATIVE title-bar close button, back when this window still had
+  one. The custom title bar's own close button is this project's first-ever
+  CODE-driven call to this method. `decideCameraCapture()`'s own
+  Escape-while-uncaptured quit (Phase 16) does NOT go through this same flag
+  at all, though -- checked directly against `run()`'s own source, not
+  assumed: its `quitRequested` result is consumed by a direct `break` out of
+  the loop body, never a call to `requestClose()` or
+  `glfwSetWindowShouldClose()`. So the close button and Escape are two
+  different mechanisms that both happen to exit the same loop -- the close
+  button sets GLFW's should-close flag (the same flag a native close button
+  always set), Escape breaks out of the loop directly -- not one mechanism
+  the new close button merely adds a second caller to.
+- **Rounded outer OS-level window corners: researched, not implemented, and
+  documented as a known gap rather than faked.** This phase's own brief was
+  explicit that genuinely-rounded OS-level corners on a borderless window can
+  be compositor-dependent and, on Windows specifically, may need either
+  nothing at all (Windows 11's DWM auto-rounds a borderless top-level window
+  in a number of configurations with zero app-side work) or an explicit,
+  Windows-specific corner-preference API call (`DwmSetWindowAttribute` with
+  `DWMWA_WINDOW_CORNER_PREFERENCE`) -- genuinely uncompilable/unverifiable
+  code in this Linux-only environment, the identical `_WIN32`-gated situation
+  the native-edge-resize gap above already describes. Rather than guess which
+  of those two stories applies on the project owner's own real Windows build,
+  or write an unverifiable `#ifdef _WIN32` block for it, this phase does
+  neither: no corner-radius call of any kind is made anywhere in this
+  codebase. This is an honest, explicitly-named gap, not an oversight --
+  matching this phase's own README section's very first "real constraint"
+  paragraph above, and this project's own established instinct (Phase 17a's
+  own "no rounding artifact" claims, Phase 16/17a/17c's own popup/tooltip
+  caveats) for saying plainly what was NOT verified/attempted rather than
+  quietly omitting it.
+- **Deliberately NOT done this phase**: native Win32 `WM_NCHITTEST`
+  edge-drag-resize handling and rounded-corner API calls (both covered above
+  -- genuinely uncompilable/unverifiable in this environment, not a corner
+  cut); a settings/preferences UI for window chrome (this is one fixed
+  title-bar design, matching this project's own repeated "no speculative
+  configurability nothing asks for" precedent -- Phase 17a's own theme-picker
+  call, Phase 17c's own configurable-toolbar call, made the identical
+  judgment for the identical reason); renaming `main.cpp`'s own native window
+  title to match the title bar's new "Engine Studio" branding (a real,
+  honest, minor inconsistency, named above, left for a future phase or the
+  project owner's own call, not this phase's own scope).
+
+- **Verify -- adjusted for this phase's real, honest limits, not forced to a
+  rigor level this phase cannot actually support:**
+  1. **`cmake --build build -j"$(nproc)"`, including a forced recompile of
+     every touched file** (`window.cpp`/`window.hpp`, `editor_ui.cpp`/
+     `editor_ui.hpp`, `application.cpp`/`application.hpp`, `main.cpp`,
+     `window_chrome.cpp`/`.hpp`, `window_chrome_test.cpp`, to rule out a
+     stale cached object hiding a warning) produced **zero new warnings**
+     under `-Wall -Wextra`. This is real, fully mechanical, and fully
+     verifiable in this environment -- no caveat needed.
+  2. **A real, genuinely-testable pure function was extracted and
+     exhaustively covered**: `tests/window_chrome_test.cpp` (new) exercises
+     `applyDragDelta()` across whole-pixel deltas (both signs), the exact
+     sub-pixel-rounding regression this function's own comment describes
+     (`std::lround()`, not truncation -- `0.6` rounds to `1`, `-0.6` rounds to
+     `-1`, not `0` either way), the `0.5` halfway-rounding boundary, and a
+     realistic multi-frame drag sequence composing several calls together;
+     plus `decideMaximizeRestoreToggle()` in both directions. `ctest` reports
+     **14/14** (13 pre-existing plus this new target) -- unchanged pass rate,
+     one more real target than before. **Nothing else in this phase's own
+     new code was extractable as pure logic** -- `renderTitleBar()`'s own
+     drag-state machine, button-click detection, and `BeginViewportSideBar()`
+     stacking are all genuinely ImGui-frame-dependent (they read
+     `IsWindowHovered()`/`IsAnyItemHovered()`/`io.MouseDelta`/the current
+     frame's own item rects, none of which exist outside a live ImGui frame),
+     and every new `Window` method (`getWindowPos()`/`setWindowPos()`/
+     `isMaximized()`/`iconifyWindow()`/`toggleMaximizeRestore()`/
+     `requestClose()`) is a thin, one-line GLFW wrapper with no decision of
+     its own to test -- said honestly here, matching Phase 17a's own honest
+     "no meaningful GL-free unit test of its own" admission for
+     `applyEditorTheme()`, rather than inventing a test that would add file
+     count without adding real coverage.
+  3. **`tools/run_headless.sh` (`ENGINE_MAX_FRAMES=60` and, separately,
+     `ENGINE_MAX_FRAMES=5` for quicker screenshot-only runs) confirms the app
+     still launches and renders without crashing, in BOTH configurations this
+     phase adds**: the new borderless default, and
+     `ENGINE_WINDOW_DECORATED=1`. Both logged `Window created (800x600,
+     borderless)` / `Window created (800x600)` respectively (confirming the
+     new hint is actually reaching `Window`'s own constructor, not just
+     assumed from the source), and both logged **zero** `[ERROR]` lines, with
+     the successful `xwd`-based screenshot capture this project's own
+     headless harness has relied on since Phase 0 working unmodified in
+     both. This proves "the app doesn't crash with the new borderless-window
+     code active, in either configuration this phase adds" -- **nothing
+     more**. The two screenshots' own title-bar chrome is, expectedly,
+     pixel-for-pixel indistinguishable in terms of whether a NATIVE OS title
+     bar is present, because Xvfb runs no window manager at all to draw one
+     either way (see this section's own "Headless capture" bullet above) --
+     what the borderless screenshot DOES show, and the decorated one
+     correctly does NOT, is this phase's own custom-drawn title bar row
+     itself (app icon, "Engine Studio" text, minimize/maximize/close glyphs,
+     all rendered legibly, correctly stacked above an intact File menu bar
+     with no overlap), and the decorated screenshot correctly shows the File
+     menu bar restored to the very top row with NO title bar above it at
+     all -- confirming `showCustomTitleBar`'s own gating (see above) actually
+     works, not just that the flag compiles.
+  4. **What this environment CANNOT verify, stated explicitly rather than
+     glossed over**: this headless harness has no real mouse and no real
+     window manager, so NONE of the following were exercised by an actual
+     interactive run, only by code-reading and logical soundness --
+     - Whether clicking and holding the title bar's empty area and moving
+       the mouse actually drags the window smoothly on a real desktop.
+     - Whether double-clicking the empty area actually toggles maximize/
+       restore correctly on a real window manager.
+     - Whether the minimize/maximize/close buttons actually respond to a
+       real mouse click and produce the correct real-world effect
+       (iconified, maximized/restored, window closed) -- this project's own
+       headless harness has never been able to simulate a real ImGui widget
+       click, the identical limitation Phase 17a's own Create-menu/Material
+       "Browse..." popup caveat and Phase 17c's own toolbar-button caveat
+       already recorded for a completely different UI surface; this phase
+       inherits the identical ceiling for a third.
+     - Whether the OS's native edge-drag resize still works at all on a
+       borderless window on the project owner's real Windows target (the
+       known, accepted, explicitly-documented gap above).
+     - Whether the outer window corners actually render rounded on a real
+       desktop (the known, accepted, explicitly-documented gap above; no
+       corner-radius code was written at all, so there is nothing here for a
+       screenshot to even show either way).
+     
+     Final judgment on all five of these genuinely needs the project owner's
+     own hands on a real Windows build -- this section does not claim
+     otherwise anywhere above, and the Verify items that ARE real (1-3) are
+     each scoped precisely to what they actually prove, not stretched to
+     imply more.
+
+With Phase 17d, the full Phase 17 arc (17a-17d) is now complete: the base
+dark/teal theme (17a), the Scene/Assets tree icon font (17b) later extended
+with the Viewport toolbar's own icons (17c), the toolbar row itself (17c),
+and now the borderless window with its own custom title bar (17d) together
+give this engine's editor the complete visual identity the project owner's
+original reference mockup called for -- matching how Phase 15g's own README
+section closed out the Phase 15 arc, each sub-phase closed exactly the gap
+in front of it (17a: palette/rounding only, no chrome; 17b: an icon font
+with no toolbar to spend it on yet; 17c: a toolbar reusing 17a's colors and
+17b's font infrastructure, two of six buttons wired to real state, four
+honestly `BeginDisabled()`'d; 17d: the window chrome every earlier section
+in this arc explicitly deferred to it by name) rather than any one phase
+guessing ahead at scope the engine, or this environment's own ability to
+verify it, wasn't ready for. Unlike every phase before it in this arc (and
+nearly every phase in the entire Phase 15-17 body of work), this one carries
+a real, permanent, honestly-documented verification ceiling -- headless
+Xvfb has no window manager to drag/resize/minimize/maximize a window
+through, and this project's own Linux environment cannot compile a single
+line of the Windows-specific code a complete version of this feature would
+eventually need -- so the true final word on how well this phase's own
+custom chrome actually works is, more than any other phase in this project's
+history, the project owner's own hands on their own real Windows build, not
+a screenshot this README can point to.
+
+### Phase 18a: floating viewport toolbar
+
+The first item in a new "Phase 18: editor usability + physics polish" arc,
+opened by the project owner's own explicit complaint about Phase 17c's
+toolbar: **"the toolbar is supposed to be on top of the scene not above
+it."** Phase 17c's `renderViewportToolbar()` was called as the very first
+thing inside the Viewport panel's `Begin()`/`End()` block, so its six
+buttons occupied a row of their own ABOVE the rendered 3D image -- correct
+Dear ImGui layout, but the wrong picture: the reference mockup, and every
+real editor it draws from (Blender, Unity), shows this toolbar floating
+OVER the viewport, not eating into it. This phase moves it.
+
+- **What changed, precisely.** `renderViewportToolbar()` itself is
+  untouched except for one line removed (the trailing `ImGui::Separator()`
+  17c's row-shaped version drew after its sixth button -- meaningless, and
+  visually wrong, once nothing is separating a "row" from anything below
+  it). Its six `ImGui::Button()` calls, their `active`/`enabled` wiring,
+  and every tooltip string are byte-for-byte identical to 17c. What's new
+  is `renderViewportToolbarOverlay()` (`editor_ui.cpp`, same anonymous
+  namespace) and where the Viewport panel's own code calls it:
+  `renderDockspaceShell()` now computes `contentRegion`/`panelScreenPos`
+  and submits `ImGui::Image()` FIRST, using the panel's own FULL available
+  content region (no toolbar row has already eaten into it), and only
+  AFTER that calls `renderViewportToolbarOverlay(ssaoDisabled,
+  ssaoDebugMode, panelScreenPos)` -- which re-submits
+  `renderViewportToolbar()`'s same six buttons, positioned near the
+  panel's own top-left corner, with a translucent background painted
+  behind them.
+- **Same window, not a second floating `Begin()` -- researched against
+  this project's own vendored ImGui source, not assumed, before picking.**
+  The project owner's own brief named two standard techniques: drawing the
+  toolbar's items directly into the Viewport window's own draw list at an
+  absolute cursor position (same window, draw-order-after-image), or a
+  second, independent `ImGui::Begin()` window with
+  `ImGuiWindowFlags_NoTitleBar | NoResize | NoMove | NoScrollbar` (likely
+  `NoDocking` too) pinned over the panel via `SetNextWindowPos()`. This
+  phase read `build/_deps/imgui-src/imgui.cpp`/`imgui.h` directly and took
+  the first option. Two concrete reasons, not a coin flip:
+  - **Docking safety.** The Viewport panel is itself a dockable panel
+    inside `DockSpaceOverViewport()` (Phase 14a). A second, undecorated
+    floating window positioned over it would itself be a real `ImGuiWindow`
+    -- without `ImGuiWindowFlags_NoDocking` it becomes a valid drop target
+    a user could accidentally dock something into (turning the toolbar into
+    a docked panel of its own), and even with that flag it is one more
+    independently-tracked window whose position this code would have to
+    keep hand-synchronized with the Viewport panel's own rectangle every
+    frame. Submitting the buttons as ordinary items of the SAME "Viewport"
+    window sidesteps all of that by construction -- there is no second
+    window to desync, dock into, or accidentally raise/lower in z-order
+    relative to its own parent panel.
+  - **The double-click guard.** Phase 17c's own `!ImGui::IsAnyItemHovered()`
+    guard (see below) reads `imgui.cpp`'s
+    `return g.HoveredId != 0 || g.HoveredIdPreviousFrame != 0;` -- genuinely
+    GLOBAL state, not scoped to one window, so it happens to still work
+    correctly even if the buttons lived in a second window. That's exactly
+    the kind of accidental correctness this phase's own research wanted to
+    avoid depending on: the same-window approach makes the guard obviously
+    correct BY CONSTRUCTION (the buttons are this window's own items, the
+    same relationship 17c already established) rather than correct only
+    because one specific query function happens to be implemented globally.
+- **Re-anchoring every frame, not a cached rectangle.** `panelScreenPos` is
+  the exact same `ImGui::GetCursorScreenPos()` value `renderDockspaceShell()`
+  already captured immediately after the Viewport panel's own `Begin()` --
+  fresh every single call, never cached across frames. Passed straight into
+  `renderViewportToolbarOverlay()` as `originScreenPos`, it's what the
+  overlay's own position is computed relative to, so a redock or resize of
+  the Viewport panel (this dockspace's whole point is that the user CAN
+  rearrange it) is reflected correctly on the very next frame with no
+  separate "did the panel move" tracking of its own.
+- **Background-behind-buttons via `ImDrawListSplitter`, not a
+  precomputed-width rectangle.** The overlay's own bounding box isn't known
+  until AFTER the six buttons are actually submitted (their combined width
+  depends on font metrics/padding this function doesn't want to
+  hand-duplicate). `ImDrawListSplitter` -- a public, documented part of
+  `imgui.h` (the same idiom Dear ImGui's own Columns/Tables implementation
+  uses) -- solves exactly this: the buttons are submitted into channel 1
+  first (inside a `BeginGroup()`/`EndGroup()` pair, so
+  `GetItemRectMin()`/`Max()` afterward gives the real, now-known group
+  rect), the translucent background is then painted into channel 0 sized to
+  that rect, and `Merge()` reorders the two channels back into
+  channel-0-before-channel-1 order in the final draw list -- BEHIND, not on
+  top of, the buttons -- despite being the SECOND set of `AddRectFilled()`/
+  `AddRect()` calls made this frame. Both channels are still appended to
+  the Viewport window's draw list strictly after `ImGui::Image()`'s own
+  draw command, so the whole overlay (background and buttons alike)
+  composes on top of the rendered 3D image either way -- the actual "on
+  top of the scene" requirement this phase exists for.
+- **Colors: reused from the Phase 17a theme, not invented.** The overlay's
+  background reads `ImGui::GetStyle().Colors[ImGuiCol_WindowBg]` back LIVE
+  (`applyEditorTheme()`'s own `kBgPanel`) at a reduced alpha (0.72), and its
+  border reads `ImGuiCol_Border` (`kBorderSubtle`) the same way -- the
+  identical "read the live style entry back rather than declare a second
+  hardcoded literal" discipline `toolbarIconButton()`'s own `active` path
+  already established for `ImGuiCol_ButtonActive` (Phase 17c). Rounded with
+  `style.WindowRounding` (8.0f), the same "outer container" radius family
+  applyEditorTheme()'s own comment gives every full panel/popup, since this
+  overlay reads as one too. Translucent, not opaque, precisely so the
+  rendered 3D scene stays visible as the actual viewport backdrop around
+  and faintly through the bar -- confirmed visually against both a bright
+  daylit scene and the grayscale SSAO debug view (see Verify below), not
+  just asserted.
+- **The double-click-to-capture-camera guard needed no logic change, only
+  a position move.** Phase 17c's own `!ImGui::IsAnyItemHovered() &&
+  ImGui::IsWindowHovered() && ImGui::IsMouseDoubleClicked(...)` check is
+  unchanged in every particular except WHERE in this function it now sits:
+  it moved from immediately after `renderViewportToolbar()` (17c's
+  placement, when that was the first thing submitted) to immediately after
+  `renderViewportToolbarOverlay()` (this phase's placement, now the last
+  thing submitted before the selection-outline block). `IsAnyItemHovered()`
+  only correctly excludes a double-click landing on a toolbar BUTTON if
+  those buttons have already been submitted THIS frame by the time the
+  check runs -- true either way, since `renderViewportToolbarOverlay()`
+  still submits the exact same `ImGui::Button()` calls as items of this
+  exact "Viewport" window (see the same-window reasoning above). No new
+  interaction bug, and none of the guard's own three conditions needed to
+  change.
+- **Deliberately NOT done this phase**: any change to what the six buttons
+  DO -- every click handler, `BeginDisabled()` state, and tooltip string is
+  identical to 17c (still four stub buttons with explanatory tooltips, two
+  real `ssaoDisabled_`/`ssaoDebugMode_` toggles); wiring grid/undo/play/
+  pause to real functionality (that's this new arc's own later scope, not
+  this sub-phase's); a draggable/repositionable toolbar (this is one fixed
+  overlay position near the top-left, matching the mockup, the same
+  "no speculative configurability nothing asks for" precedent Phase 17c's
+  own README section already cites for the row it replaces); and any
+  change to the Scene/Assets/Inspector panels, none of which this phase
+  touches.
+- **Verify**: a full clean rebuild (`build_clean_18a/`, configured and
+  built from scratch, `-Wall -Wextra`) produced **zero warnings** from
+  `editor_ui.cpp` or any other engine source file (the handful of
+  pre-existing `-Wunused-but-set-variable` warnings in
+  `tests/material_override_test.cpp`/`camera_capture_test.cpp`/
+  `window_chrome_test.cpp` predate this phase and are untouched by it).
+  `ctest` reports **14/14** passing -- unchanged from Phase 17d's own
+  baseline; as originally shipped, this phase introduced no new pure,
+  standalone decision function (`renderViewportToolbarOverlay()` is Dear
+  ImGui plumbing -- cursor positioning, a draw-list split/merge, reading live
+  style colors back -- not a "given X, produce exactly one Y" contract in the
+  shape `toolbarButtonIconGlyph()`/`decideCameraCapture()` are, so there was
+  nothing new here to extract into an isolated unit test the way those
+  were). A post-review pass found a real gap in that reasoning -- see
+  "Post-review fix" immediately below.
+
+  Three `tools/run_headless.sh` runs (`ENGINE_MAX_FRAMES=60`), all logging
+  **zero** `[ERROR]` lines:
+  - **A before/after comparison, built from the pre-Phase-18a commit and
+    this phase's own working tree side by side.** The "before" screenshot
+    shows exactly the complaint being fixed: an opaque toolbar row sitting
+    above the image, the image itself starting well below it. The "after"
+    screenshot shows the same six buttons now rendered as a translucent
+    bar layered directly over the top of the 3D scene, and the image
+    itself now starting at the panel's own top edge and running the full
+    remaining panel height -- both the overlay placement and the full-
+    height image confirmed by eye, not assumed from the code alone.
+  - **`ENGINE_SSAO_DISABLE=1`** -- same as Phase 17c's own precedent (a new
+    debug var simulating a button CLICK would only prove "this code path,
+    driven by an env var, flips the same bool," strictly weaker than what
+    already exists): sets the exact `Application::ssaoDisabled_` the
+    "lighting" button reads, and the screenshot confirms that button still
+    renders in the active/teal state now that it's drawn inside the
+    overlay's `BeginGroup()` rather than inline in the panel's own layout --
+    the `active` styling survived the move unchanged.
+  - **`ENGINE_SSAO_DEBUG=1`** -- confirms the "texture-mode" button
+    likewise still renders active/teal, AND that the Viewport panel
+    genuinely shows the raw grayscale SSAO occlusion buffer filling the
+    full panel underneath the overlay -- direct visual proof the overlay
+    still reads the identical live `Application`-owned state Phase 17c's
+    wiring already established, and that the translucent background stays
+    legible against a very different (grayscale, not warm-lit) backdrop
+    too.
+  - **`ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1`** -- the same Phase 16/17c
+    precedent for proving the double-click-to-capture PRODUCTION path
+    (`setCameraCaptured()`, cursor-mode GLFW call, `LOG_INFO`) still runs
+    end-to-end after this phase's changes: the log line "Camera capture
+    entered: cursor hidden, WASD + mouse-look now drive the camera" is
+    present, and the resulting screenshot shows the same overlay toolbar
+    rendered correctly on top of the scene while captured. This still
+    cannot reproduce an actual double-click GESTURE landing precisely on a
+    toolbar button versus empty viewport space -- Xvfb has no real pointer
+    device, the same honest limitation Phase 16/17c's own Verify sections
+    already recorded -- so the `!ImGui::IsAnyItemHovered()` guard's
+    continued correctness after the move rests on the code-level argument
+    above (the buttons are still this window's own items, submitted before
+    the check runs, exactly as 17c already established), not a headless
+    screenshot of the gesture itself.
+
+- **Post-review fix: the double-click guard didn't cover the toolbar's own
+  background rect.** An independent review of this phase found that
+  `!ImGui::IsAnyItemHovered()` -- the guard's own bullet above -- only
+  excludes a double-click landing on one of the toolbar's six `ImGui::
+  Button()` item rects. It does NOT exclude
+  `renderViewportToolbarOverlay()`'s own translucent BACKGROUND rectangle
+  (`bgMin`/`bgMax`): the rounded-corner margin around the buttons, and the
+  small `ImGui::SameLine()` gaps between them, are covered by no button's
+  hover ID at all. A double-click landing in one of those gaps visually
+  lands on toolbar chrome -- now sitting directly on top of the 3D image,
+  which is exactly what makes this phase's overlay surface the bug -- but
+  was falling through this guard as "empty viewport space" and incorrectly
+  requesting camera capture. This was always latent in Phase 17c's guard
+  shape (a row-shaped toolbar had no background rect to miss), not something
+  this phase's own move of the check introduced.
+  - **The fix.** `renderViewportToolbarOverlay()` now writes its own
+    `bgMin`/`bgMax` back to the caller through two new out-params
+    (`outBgMin`/`outBgMax`), and the guard adds a fourth condition,
+    `!ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax)`, alongside the
+    pre-existing three -- so the toolbar's entire visible footprint is now
+    excluded, not just its individual buttons.
+  - **Pulled out pure and unit-tested, not just reasoned about.** The
+    combined four-condition decision is now `engine::
+    shouldRequestCameraCaptureFromDoubleClick()` (`camera_capture.hpp`/
+    `.cpp`), the identical "small, standalone decision, unit-tested in
+    isolation" shape `decideCameraCapture()` itself already established in
+    Phase 16 -- pure booleans in, one bool out, no ImGui/GL/window dependency
+    at all. `tests/camera_capture_test.cpp` gained cases covering all five
+    inputs independently, including the exact scenario this bug was about:
+    `anyItemHovered=false` (not on a button) but `mouseInsideToolbarRect=
+    true` (inside the background rect) now correctly returns `false`
+    (no capture request) where the old inline condition would have returned
+    `true`. This is real regression coverage, not just a code-level argument
+    -- the same gap Xvfb's own missing pointer device otherwise leaves this
+    feature's double-click gesture unable to prove headlessly (see the
+    `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1` bullet above).
+  - **Verify.** A second full clean rebuild (`-Wall -Wextra`) still produced
+    **zero new warnings**. `ctest` still reports **14/14** passing --
+    `camera_capture_test` gained cases, but no new test *target* was added
+    (the new function lives in that test's existing pure-logic file), so the
+    suite's own count is unchanged. `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1`
+    still runs the production capture path end-to-end exactly as before,
+    confirming the fix didn't disturb the working "double-click squarely on
+    a button" or "double-click well outside the toolbar" cases.
+  - **Also corrected in this pass:** three places in this README and
+    `editor_ui.cpp` (this section's own "double-click guard" bullet above,
+    `editor_ui.cpp`'s matching same-window-vs-second-window comment, and the
+    double-click guard's own comment further down `editor_ui.cpp`) quoted
+    `IsAnyItemHovered()`'s vendored implementation as `g.HoveredId != 0`.
+    The real function (`build/_deps/imgui-src/imgui.cpp`) is `return
+    g.HoveredId != 0 || g.HoveredIdPreviousFrame != 0;` -- still global, not
+    per-window, so every conclusion drawn from the misquote happened to
+    still hold, but the quote itself didn't match the source it claimed to
+    be transcribed from. All three now quote the real line verbatim.
+
+- **Post-18a fix (Phase 18b): horizontal centering.** The project owner
+  looked at this phase's own overlay and asked for the standard Blender/
+  Unity convention instead of the top-left corner above: the toolbar
+  HORIZONTALLY CENTERED along the Viewport panel's top edge, same vertical
+  offset as before (still `margin` pixels below the panel's own top edge --
+  NOT dropped to the panel's vertical middle either). See Phase 18b's own
+  README section below for the full mechanics -- recorded here too, as a
+  note against the phase that actually introduced the top-left placement,
+  the same "Post-review fix"/"Also corrected in this pass" precedent this
+  section's own two bullets immediately above already establish for
+  recording a cross-phase touch-up against the phase it corrects, not only
+  under the later phase that made it.
+
+### Phase 18b: Play/Edit mode -- gate physics simulation to Play mode only
+
+The second item in the "Phase 18: editor usability + physics polish" arc
+Phase 18a opened. The project owner's own explicit complaint: **"the
+selection to have physics enabled seems extremely bad the way it acts not
+new user friendly."** From Phase 8e through Phase 18a, `stepPhysics()`
+(`application.cpp`'s `update()`) ran UNCONDITIONALLY every single frame --
+gravity and ground collision were always live, even while the user was only
+trying to select/inspect a physics-enabled entity in the editor, fighting
+live gravity the whole time. Standard editor convention (Unity/Unreal/
+Godot) is that simulation only runs in "Play mode"; the scene stays frozen
+in "Edit mode" so it can be freely arranged/inspected. This phase builds
+that real distinction and gates `stepPhysics()` behind it.
+
+- **What changed, precisely.** `Application` gains one new member,
+  `physicsRunning_` (`application.hpp`) -- a plain `bool`, default `false`.
+  `update()`'s own `stepPhysics(...)` call site (`application.cpp`) is now
+  `if (physicsRunning_) { stepPhysics(...); }` -- everything else about that
+  call (the `deltaTime`/`kMaxPhysicsTimestep` clamp, `kGroundY`, ordering
+  relative to the camera-driving branches below it) is byte-for-byte
+  unchanged; only whether it runs at all is new. The Viewport toolbar's
+  Play (`kIconPlay`) and Pause (`kIconPause`) buttons -- both stub,
+  `enabled=false` buttons since Phase 17c, `pause` additionally hardcoded
+  `active=true` to visually match the reference mockup's own default
+  appearance -- are now real: `renderViewportToolbar()`
+  (`editor_ui.cpp`) takes a new `bool& physicsRunning` parameter, both
+  buttons are `enabled=true`, clicking Play sets it `true`, clicking Pause
+  sets it `false`, and each button's own `active` highlight reads the SAME
+  live flag (Play highlighted while running, Pause highlighted while
+  stopped -- mutually exclusive by construction, since both read one bool,
+  one of them negated).
+- **Also this phase: the toolbar is now horizontally centered along the
+  Viewport panel's top edge, not pinned to its top-left corner.** A
+  separate, smaller fix bundled into this same phase at the project owner's
+  own request (standard Blender/Unity convention: the floating toolbar sits
+  centered along the top of the 3D view, not pinned to a corner, and NOT
+  dropped to the panel's own vertical middle either -- same vertical offset
+  as Phase 18a shipped, only the horizontal start position changes).
+  `renderViewportToolbarOverlay()` (`editor_ui.cpp`) computes its group's
+  own start X as `originScreenPos.x + (viewportContentWidth - groupWidth) *
+  0.5f` (clamped to never go left of the panel's own margin-inset edge, so
+  a panel shrunk narrower than the toolbar itself still reads as
+  left-pinned rather than clipped off-panel). `viewportContentWidth` is
+  `renderDockspaceShell()`'s own `contentRegion.x` -- `ImGui::
+  GetContentRegionAvail().x`, captured fresh at the very top of every
+  single call, the SAME variable Phase 14c's own comment already documents
+  -- so this is re-derived every frame, never cached, and stays correctly
+  centered across a live resize/redock exactly the way Phase 18a's own
+  re-anchoring-every-frame positioning already does. `groupWidth`, in
+  contrast, genuinely IS a one-frame-lagged value on purpose: the group's
+  own true rendered width isn't knowable until AFTER Dear ImGui has
+  actually laid out its six buttons (the same "can't know the bounding box
+  until you've submitted it" problem Phase 18a's own `ImDrawListSplitter`
+  background-rect trick already solves for SIZE, but splitting channels
+  only fixes paint ORDER, not the buttons' own start position, which has to
+  be chosen before they're submitted at all) -- so this frame's centering
+  uses LAST frame's real measurement (`EditorUI::toolbarGroupWidthLastFrame_`,
+  new, `editor_ui.hpp`) as its prediction, then overwrites that same member
+  with THIS frame's own now-known width for next frame to use, the
+  identical one-frame-lag, self-correcting shape `viewportWidth_`/
+  `viewportHeight()` already establish and document (Phase 14c) for the
+  same underlying reason. A redock/resize is reflected correctly within one
+  frame, same as that established precedent; frame 1 of a fresh
+  `EditorUI` centers around a 0-wide prediction (renders left-of-true-center
+  by half the real group's width for exactly one frame) and is exactly
+  centered from frame 2 onward -- the same harmless, already-accepted
+  frame-0 imperfection `viewportWidth_`/`viewportHeight_` already carry.
+  Verified visually below, not just reasoned about. The Post-Phase-18a
+  double-click-to-capture guard's own `toolbarBgMin`/`toolbarBgMax` rect
+  needed NO logic change to stay correct: it's still computed from
+  `groupMin`/`groupMax` read back via `GetItemRectMin()`/`Max()` AFTER the
+  (now horizontally centered) group is actually submitted, exactly as Phase
+  18a's own post-review fix already established -- moving WHERE the group
+  starts doesn't change that it's still measured live, from its own real,
+  just-submitted position, every single frame.
+- **A single `bool`, not an enum -- and why that's the right call, not a
+  shortcut.** The brief this phase started from offered either shape. A
+  single bool is simplest-shape-that's-actually-correct here because this
+  phase's own scope is deliberately narrow: there is no third state (no
+  "paused-while-playing" distinct from "stopped," no per-entity play state,
+  nothing else in this engine reads or branches on simulation state besides
+  this one `stepPhysics()` call site) for an enum to usefully distinguish.
+  This matches `ssaoDisabled_`/`ssaoDebugMode_`'s own established precedent
+  in this exact class -- two-state toggles get a plain `bool`, not a richer
+  type nothing yet needs. If a real third state (e.g. a distinct "paused
+  mid-Play, resume from here" different from "stopped, reset to Edit
+  layout") is ever needed, that's the point to introduce an enum -- not
+  before.
+- **Plumbing: the exact same shape Phase 17c's own SSAO toggles and Phase
+  17d's `TitleBarAction` already establish, not a new one invented for
+  this.** `physicsRunning_` is threaded through
+  `EditorUI::renderDockspaceShell()` as one more trailing `bool&`, passed
+  straight through to `renderViewportToolbar()`/
+  `renderViewportToolbarOverlay()` and mutated by EditorUI directly, in
+  place -- the identical "EditorUI mutates Application's own state through
+  a reference, no getter/setter round-trip, no out-parameter-plus-later-
+  handling pair" shape `ssaoDisabled`/`ssaoDebugMode` already use, and
+  deliberately NOT the two-flag `cameraCaptured`/`cameraCaptureRequested`
+  split `TitleBarAction`'s own sibling camera-capture feature needs --
+  that split exists because entering/exiting capture ALSO has to call
+  `window_.setCursorCaptured()` from Application's own side of the
+  render()/run() boundary (see that pair's own Phase 16 comment); a
+  Play/Pause click has no such second side effect to gate, so EditorUI
+  performing the assignment immediately is already the button's entire
+  effect, and `update()` simply re-reads `physicsRunning_` next frame the
+  same way it already re-reads `ssaoDisabled_`/`ssaoDebugMode_` after this
+  same call.
+- **No extracted pure `decideXyz()` function -- a real judgment call,
+  recorded, not an oversight.** `decideCameraCapture()`/
+  `decideMaximizeRestoreToggle()`/`shouldRequestCameraCaptureFromDoubleClick()`
+  are all small state machines or multi-input decisions with real branches
+  to get right. Each of THIS phase's two button handlers is a single
+  unconditional assignment of a fixed literal (`physicsRunning = true` /
+  `physicsRunning = false`) with no other input to weigh -- exactly the "no
+  decision left to make" shape `ssaoDisabled = !ssaoDisabled`/
+  `ssaoDebugMode = !ssaoDebugMode` (Phase 17c) already established needs no
+  extracted helper either, and neither of those two has one. `stepPhysics()`'s
+  own new gate is a single `if (physicsRunning_)` -- nothing to pull out and
+  unit-test in isolation that isn't already exhaustively covered by "does
+  the flag read back what was written," which the headless proof below
+  covers against the REAL production call site directly, a strictly
+  stronger check than a unit test of an equivalent pure function would be.
+- **Headless verification, via a new `ENGINE_DEBUG_FORCE_PLAY_MODE` env
+  var -- the exact same precedent `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE`
+  (Phase 16) already established.** Xvfb has no real pointer device, so a
+  real Play-button CLICK cannot be reproduced headlessly. `ENGINE_DEBUG_FORCE_PLAY_MODE=1`
+  (`debugForcePlayModeFromEnv()`, `application.cpp`), applied once in the
+  constructor, sets the exact same `physicsRunning_` member a real click
+  would -- the env var only stands in for the click GESTURE, every line of
+  code that runs afterward (the `update()` gate, `stepPhysics()` itself) is
+  the identical, unmodified production path. Combined with the
+  PRE-EXISTING `ENGINE_DEBUG_FORCE_DYNAMIC=<entity name>` (Phase 14e), which
+  both ensures an entity has a live `RigidBody` and records it as
+  `physicsVerifyEntity_` for periodic `Transform::position().y` logging,
+  this gives a fully deterministic, numeric proof with no new logging code
+  needed at all:
+  - `ENGINE_DEBUG_FORCE_DYNAMIC=falling_cube` alone (physics OFF, the
+    default): `assets/scenes/default.json`'s own `falling_cube` entity (
+    `useGravity=true`, starts at `y=2.5`) logs **y = 2.500000 on every one
+    of 18 logged frames from frame 0 through frame 170** -- gravity provably
+    does not integrate at all while `physicsRunning_` is false.
+  - `ENGINE_DEBUG_FORCE_DYNAMIC=falling_cube ENGINE_DEBUG_FORCE_PLAY_MODE=1`
+    (physics ON from frame 0): the SAME entity logs **y descending every
+    frame observed** -- `2.500000 -> 2.350054 -> 1.927607 -> 1.232661 ->
+    0.265215`, then settling at **exactly y = 0.240000** (`kGroundY`
+    `(-0.01)` `+` `Collider::halfExtent` `(0.25)`, physics.hpp's own
+    documented rest-height formula) and staying there through frame 170 --
+    the identical free-fall-then-rest trajectory this engine's gravity has
+    always produced (physics_test.cpp's own hand-computed expectations,
+    unmodified), now provably gated on `physicsRunning_` rather than
+    unconditional. Neither run touched a single line of `physics.hpp`'s own
+    gravity/collision math -- only whether `stepPhysics()` is ever called.
+- **Screenshots, actually looked at, not just logged.** Three
+  `tools/run_headless.sh`-family runs (`ENGINE_MAX_FRAMES=60`-180`), all
+  logging **zero** `[ERROR]` lines:
+  - **Default (no env vars -- true out-of-the-box Edit mode).** The
+    floating toolbar is visibly centered along the Viewport panel's own top
+    edge (not pinned to its top-left corner, and not dropped to the panel's
+    vertical middle -- the Phase 18b centering fix, see the addendum on
+    Phase 18a's own section above), and the Pause button renders in the
+    active/teal highlighted state, Play does not -- the correct default
+    (physics paused) shown correctly, live, not the old hardcoded stub.
+  - **Edit mode + `ENGINE_DEBUG_FORCE_DYNAMIC=falling_cube`, screenshot
+    captured ~6s into a real run (well past the point gravity would have
+    visibly moved the entity if it were running).** `falling_cube` (a
+    checkered cube, distinct from the plain blue "parented_demo_cube" prop
+    already resting on the platform) starts at `y=2.5` -- high enough to sit
+    entirely above the camera's own framed view -- and stays there the
+    whole run: the checkered cube is simply NOT VISIBLE in this screenshot,
+    exactly as its unchanging logged `y=2.5` predicts.
+  - **The same scenario with `ENGINE_DEBUG_FORCE_PLAY_MODE=1` added,
+    screenshot captured at the same ~6s offset.** The checkered
+    `falling_cube` is now clearly VISIBLE, resting on/beside the platform
+    next to the blue prop cube, casting a real shadow -- having fallen from
+    entirely outside the frame down to its rest height, a stark, easy-to-see
+    difference from the Edit-mode screenshot immediately above, not a subtle
+    one. The Play button now renders active/teal, Pause does not -- the
+    live toggle confirmed visually, not just from the log.
+- **Deliberately NOT done this phase** (documented, not an oversight):
+  - **No scene-state snapshot/restore across Play -> Stop.** Unity's own
+    "changes made during Play don't persist after Stop" behavior is real,
+    separate, substantial scope (recording every entity's pre-Play
+    Transform/component state and restoring it on Pause) this phase's own
+    brief explicitly declines to half-build. This phase only gates the
+    physics STEP itself -- any Transform a physics step (or a manual edit
+    made while Play is running) moved stays moved after clicking Pause, the
+    same as every Transform mutation in this engine always has.
+  - **No keyboard shortcut for Play/Pause.** Toolbar-button-only, matching
+    every other toolbar button today (grid/lighting/texture-mode/undo all
+    have no keyboard equivalent either) -- a real shortcut would be
+    separate, later scope, the same judgment call this project already
+    applies elsewhere (e.g. Ctrl+S for Save Scene, Phase 15e, is the one
+    existing exception, and was its own separate, explicitly-scoped
+    addition).
+  - **No friction/damping/simulation-quality changes.** `physics.hpp`'s own
+    gravity integration and ground-collision resolution are untouched
+    byte-for-byte by this phase -- confirmed above by the settled rest
+    height (`0.240000`, matching the pre-existing documented formula
+    exactly) and the unmodified `physics_test.cpp` suite still passing.
+    Improving the simulation itself (restitution, friction, entity-vs-entity
+    collision) is separate, future scope this phase does not touch.
+- **Verify.** A full clean rebuild (`-DCMAKE_BUILD_TYPE=Debug`, matching
+  this project's own real convention -- a prior phase's review caught that
+  a `Release` build silently strips asserts and can produce false-positive
+  test passes, so this phase's own rebuild is Debug, from scratch, not
+  reused from any earlier build directory) produced **zero warnings** from
+  any engine source file, `editor_ui.cpp`/`application.cpp` included.
+  `ctest` reports **14/14 passing** -- unchanged from Phase 18a's own
+  baseline; no new test target was added (see this section's own "No
+  extracted pure `decideXyz()` function" bullet above for why the headless,
+  production-call-site proof above was judged the stronger check here, not
+  a gap). `ENGINE_DEBUG_FORCE_PLAY_MODE=1` and
+  `ENGINE_DEBUG_FORCE_DYNAMIC=<name>` both run the identical production
+  code paths a real Play-button click and a real physics-enabled entity
+  already use, the same honest headless-verification ceiling
+  `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE`'s own Phase 16 section already
+  records: this proves the flag/gate/button-state wiring end-to-end, not a
+  real mouse click landing on the Play button pixel-for-pixel (Xvfb has no
+  real pointer device to click with at all).
+
+### Phase 18c: ground friction + terminal velocity -- polishing the physics feel
+
+The third item in the "Phase 18: editor usability + physics polish" arc,
+and the project owner's own explicit complaint that started it: **"the
+gravity is awkward, definitely needs friction and other things to
+polish it."** Phase 8e's `stepPhysics()` (`physics.hpp`/`physics.cpp`) has
+always done exactly two things: integrate gravity, and snap a falling
+entity to rest on the ground plane. It has never done anything to an
+entity's HORIZONTAL (X/Z) velocity -- a scene's own `rigidBody` `"velocity"`
+block (`scene_serialization.hpp`) can legitimately hand an entity nonzero
+X/Z speed, and once that entity lands, nothing has ever slowed it back
+down: it would slide forever at a constant speed, the exact unnatural
+behavior the project owner's complaint names. This phase adds the two
+smallest, most load-bearing fixes to that feel -- ground friction and a
+fall-speed clamp -- without touching anything else about how gravity or
+ground collision already work.
+
+- **Ground friction: `kGroundFriction` (`physics.hpp`), 4.9 world-units/
+  second^2.** While an entity is resting on the ground THIS step (i.e. the
+  exact pre-existing `if (position.y <= restY)` branch that already snaps
+  it to rest and zeroes `velocity.y` -- see `physics.cpp`), its horizontal
+  velocity is now ALSO decelerated toward zero, at this rate, every step.
+  `4.9` is `kGravityAcceleration * 0.5f` -- real kinetic friction is
+  (coefficient of friction) times (gravitational acceleration), independent
+  of the sliding object's own mass (the identical "every body behaves the
+  same regardless of how heavy it is" property `kGravityAcceleration`
+  itself already has, and the same reason `RigidBody` has no mass field --
+  see that struct's own header comment); a coefficient of ~0.5 is a
+  middle-of-the-road, moderately grippy dry surface (rubber-on-concrete
+  sits higher, ~0.7-1.0; polished wood/metal sits lower, ~0.2-0.4), chosen
+  so a brisk 3 world-units/second slide settles to a full stop in roughly
+  half a second -- fast enough to visibly read as "friction is acting," not
+  a near-imperceptible crawl, but not the old instant, unnatural dead-stop
+  either.
+- **Clamped, not exponential -- friction can never overshoot past zero and
+  reverse the direction of motion.** The naive `velocity *= factor` shape
+  (multiplicative decay) only ever asymptotically approaches zero and
+  technically never truly stops. `stepPhysics()` instead computes the
+  horizontal speed as one resultant vector (`glm::length(vec3(velocity.x,
+  0, velocity.z))`), reduces it by `kGroundFriction * deltaTime`, clamped
+  with `std::max`-shaped logic so the reduction can never exceed the speed
+  it's applied to, then rescales `velocity.x`/`velocity.z` down to that new
+  speed together -- so a diagonal slide decelerates at the same RATE as an
+  axis-aligned slide of the same total speed (real friction opposes the
+  actual direction of sliding motion, not each axis independently, which a
+  naive per-axis `velocity.x -= friction*dt; velocity.z -= friction*dt`
+  would get wrong -- a diagonal slide would lose speed roughly `sqrt(2)`
+  times too fast). Once the resultant speed reaches exactly zero, it STAYS
+  there -- confirmed by `tests/physics_test.cpp`'s own new cases below across
+  many further steps, never dipping negative/reversed.
+- **Terminal velocity: `kTerminalFallSpeed` (`physics.hpp`), 40.0
+  world-units/second.** Applied as a hard clamp on `RigidBody::velocity.y`
+  every step, right after gravity is (conditionally) applied and before
+  that velocity is integrated into position -- and applied UNCONDITIONALLY,
+  regardless of `RigidBody::useGravity`, since a scene-authored initial
+  `"velocity"` could hand an entity an already-huge downward speed with
+  gravity disabled, and this clamp needs to bound that too, not just
+  gravity's own contribution. A real falling object doesn't accelerate
+  forever -- air resistance grows with speed until it exactly balances
+  gravity, at which point the object falls at a constant "terminal
+  velocity" (a real skydiver reaches roughly 50-55 m/s). This engine has no
+  drag force of its own to model that continuously (see "Deliberately NOT
+  done" below), so a hard clamp is a deliberately simplified stand-in:
+  `40.0` sits comfortably below a real skydiver's terminal velocity while
+  staying far above anything this engine's own shipped demo content
+  actually reaches before landing (`falling_cube` falls 1.5-2.5 world units
+  and lands under 6 world-units/second -- see `physics_test.cpp`'s own
+  hand-computed free-fall expectations) -- so this clamp is provably inert
+  for every scene this engine ships today, and only engages for a
+  deliberately extreme case.
+- **Only ever clamps a downward `velocity.y`.** An upward `velocity.y`
+  (e.g. a scene-authored upward launch) is left completely untouched --
+  "terminal fall speed" only describes how fast something can be FALLING,
+  never how fast it can rise.
+- **`tests/physics_test.cpp`: six new cases, matching this file's own
+  established hand-computed-recurrence style, none of the seven pre-existing
+  cases touched.**
+  - Ground friction decelerates measurably and reaches exactly zero, then
+    stays there. An entity starting already at rest height with 3.0
+    world-units/second of horizontal velocity: after 10 steps its speed is
+    checked against the exact same clamped-friction recurrence
+    `stepPhysics()` itself follows (still `> 0` and `< 3.0` -- measurably
+    decelerating, not yet stopped); after 60 more steps (well past the
+    ~36.7 steps hand-computed to fully consume 3.0 world-units/second) it's
+    exactly `0.0`; a further 60 steps confirm it stays exactly `0.0` on
+    EVERY one of those steps, never dipping negative.
+  - Friction decelerates the RESULTANT horizontal vector, not each axis
+    independently: a diagonal slide (equal X/Z speed, same total speed as
+    an axis-aligned case) is checked to lose speed at the identical
+    per-step rate, with X and Z staying equal to each other throughout.
+  - Terminal velocity, two cases: an extreme `-1000` initial `velocity.y`
+    is clamped to exactly `-kTerminalFallSpeed` on the very first step; and
+    ordinary gravity accumulated over 400 uninterrupted steps (comfortably
+    past the ~244.7 steps hand-computed for gravity alone to reach the
+    clamp) never once exceeds `-kTerminalFallSpeed`, settling at exactly
+    that value.
+  - All seven Phase 8e/14e cases (still-falling, settled-at-rest,
+    Collider-less free-fall, `useGravity=false`, and every
+    `setEntityStatic()` transition) re-run unmodified and still pass --
+    `kTerminalFallSpeed`/`kGroundFriction` are both far outside the range
+    those scenarios ever reach, so neither new behavior perturbs them.
+- **Headless verification, via a new `ENGINE_DEBUG_FORCE_VELOCITY=<entity
+  name>:<vx>,<vy>,<vz>` env var -- the exact same "debug env var calls the
+  exact same production function a real interaction would" precedent every
+  other `ENGINE_DEBUG_*` var in this file already establishes.** Nothing in
+  `assets/scenes/default.json`'s shipped entities has any horizontal
+  velocity to begin with, so proving friction actually decelerates
+  something over time needed a way to give one some -- the identical gap
+  `ENGINE_DEBUG_DROP_MODEL`/`_ASSIGN_TEXTURE` each closed for their own
+  phase. Same colon-separated shape `ENGINE_DEBUG_ASSIGN_TEXTURE`/
+  `_DROP_TEXTURE` already establish (Phase 15f/15g): the entity name is
+  resolved via `findEntityByName()` exactly like `ENGINE_DEBUG_SELECT`/
+  `_FORCE_STATIC`/`_FORCE_DYNAMIC` already are, then `setEntityStatic(...,
+  makeStatic=false)` -- the SAME production call `ENGINE_DEBUG_FORCE_DYNAMIC`
+  itself uses -- ensures a `RigidBody` exists before this overwrites its
+  `velocity` directly. Also records `physicsVerifyEntity_` (Phase 14e), so
+  the pre-existing periodic physics-verify log (`update()`) needed only ONE
+  addition -- now also logging `x`/`z` position and horizontal speed
+  whenever the verified entity has a `RigidBody` -- to cover this phase's
+  own verification need too, with zero new logging call sites and zero
+  change to the pre-existing y-only case Phase 14e's own verification still
+  relies on.
+  - `ENGINE_DEBUG_FORCE_DYNAMIC=falling_cube
+    ENGINE_DEBUG_FORCE_VELOCITY="falling_cube:2.0,0.0,0.0"
+    ENGINE_DEBUG_FORCE_PLAY_MODE=1`, `ENGINE_MAX_FRAMES=170`: `falling_cube`
+    (starts `y=2.5`, given `velocity=(2.0, 0.0, 0.0)`) logs **`horizontalSpeed
+    = 2.000000` on every frame while still airborne** (frames 0-40, `x`
+    climbing linearly `0.000085 -> 1.333419` -- friction only applies once
+    resting on the ground, so airborne motion is completely unaffected, as
+    designed), then, once it lands (`y` reaches exactly `0.240000` =
+    `kGroundY (-0.01) + Collider::halfExtent (0.25)`, the same rest-height
+    formula every prior phase already documents) horizontal speed **strictly
+    decreases every logged frame: `1.183333 -> 0.366666 -> 0.000000`**, `x`
+    stalling at exactly **`1.758418`** from frame 70 onward -- and stays at
+    `horizontalSpeed = 0.000000`, `x = 1.758418` on every one of the
+    remaining 9 logged checkpoints through frame 160 (90 further simulated
+    frames), never resuming motion or reversing direction. Zero `[ERROR]`
+    lines logged.
+  - Screenshots at three fixed wall-clock offsets in the same run (`xwd` +
+    `convert`, same mechanism `tools/run_headless.sh` itself uses,
+    triggered at fixed delays instead of its own content-stabilized
+    polling so each one lands at a specific point along the trajectory):
+    **3s in** (still airborne, `y` well above rest) -- `falling_cube` is not
+    yet visible, identical to every prior phase's "still above the framed
+    view" baseline. **8s in** (just landed and still mid-slide per the log
+    above) -- a green/orange-checkered cube is now clearly visible resting
+    beside the platform, next to the red PBR sphere. **14s in** (long after
+    the log shows `horizontalSpeed` reached exactly `0.0`) -- the SAME
+    checkered cube, in the SAME position as the 8s screenshot, pixel-for-
+    pixel indistinguishable placement -- visual confirmation that it
+    actually stopped and stayed stopped, rather than having merely slowed
+    down and continued drifting off-frame.
+- **Deliberately NOT done this phase** (documented, not an oversight):
+  - **No entity-vs-entity collision.** Still completely out of scope, same
+    as every phase since 8e -- this phase's friction and terminal-velocity
+    clamp are both still purely PER-ENTITY computations (`RigidBody`'s own
+    velocity against a fixed ground plane), nothing about one entity
+    reasoning about another.
+  - **No bounce/restitution.** An object hitting the ground still snaps to
+    rest and zeroes `velocity.y` exactly as it always has -- confirmed
+    unchanged by every pre-existing `physics_test.cpp` case above still
+    passing byte-for-byte. This phase only ever touches horizontal
+    velocity in the ground-resting branch and the vertical clamp before
+    integration; the landing/rest resolution itself is untouched.
+  - **No air resistance modeled as a continuous, speed-dependent drag
+    force.** `kTerminalFallSpeed` is a hard clamp precisely because a real
+    drag force (proportional to velocity or velocity-squared, requiring its
+    own coefficient, its own per-step force computation, and interacting
+    with gravity as a second real force rather than a simple ceiling) is
+    real, separate, substantially larger scope than this phase's own "fix
+    the two most obviously-missing behaviors" brief calls for. A clamp
+    achieves the externally-visible property that matters (falls don't
+    accelerate to absurd speeds) with none of that complexity.
+  - **No mass field.** Neither new constant needs one: `kGroundFriction`
+    (a deceleration rate, like `kGravityAcceleration`) and
+    `kTerminalFallSpeed` (a flat ceiling) both apply identically regardless
+    of an entity's own "weight" -- there still isn't a single place in this
+    engine that would ever read a mass field if one existed, the same
+    "speculative, nothing-consumes-it field this codebase's own established
+    style avoids" `RigidBody`'s own header comment already documents.
+- **Verify.** A full clean rebuild (`-DCMAKE_BUILD_TYPE=Debug`, matching
+  this project's own real convention, from scratch) produced **zero
+  warnings** from any engine source file, `physics.cpp`/`application.cpp`
+  included. `ctest` reports **14/14 passing** -- the same 14 targets Phase
+  18b's own baseline lists, `physics_test` now carrying six additional
+  Phase 18c cases (13 total) alongside its seven pre-existing ones,
+  unmodified. The headless run above logged zero `[ERROR]` lines across
+  170 simulated frames and produced three screenshots, actually inspected
+  (not just captured) -- confirming the checkered cube's absence, sudden
+  appearance after landing, and then static, unchanging position across a
+  6-second gap once friction has run its course.
+
+### Phase 18d: a real 3D silhouette selection outline, replacing the flat 2D box
+
+The fourth and final item in the "Phase 18: editor usability + physics
+polish" arc, and the project owner's own explicit complaint: **"when I
+select something and it highlights I meant as 3D not a 2D highlight."**
+Phase 14d's selection outline (see that section's own new superseded-by note
+above) was a dashed rectangle plus corner brackets, derived purely from the
+selected entity's `BoundingSphere` projected to NDC -- a floating box around
+the object's screen-space *extent*, with no relationship to its actual
+rendered shape and no notion of depth at all. This phase replaces it with the
+standard "mask + screen-space edge detection" technique real engines use
+(Unity/Unreal's own selection outline), built entirely out of this project's
+existing screen-space post-process infrastructure (`Framebuffer`, SSAO's own
+geometry pre-pass, the final `postProcessShader_` compositing pass) rather
+than a new, parallel rendering path.
+
+- **Two passes, layered onto the existing pipeline exactly where each one's
+  own dependencies are already satisfied, not bolted on as an afterthought at
+  the end of the frame.**
+  1. **Selection mask pass** (`renderSelectionMask()`, `application.cpp`;
+     `assets/shaders/selection_mask.vert`/`.frag`) -- draws ONLY the
+     currently-selected entity's mesh (`Model::drawDepthOnly()`, the same
+     minimal-attribute draw path `renderShadowPass()`'s `shadow.vert` already
+     uses) into a new `selectionMaskFramebuffer_`, an ordinary full-viewport-
+     resolution `Framebuffer` (reusing the existing class's RGBA16F color
+     attachment rather than adding a bespoke single-channel format -- see
+     that member's own `application.hpp` comment for why; only
+     `.r` is ever read, the identical "one unused channel is an accepted,
+     harmless cost" tradeoff `ssaoRaw_`/`ssaoBlurred_` already make). A
+     fragment writes 1.0 only if it survives BOTH: (a) this target's own
+     ordinary GL depth test (self-occlusion within the selected mesh itself),
+     and (b) an explicit `discard` in `selection_mask.frag` against SSAO's
+     own `ssaoGBuffer_` depth texture (Phase 13f) -- already this frame's
+     whole opaque-scene depth, computed once regardless of selection, from
+     the exact same camera view/projection, and already reused exactly this
+     way by SSR's own ray march (`renderSSRComposite()`). Reusing it, rather
+     than building a second redundant full-scene depth pre-pass just for
+     this feature, is both free and the same "one shared scene depth every
+     screen-space pass draws from" convention SSR already established. **This
+     is what makes the outline occlusion-correct**: a selected fragment
+     farther from the camera than what's already recorded at that screen
+     pixel means some OTHER object is standing in front of it there, so it's
+     never marked selected. Runs right after `renderSSAO()` (grouped with
+     this frame's other pre-passes, alongside the shadow pass) rather than
+     after the main color pass -- it depends only on `ssaoGBuffer_`'s depth,
+     already finished by then, not on `hdrFramebuffer_`'s own scene draw, so
+     there's no ordering reason to run it any later. **A true no-op --
+     `selectionMaskFramebuffer_` isn't even cleared -- when nothing is
+     selected** (`selectedEntity_` is `std::nullopt`) or the selected entity
+     has no `ModelComponent` to draw, matching this engine's existing "no
+     selection => no outline" default exactly.
+  2. **Edge-detection outline pass** -- folded directly into the existing
+     final `postprocess.frag` compositing pass (the same fullscreen shader
+     that already tonemaps/gamma-corrects/composites bloom every frame)
+     rather than a third, separate fullscreen draw call: it's already the
+     one place each frame's fully-finished image exists as a `sampler2D`
+     right before `EditorUI`'s `ImGui::Image()` shows it, the same role
+     `uBloomBuffer`/`uSSAOMap` already fill for their own overlays. For each
+     texel outside the mask, samples its neighbors in a small fixed
+     `kSelectionOutlineRadius` (2) window and, if any neighbor IS inside the
+     mask, blends in the outline color -- a simple few-texel max-neighbor
+     check, not a full Sobel operator, since this only ever needs to answer
+     "is there a mask transition near here," not estimate an edge's exact
+     direction/strength. `uHasSelection` (0 whenever nothing was selected
+     this frame) gates the WHOLE check, checked before `uSelectionMask` is
+     ever sampled -- so a possibly-stale mask left over from a previous
+     selection can never influence a frame where nothing is currently
+     selected; see Verify below for the pixel-diff that confirms this holds.
+- **Color: the real Phase 17a accent teal, not a fresh approximation of it.**
+  A small, easy-to-miss inaccuracy in the OLD outline is fixed here, not
+  carried forward: Phase 14d's own dashed rectangle used a hand-picked
+  `IM_COL32(56, 217, 197, 255)`, visibly close to but NOT actually
+  `editor_ui.cpp`'s real theme constant (`kAccentTeal`,
+  `(0.176, 0.765, 0.698)` / `#2DC3B2`) -- that file's own comment even flagged
+  this as deliberate ("not a pixel-perfect match... this phase's brief
+  explicitly doesn't require that"). This phase's brief DOES ask for the
+  established color, so `application.cpp`'s new `kSelectionOutlineColor`
+  constant is `kAccentTeal`'s own exact value, hand-copied with a comment
+  cross-referencing it (introducing a shared cross-file theme-constants
+  header for one `glm::vec3` would be disproportionate new plumbing -- the
+  same "kept in sync by hand across a boundary" situation this engine already
+  accepts for `SSAOKernel`'s `SSAO_KERNEL_SIZE`, see `ssao.hpp`). Composited
+  AFTER tonemapping in `postprocess.frag`, not blended into the HDR scene
+  color before it: this is a flat UI accent meant to read as exactly that
+  fixed color regardless of the scene's own exposure/bloom that frame, not
+  something that should itself bloom or tonemap-compress.
+- **The old 2D mechanism removed entirely, not left stacked alongside the
+  new one.** `Application::computeSelectionOutlineNDC()` (the free function)
+  and `EditorUI::SelectionOutline` (the struct) are both gone -- along with
+  `editor_ui.cpp`'s `addDashedRect()`/`addCornerBrackets()` helpers and the
+  draw-list block that called them at the Viewport panel's own call site.
+  `EditorUI::renderDockspaceShell()`'s signature dropped its `const
+  SelectionOutline* outline` parameter entirely, rather than keeping a
+  now-always-`nullptr` argument around -- there is nothing left for
+  `EditorUI` to draw for the outline any more: it's already baked into
+  `viewportColorTexture` itself by the time that texture reaches
+  `ImGui::Image()`. `Camera::right()`/`up()` -- two getters Phase 14d added
+  purely so `computeSelectionOutlineNDC()` could offset a world-space point
+  along the camera's own screen-facing axes -- are removed too, once
+  confirmed (`grep -rn`) that nothing else in this engine ever called either
+  one; the private `right_`/`up_` members underneath them are untouched and
+  still drive `processMovement()`'s strafe and `getViewMatrix()`'s `lookAt`
+  exactly as before. `tests/`: no existing test exercised
+  `computeSelectionOutlineNDC()` (it was pure, testable math that this
+  project's own earlier review simply never added a dedicated test file for)
+  , so there was nothing to remove or replace there.
+- **Deliberately NOT done this phase** (documented, not an oversight, per
+  this phase's own scoped brief):
+  - **No outline-thickness configuration UI.** `kSelectionOutlineRadius` is a
+    fixed shader constant; a single, clean, fixed-width outline is the whole
+    deliverable.
+  - **No multi-select outline support.** `selectedEntity_` is a single
+    `std::optional<EntityId>` (confirmed by reading `application.hpp`
+    directly, not assumed) -- this engine has no multi-select UI at all
+    today, so there is exactly one entity a mask pass could ever need to
+    draw.
+  - **No animated/pulsing outline effect.** The outline color is the fixed
+    `kSelectionOutlineColor`, composited with a flat `mix()`, every frame
+    identically -- no time-varying uniform anywhere in this pass.
+- **Verify.**
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug`,
+    matching this project's own real convention) produced **zero warnings**
+    from any engine source file. `ctest` reports **14/14 passing** -- the
+    same 14 targets Phase 18c's own baseline lists, unchanged (this phase
+    added no new test file and removed none, see above).
+  - **(a) No regression when inactive.** A pre-Phase-18d build (Phase 18c's
+    own commit, `1f6c0c1`, built fresh in a separate worktree) and this
+    phase's build were both run headlessly (`tools/run_headless.sh`,
+    `ENGINE_MAX_FRAMES=90`, no selection) and screenshotted.
+    `compare -metric AE` between the two PNGs reports **`0`** differing
+    pixels -- byte-for-byte pixel-identical, confirming `uHasSelection`'s own
+    gate genuinely produces zero visible difference when this whole feature
+    never engages, exactly this phase's own "layers on top without altering
+    existing output" constraint.
+  - **(b) A real silhouette, not a rectangle.** `ENGINE_DEBUG_SELECT=scene`
+    (the multi-mesh pyramid/table/box entity, fully on-screen from the
+    default camera) was screenshotted and inspected directly. The teal
+    outline traces the pyramid's actual triangular profile, the table's
+    rectangular top edge, AND the small box sitting on top of it -- three
+    visually distinct silhouette shapes belonging to the one selected
+    entity's own multiple mesh nodes, something a single bounding-sphere
+    rectangle could never produce. `ENGINE_DEBUG_SELECT=falling_cube` (a
+    single box, mostly above the framed view at its default unmoved
+    position) shows the outline correctly tracing just the small visible
+    sliver of checkered underside poking into frame, clipped exactly at the
+    Viewport panel's own top edge -- not a rectangle extending upward past
+    where the object actually is.
+  - **(c) Occlusion correctness -- the whole reason this phase exists.**
+    Using the existing `ENGINE_DEBUG_FORCE_DYNAMIC`/`ENGINE_DEBUG_FORCE_VELOCITY`/
+    `ENGINE_DEBUG_FORCE_PLAY_MODE` hooks (Phase 18c) to slide `falling_cube`
+    (a real, `scene`-independent entity) to rest at `x=0.468, z=-1.238` --
+    behind `scene`'s own pyramid and the small box on its table from the
+    default camera's viewpoint, confirmed by reading `scene.obj`'s own vertex
+    bounds (`x:[-1.7,1.0] z:[-0.65,0.5]`) before choosing the target position,
+    not guessed -- then selecting it (`ENGINE_DEBUG_SELECT=falling_cube`) and
+    screenshotting once it settled. The result: the teal outline traces
+    `falling_cube`'s visible top, right, and lower-right edges exactly, and
+    **stops completely dead at the boundary where the small blue box (part
+    of the separate `scene` entity) and the table's own front edge cover
+    it** -- no teal line continues along, around, or through either
+    occluder, and no fragment of the outline appears anywhere on top of
+    the blue box or the table. This is a genuine cross-ENTITY occlusion case
+    (the occluder and the occludee are two different `registry_` entities,
+    not two meshes of the same selected model, which the mask FBO's own
+    ordinary depth test would have handled anyway) -- exactly the case the
+    old 2D bounding-box rectangle could never have gotten right, since it had
+    no notion of depth at all and would have drawn straight through both
+    occluders.
+
+### Phase 18e: a real translate gizmo -- move the selected entity directly in the 3D view
+
+The project owner's own explicit request: **"if I could move it from inside
+the scene (not when I move using the camera with WASD and mouse)."** Before
+this phase, the ONLY way to change a selected entity's position was typing
+numbers into the Inspector's Transform `Position` `DragFloat3` (Phase 14e) --
+this engine had no mouse-picking/raycasting infrastructure at all (confirmed
+via `grep -rn` before starting, not assumed). This phase adds the standard
+Unity/Blender/Unreal translate gizmo: three colored axis handles (arrows)
+rendered at the selected entity's world position; click-drag an arm to slide
+the object along that one axis.
+
+- **Architecture: `gizmo.hpp`/`gizmo.cpp`, a pure, GL/ImGui-free math module,
+  the same shape `physics.hpp`/`camera_capture.hpp`/`window_chrome.hpp`
+  already establish.**
+  - `screenPointToWorldRay()` -- the standard "unproject two points through
+    the inverse view-projection matrix, subtract" screen-to-world-ray
+    technique. `worldPointToScreenPoint()`, its inverse, returns
+    `std::nullopt` for a point behind the camera -- the same "no meaningful
+    result this frame, not garbage" convention this project's own (since-
+    removed) `computeSelectionOutlineNDC()` established for its own `w <=
+    epsilon` guard.
+  - `closestPointsBetweenLines()` -- the standard closest-point-between-two-
+    3D-lines formula (a ray and one of the gizmo's three world-space axis
+    lines), returning `std::nullopt` rather than dividing by the near-zero
+    determinant a nearly-parallel ray/axis pair produces (looking almost
+    straight down the axis being tested) -- never NaN/Inf, never garbage.
+  - `hitTestGizmoAxes()` -- tests a ray against all three of the gizmo's own
+    finite axis segments (length scaled by `gizmoAxisLength()`, below),
+    returning whichever one the ray passes closest to within a world-space
+    pick tolerance, or `GizmoAxis::kNone` cleanly when it misses all three
+    (or every axis happens to be near-parallel to the ray).
+  - `gizmoAxisLength()`/`gizmoPickTolerance()` -- the standard "keep the
+    gizmo a roughly constant apparent screen size regardless of camera
+    distance" scale: a plain linear function of camera distance, floored so
+    a camera sitting at (or very near) the gizmo's own origin never
+    collapses it to zero.
+  - `updateGizmoDrag()` -- the whole "not dragging / dragging-axis-X/Y/Z"
+    state machine in one pure function, the identical "current state + this
+    frame's inputs -> next state" shape `decideCameraCapture()`
+    (`camera_capture.hpp`) already establishes: given the current
+    `GizmoDragState` (which axis, if any, plus the world point + entity
+    position the drag anchored to at grab time) and this frame's `mouseDown`/
+    an EDGE-triggered `mousePressedThisFrame`/`hoverAxis`/ray, produces the
+    next state and, while dragging, the entity's new position. A grab is
+    silently declined (stays not-dragging) if the ray is too parallel to the
+    axis being grabbed; a mid-drag frame that goes briefly parallel simply
+    holds the entity's last position rather than jumping to a garbage one,
+    resuming cleanly from the same anchor once the ray is no longer
+    degenerate.
+- **Rendering: procedural arrow geometry, a flat/unlit shader, drawn last.**
+  `mesh.hpp`'s new `makeGizmoArrow()` builds a thin cylindrical shaft + a
+  conical tip pointing along local +X (the same procedural-mesh idiom
+  `makeCube()`/`makeUVSphere()` already establish) -- one shared `Mesh`,
+  drawn three times per frame (`Application::renderGizmo()`) with a
+  different model matrix (rotated to point along X/Y/Z, scaled by
+  `gizmoAxisLength()`) and a different flat color each time:
+  **X = red, Y = green, Z = blue**, the standard, near-universal DCC
+  convention (Blender/Unity/Unreal all agree) -- deliberately NOT this
+  project's own teal editor accent (`kSelectionOutlineColor`): a
+  manipulation tool's whole job is "which axis am I about to drag," and
+  three maximally distinguishable colors serve that far better than a
+  theme-matched accent would. `assets/shaders/gizmo.vert`/`.frag` are a new,
+  minimal program (mirroring `selection_mask.vert`'s own "just enough to
+  place the geometry" shape) -- flat/unlit, like every real DCC tool's own
+  manipulation gizmo, not shaded against this scene's lights. Drawn directly
+  into `viewportColorFramebuffer_`, AFTER the final tonemap/bloom/selection-
+  outline postprocess composite (editor chrome, not scene content -- it must
+  never cast/receive shadows, feed SSAO, or be tonemapped/color-graded), with
+  depth testing explicitly disabled (that buffer's own depth attachment, at
+  this point in the pipeline, holds only the postprocess quad's uniform
+  near-plane depth -- leaving depth testing on would fail nearly every gizmo
+  fragment against that flat plane, not usefully self-occlude against real
+  scene geometry, none of which remains in this buffer by then). Only drawn
+  when `selectedEntity_` has a `Transform` -- no `ModelComponent` required
+  (an Empty entity is still a real, movable object) -- matching this
+  engine's established "no selection => no [feature]" convention.
+- **Interaction: lives entirely inside the Viewport panel's own
+  `Begin()`/`End()` block, the only place Dear ImGui's hover/mouse queries
+  can be scoped to that one docked panel** (the identical reason the Phase
+  16 double-click-to-capture check already lives there). `EditorUI::
+  updateGizmo()` (private, called from `renderDockspaceShell()` right after
+  the toolbar overlay, so `toolbarBgMin`/`toolbarBgMax` are known) hit-tests
+  and runs the drag, then -- unlike every other interactive feature this
+  class reports back via an out-parameter -- **mutates `registry`'s
+  Transform component directly**, the exact same pattern the Inspector's own
+  Position `DragFloat3` already establishes, just driven by a mouse drag
+  instead of a typed number.
+  - **Precedence vs. the toolbar and Phase 16 camera capture, decided
+    explicitly, not incidentally.** A new grab may only start when the mouse
+    is over the plain viewport image -- not a toolbar button, not the
+    toolbar's own translucent background rect (`toolbarBgMin`/`toolbarBgMax`,
+    the exact rect Phase 18a's own post-review fix already excludes from
+    camera capture), not some other docked panel that merely overlaps this
+    one on screen. `updateGizmo()` returns `true` on any frame the mouse is
+    hovering OR dragging a gizmo axis; `renderDockspaceShell()`'s own
+    double-click-to-capture check is skipped ENTIRELY that frame -- **the
+    gizmo wins outright**: a single click-drag on a gizmo arm can never be
+    misread as the start of a double-click camera capture, and camera
+    capture can never be entered while a gizmo drag is in progress. An
+    already-in-progress drag keeps tracking the ray regardless of hover (the
+    mouse drifting slightly outside the panel mid-drag doesn't cancel it) --
+    the same "a drag outlives hover" behavior `titleBarDragging_` already
+    has.
+- **Local vs. world space -- the same deliberate simplification
+  `transform_hierarchy.hpp`'s own Phase 14b precedent for `stepPhysics()`
+  documents, applied here.** The gizmo's own visual origin (for both
+  rendering and hit-testing) is the selected entity's actual rendered WORLD
+  position (`resolveWorldMatrix()`, the same call `renderSelectionMask()`
+  already makes for the identical reason) -- so it visually sits ON the
+  object even when parented. A drag's resulting WORLD-space delta, however,
+  is applied directly onto the entity's own LOCAL `Transform::position()`,
+  unconverted through any parent's own transform -- `gizmo.hpp` itself knows
+  nothing about ECS/`Transform`/parenting at all (that translation happens
+  entirely in `EditorUI::updateGizmo()`). For a root entity (no `Parent`
+  component -- the common case, and exactly what the project owner asked to
+  move) local position IS world position, so this is exactly correct. For a
+  parented entity with its own rotation/scale, this is a documented,
+  deliberate simplification, not a bug silently overlooked: making the gizmo
+  (or physics) fully parent-hierarchy-aware is real, separate scope neither
+  this phase nor Phase 14b takes on.
+- **Play/Edit mode and `RigidBody`: no new behavior invented.** Checked, not
+  assumed: the Inspector's own Position `DragFloat3` does nothing special for
+  an entity that also has a `RigidBody` -- it's a plain
+  `transform->setPosition(position)`, full stop. The gizmo does exactly the
+  same. If physics is running (Play mode, Phase 18b) when a drag repositions
+  a dynamic entity, the next `stepPhysics()` call simply continues simulating
+  from wherever it was moved to (gravity resumes from the new position) --
+  identical to what already happens today when the Inspector's own field is
+  dragged mid-simulation.
+- **Deliberately NOT done this phase** (documented scope, not an oversight):
+  - **Translate only.** No rotate or scale gizmo -- real, separate future
+    scope.
+  - **No click-to-select-in-viewport.** The gizmo only appears for whatever
+    is ALREADY selected via the existing Scene Hierarchy click; selecting an
+    object by clicking directly on its rendered mesh in the 3D view is a
+    separate feature this phase's own brief explicitly does not add.
+  - **No snapping/grid-alignment.** Free continuous dragging only.
+  - **No hover-highlight color change.** All three arrows always render in
+    their fixed X/Y/Z colors, whether hovered, dragged, or neither -- a
+    purely cosmetic polish item, not load-bearing for the feature to work.
+  - **No mutual self-occlusion between the three arrows.** Depth testing is
+    disabled for the whole gizmo draw (see above); the three arrows are not
+    occlusion-correct against EACH OTHER from every camera angle (only a
+    real concern nearly end-on to one axis, where that axis's own arrow is
+    already foreshortened to almost nothing on screen).
+- **Verify.**
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug`,
+    this project's real convention) produced **zero warnings** from any
+    engine source file. `ctest` reports **15/15 passing** -- the 14 pre-
+    existing targets plus this phase's own new `gizmo_test` (a broad set of
+    real, hand-computed test cases: ray generation for known screen points/camera
+    poses checked against hand-derived expected rays and their exact
+    inverse via `worldPointToScreenPoint()`; `closestPointsBetweenLines()`
+    for a perpendicular pair with a hand-computed closest approach, and for
+    a parallel pair confirmed to reject rather than divide by ~0;
+    `hitTestGizmoAxes()` correctly picking the axis a ray is aimed
+    squarely at (while a direction-parallel third axis is silently skipped,
+    not a false hit), correctly preferring a closer axis over a farther one
+    both within tolerance, and correctly reporting `kNone` for a ray that
+    misses every axis; and a full `updateGizmoDrag()` idle -> grab -> drag
+    -> drag -> release sequence with every intermediate position checked
+    against hand-derived expected values, plus the edge-triggering and
+    parallel-ray-declines-a-grab contracts each exercised on their own).
+    This is this phase's single most important verification surface: the
+    real interactive gesture (a mouse dragging across a rendered gizmo arm)
+    is not reproducible at all under this project's headless Xvfb
+    environment (no physical pointer device), so the pure math is what
+    actually proves the feature correct, not merely "it compiles."
+  - **Full wired-path proof, not just the isolated pure functions.** A new
+    `ENGINE_DEBUG_GIZMO_DRAG=<entity name>` env var feeds a scripted
+    sequence of synthetic screen-space mouse positions + mouse-down/up state
+    into `EditorUI::setDebugMouseOverride()` -- the SAME production entry
+    point (`updateGizmo()`) real ImGui mouse input drives; only the raw
+    "where is the mouse, is the button down" input is substituted, every
+    function downstream (`screenPointToWorldRay()`, `hitTestGizmoAxes()`,
+    `updateGizmoDrag()`, the resulting `Transform` mutation) is the exact
+    same unmodified code a real mouse-driven drag runs through -- the
+    identical substitution shape `ENGINE_DEBUG_SIMULATE_ESCAPE` (Phase 16)
+    already established for keyboard input. Run against `falling_cube`
+    (`ENGINE_DEBUG_GIZMO_DRAG=falling_cube ENGINE_DEBUG_SELECT=falling_cube`,
+    dragging the fixed +X axis by a scripted total of 2.0 world units): the
+    log shows `x` climbing `0.000000 -> 0.000000 (grab) -> 0.500000 ->
+    0.999999 -> 1.499999 -> 1.999999`, with `y`/`z` unchanged at every step
+    -- an exact match for the scripted delta, confined to exactly the
+    dragged axis. Repeated against the visible `scene` entity (pyramid +
+    table + box) with a longer-running capture: the log shows the identical
+    `x: 0.000000 -> ... -> 2.000001` trajectory, and a screenshot taken mid-
+    run shows the WHOLE `scene` entity visibly shifted right on screen, the
+    Inspector's own Position field reading `2.000 0.000 0.000`, and the
+    gizmo's three arrows AND the teal selection outline both correctly
+    re-rendered at the entity's new, moved position -- real, end-to-end
+    proof spanning hit-testing, the drag state machine, the `Transform`
+    mutation, and this phase's own rendering, all in the one production
+    code path.
+  - **The three colored handles, visually confirmed.** A screenshot with
+    `ENGINE_DEBUG_SELECT=scene` (on-screen, unlike `falling_cube`'s own
+    off-screen default position) shows three clearly distinguishable arrows
+    -- red along `scene`'s local +X, green along +Y, blue along +Z --
+    converging at the entity's own origin, alongside the pre-existing teal
+    silhouette outline.
+  - **No regression when nothing is selected.** A pre-Phase-18e build
+    (Phase 18d's own commit, `d49f696`, built fresh in a separate worktree)
+    and this phase's build were both run headlessly
+    (`tools/run_headless.sh`, `ENGINE_MAX_FRAMES=90`, no selection) and
+    screenshotted. `compare -metric AE` between the two PNGs reports **`0`**
+    differing pixels -- byte-for-byte pixel-identical, confirming the new
+    `renderGizmo()` call's own leading "no selection, or no `Transform` =>
+    draw nothing" guard genuinely produces zero visible difference when the
+    whole feature never engages.
+
+### Phase 18g: a scene Camera entity actually controls Play mode, plus real Wireframe/Solid/Rendered shading modes
+
+Two independent deliverables, confirmed directly by the project owner. The
+first closes `camera_component.hpp`'s own Phase 15c gap head-on -- that
+header's original comment named "a way to make an ECS entity actually
+control this engine's rendered view" as explicit future scope; this phase
+is that future scope. The second repurposes two Viewport toolbar buttons
+that, since Phase 18a/18b-era code, had only ever toggled
+`ssaoDisabled_`/`ssaoDebugMode_` -- functionality the pre-existing F1 debug
+panel already exposed, making the toolbar wiring purely redundant.
+
+#### Deliverable 1: a scene Camera entity controls Play mode's view, and only one is ever allowed
+
+- **Single-camera enforcement, at two independent layers.**
+  `camera_component.hpp`'s new `resolveActiveCamera(EntityRegistry&)`
+  (`camera_component.cpp` -- CameraComponent gained a real `.cpp` this
+  phase, no longer the "plain data struct, no logic function" header Phase
+  15c-18e left it as) scans the `CameraComponent` pool and returns
+  `{active, ignoredCount}` -- `active` is the FIRST entity found by registry
+  iteration order, `ignoredCount` counts any others. At the UI layer, the
+  Scene panel's Create menu's own `renderCreateEntityMenuItems()`
+  (`editor_ui.cpp`) `BeginDisabled()`'s the "Camera" item the instant
+  `hasActiveCamera` (`resolveActiveCamera(registry_).active.valid()`,
+  recomputed fresh every frame in `Application::render()`) is true -- the
+  SAME `BeginDisabled()` + `ImGuiHoveredFlags_AllowWhenDisabled` tooltip
+  technique Phase 14f's own original "not implemented yet" gaps already
+  established, reused here for a completely different reason (the item now
+  HAS a real handler; it's disabled to enforce "at most one"). Re-enables
+  itself the instant that one entity is deleted, since `hasActiveCamera` is
+  never a cached snapshot. At the DATA layer -- the one path the UI-level
+  restriction can't reach, a hand-edited/loaded scene JSON already
+  containing more than one `CameraComponent` record -- `resolveActiveCamera()`'s
+  own "first found, count the rest" rule is what stays correct regardless,
+  and `Application::render()` `LOG_WARN`s once (edge-triggered, the
+  identical `pointLightOverflowActive_`-style discipline
+  `collectPointLights()`'s own overflow warning already established) the
+  frame that count goes above zero.
+- **Play mode's main render pass, via a temporary real `Camera` value, not a
+  parallel view/projection code path.** `camera_component.hpp`'s new
+  `resolveCameraWorldPose(const glm::mat4& worldMatrix)` -- pure, no
+  `EntityRegistry` dependency at all -- extracts a world-space eye position
+  (the matrix's translation column) and look-AT target (`position +`
+  the standard engine-forward vector `(0,0,-1)` rotated through the
+  matrix's own rotation, normalized so a scaled ancestor's non-uniform
+  scale can't distort the direction -- see that function's own header
+  comment for exactly why normalizing after the multiply, not before, is
+  what makes this correct under `resolveWorldMatrix()`'s full parent-chain
+  scale). `Application::render()` feeds `resolveWorldMatrix(registry_,
+  activeCameraResolution.active)`'s result into it, then hands the
+  resulting position/target straight to `engine::Camera::setPositionLookingAt()`
+  (`camera.hpp`, unmodified since Phase 3) -- the exact function that
+  already turns a position+target pair into the yaw/pitch pair `Camera`'s
+  own `getViewMatrix()` needs. The payoff: `computeCascades()` already
+  takes `const Camera&`, so this temporary `sceneRenderCamera` is a
+  drop-in substitute for `camera_` everywhere render() already used it for
+  FRAMING this frame (shadow cascades, view/projection, `uViewPos`) --
+  zero new parallel code paths, only a `const Camera& renderCamera =
+  usingSceneCamera ? sceneRenderCamera : camera_;` selection made once, near
+  the top of `render()`. `CameraComponent::fovYDeg`/`nearPlane`/`farPlane`
+  feed `Camera::setFov()`/`setClipPlanes()` directly. One accepted, documented
+  limit: a Camera entity's world ROLL is not representable (`Camera` has no
+  roll anywhere in this engine, free-fly included) and is silently dropped,
+  exactly as it already would be for `camera_` itself.
+- **Precedence, exactly as confirmed:** `usingSceneCamera` is
+  `physicsRunning_ && (an active Camera entity exists)` -- Edit mode is
+  UNCONDITIONALLY unaffected (`camera_` renders every Edit-mode frame,
+  Camera entity or not); Play mode with NO Camera entity gracefully falls
+  back to `camera_` too (the exact same free-fly view Edit mode was just
+  showing). Only Play mode WITH an active Camera entity substitutes it.
+  `cluster_light_culler_`'s own cluster grid (built from `camera_`'s
+  projection, only on a screen-size change) and `uClusterNearPlane`
+  deliberately stay `camera_`-based even during this substitution -- a
+  documented, minor, accepted mismatch (this engine's small fixed light
+  count means it has no visible effect) rather than real, separate scope
+  (rebuilding the cluster grid per-frame for this one case).
+- **The Phase 16 double-click-to-capture gesture is disabled while Play
+  mode is viewing through a scene Camera entity** -- the project owner's
+  own confirmed precedent: "there is no free-fly camera to fly while the
+  game view is locked to the scene camera," matching how Unity's own Game
+  view works. Enforced at the one place a same-frame double-click request
+  is latched for next frame's `decideCameraCapture()` call
+  (`cameraCaptureRequestPending_ = cameraCaptureRequested && !usingSceneCamera;`)
+  rather than a new parameter threaded into `EditorUI`'s own detection --
+  `usingSceneCamera` is Application-owned state EditorUI has no other
+  reason to know about. An EXISTING capture is also actively released
+  (`setCameraCaptured(false)`, logged) the instant `usingSceneCamera`
+  becomes true, so the OS cursor never stays hidden/locked with no camera
+  left for it to control.
+- **`camera_component.hpp`'s own Phase 15c header comment, updated, not
+  left describing superseded behavior as still true** -- the same
+  superseded-note convention Phase 18d's own selection-outline replacement
+  already established. The paragraph explicitly scoping this feature out
+  ("What this component deliberately is NOT...") is replaced by a "Phase
+  18g: this component stopped being inert" paragraph naming exactly what
+  changed and what (Edit mode, free-fly input handling) is still,
+  deliberately, untouched.
+
+#### Deliverable 2: real Wireframe / Solid / Rendered viewport shading modes
+
+- **`shading_mode.hpp`/`.cpp`, a pure, GL/ImGui-free module** -- the same
+  shape `camera_capture.hpp`/`gizmo.hpp`/`window_chrome.hpp` already
+  establish. `ShadingMode` is a 3-way enum (`kRendered`/`kSolid`/
+  `kWireframe`) spread across the toolbar's two repurposed buttons,
+  radio-button style: `decideNextEditShadingMode(current, wireframeClicked,
+  solidClicked)` is the whole "which button does what" decision (clicking
+  the currently-active one returns to `kRendered`; clicking the other
+  switches straight to it); `effectiveShadingMode(physicsRunning,
+  editShadingMode)` is `physicsRunning ? kRendered : editShadingMode` --
+  ONE formula that is this entire feature's "Play mode always forces
+  Rendered, restoring Edit's prior choice on Stop" behavior, with **no**
+  separate save/restore bookkeeping anywhere, because `editShadingMode_`
+  (`Application`'s own new member) is simply never written by
+  entering/leaving Play mode, only by a real Edit-mode toolbar click.
+- **The toolbar's own "lighting"/"texture-mode" buttons are repurposed, not
+  duplicated** -- `ssaoDisabled_`/`ssaoDebugMode_` themselves, and the F1
+  debug panel's own "Disable SSAO"/"SSAO debug view" checkboxes that own
+  them, are **completely unchanged**; `renderDockspaceShell()`'s own
+  parameter list swaps its old `bool& ssaoDisabled, bool& ssaoDebugMode`
+  pair for one `ShadingMode& editShadingMode` instead. Both buttons stay
+  clickable during Play mode (the project owner's confirmed, documented
+  choice over `BeginDisabled()`'ing them) -- a click still updates
+  `editShadingMode_` for whenever Edit mode resumes; their `active`
+  highlight reads `effectiveShadingMode()`'s result, not `editShadingMode_`
+  directly, so the highlight always honestly shows Rendered (neither
+  button lit) the instant Play mode overrides an Edit-mode Wireframe/Solid
+  choice.
+- **Wireframe**: `glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)` around exactly
+  the main color pass (entities/ground/PBR spheres), reset to `GL_FILL`
+  immediately after (before the skybox draw and the postprocess/gizmo
+  passes, which must never be line-rasterized) -- the simplest standard
+  technique, no new shader. The shadow pass, SSAO, and SSR are skipped
+  OUTRIGHT this frame (not merely disabled-and-still-run) -- "no meaningful
+  surface data for any of the three" per this phase's own confirmed brief.
+- **Solid**: `uSolidShading` (new uniform, `basic.frag`/`pbr.frag`) swaps a
+  flat `vec4(1.0)`/skipped `uAlbedoMap` sample in for the real diffuse/
+  albedo texture -- `baseColor`/`albedo` reduce to the material's own flat
+  tint, every lighting/shadow term after that point completely unaffected,
+  so shape still reads via real shading. SSAO/SSR are ALSO skipped for
+  Solid (this project's own established preference for the simpler choice
+  when either is defensible -- see `physics.hpp`'s own restraint-in-scope
+  precedent this phase's brief cites); shadows are KEPT (part of "basic
+  lighting," and the shadow depth-only pass has no texture dependency to go
+  wrong against untextured geometry).
+- **The selection outline (Phase 18d) is Rendered-mode-only as of this
+  phase** -- its own occlusion test depends on SSAO's `ssaoGBuffer_` depth
+  pre-pass, which doesn't run in Wireframe/Solid; `hasSelectionOutline`
+  (and the `renderSelectionMask()` call itself) are gated on the identical
+  `skipHeavyPassesThisFrame` flag SSAO/SSR already are, a documented,
+  minor scope reduction rather than compositing against a stale buffer.
+- **No new grid overlay** -- the project owner's own original ask for a
+  Blender-style grid fallback was specifically conditional on there being
+  no real floor mesh; `groundMesh_` already exists and participates in all
+  three shading modes exactly like any other scene geometry, so this is
+  resolved with no new code.
+- **Verify** (both deliverables).
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S .
+    -DCMAKE_BUILD_TYPE=Debug`, this project's real convention) produced
+    **zero warnings**. `ctest` reports **16/16 passing** -- 14 pre-existing
+    targets plus two new ones: `camera_component_test` (extended --
+    `resolveCameraWorldPose()` checked against an identity matrix, a
+    translated+90-degree-yawed matrix, and a non-uniformly-scaled matrix
+    confirming the look direction stays unit-length/undistorted;
+    `resolveActiveCamera()` checked against zero, one, and three
+    `CameraComponent` entities, confirming the "first found, count the
+    rest" rule and its own call-to-call stability) and `shading_mode_test`
+    (new -- every `decideNextEditShadingMode()` transition table entry,
+    the simultaneous-both-clicked tie-break, and `effectiveShadingMode()`
+    for all three `ShadingMode` values under both `physicsRunning` states).
+  - **A real methodology finding, documented rather than papered over:**
+    `tools/run_headless.sh`'s own polling loop (screenshot as soon as a
+    file-size threshold is cleared on 3 consecutive 0.2s polls) can, on
+    this session's host, still occasionally land on a genuine mid-settle
+    frame during the dockspace's own multi-step Viewport panel resize (the
+    startup log shows the panel settling `800x600 -> 413x497 -> 427x497`
+    over its first couple of frames, rebuilding every offscreen render
+    target each time) -- producing a screenshot with a visibly wrong aspect
+    ratio and missing panel-tab labels, and (via `compare -metric AE`) a
+    huge, misleading diff against an otherwise-identical build. Confirmed
+    NOT a code regression: the SAME `engine_app` binary compared against
+    ITSELF across two separate `run_headless.sh` invocations showed the
+    identical large-diff symptom, while a fixed-delay manual capture (Xvfb
+    + a flat 3-second sleep before exactly one `xwd`, bypassing the
+    polling heuristic entirely) produced **`0`** differing pixels against a
+    pre-Phase-18g baseline build (`17347f8`, Phase 18e, built in a separate
+    `git worktree` so the working tree under active edit was never
+    touched) both times it was tried. All of this phase's own screenshot
+    comparisons below use that same fixed-delay capture method.
+  - **No-regression baseline**: default state (Rendered mode, no Camera
+    entity, Edit mode) -- `compare -metric AE` between the pre-18g
+    baseline build and this phase's build reports **`0`** differing
+    pixels, confirmed across two independent runs.
+  - **Deliverable 1, Camera entity genuinely changes Play mode's vantage
+    point**: `ENGINE_DEBUG_CREATE=camera ENGINE_DEBUG_FORCE_PLAY_MODE=1`
+    logs `Created entity "Camera" (index 3) via the Scene panel's Create
+    menu` and `Camera entity present (index 3): the Scene panel's Create
+    menu "Camera" item is now disabled.` (the log-based disabled-state
+    proof this phase's own verification brief calls for, in place of a
+    screenshot of an open popup -- Xvfb has no pointer device to open one
+    with, the same limitation `camera_capture.hpp`'s own header comment
+    already documents for a different feature). The resulting screenshot
+    shows the Play button highlighted, a "Camera" entity in the Scene tree,
+    and a vantage point with the PBR sphere grid/pyramid entirely out of
+    frame -- `compare -metric AE` against the default Edit-mode screenshot
+    reports **211,158 of 480,000** pixels differing, an unmistakable,
+    visually-confirmed vantage-point change (the spawned Camera entity's
+    default identity rotation, facing world `-Z`, differs sharply from the
+    free-fly camera's own angled-at-the-scene default pose).
+  - **Fallback, proven separately**: `ENGINE_DEBUG_FORCE_PLAY_MODE=1` alone
+    (no Camera entity) against the same default-state baseline reports
+    only **5,852** differing pixels -- visually confirmed as just the
+    Play/Pause button highlight swap plus a few frames' worth of gravity on
+    `falling_cube`, i.e. still genuinely the free-fly view, not a
+    coincidentally-similar-looking scene Camera one.
+  - **Capture release, proven in the log**:
+    `ENGINE_DEBUG_FORCE_CAMERA_CAPTURE=1 ENGINE_DEBUG_CREATE=camera
+    ENGINE_DEBUG_FORCE_PLAY_MODE=1` logs capture entering at startup, then
+    `Play mode is now viewing through a scene Camera entity -- releasing
+    free-fly camera capture...` immediately after -- the release logic
+    firing exactly once, at construction, before the first real frame.
+  - **Deliverable 2, all three shading modes visibly distinct, same
+    scene/camera pose**: `ENGINE_DEBUG_SHADING_MODE=rendered|solid|wireframe`
+    screenshots, pairwise `compare -metric AE`: Rendered-vs-Solid
+    **156,199**, Rendered-vs-Wireframe **127,542**, Solid-vs-Wireframe
+    **157,049** (all out of 480,000) -- visually, Solid shows the
+    ground/pyramid/box losing their checkerboard texture for a flat tint
+    while keeping real shading, and Wireframe shows only mesh edges with
+    the toolbar's "lighting" button lit; Rendered is pixel-identical to
+    this phase's own no-regression baseline above.
+  - **Play forces Rendered even with Wireframe selected, proven together**:
+    `ENGINE_DEBUG_SHADING_MODE=wireframe ENGINE_DEBUG_FORCE_PLAY_MODE=1`
+    logs the Wireframe startup choice, but the resulting screenshot is
+    fully textured/shaded (NOT wireframe) with neither toolbar button lit
+    -- `compare -metric AE` against the plain Rendered screenshot reports
+    only **7,707** differing pixels (the Play-button highlight plus a few
+    frames of gravity, the identical small-diff signature the fallback
+    check above already establishes as "not a real Wireframe render").
+    Returning to Edit mode restoring the prior Wireframe choice is
+    guaranteed by `effectiveShadingMode()`'s own formula -- proven directly
+    by `shading_mode_test`'s own `effectiveShadingMode(false,
+    ShadingMode::kWireframe)` case, since `editShadingMode_` is never
+    touched by Play mode entering or leaving at all.
+
+### Phase 18h: real undo/redo for transform edits, entity creation, and entity deletion
+
+The Viewport toolbar's own "undo" button has been a `BeginDisabled()`'d stub
+since Phase 17c, with an explanatory tooltip reading "not implemented yet...
+a real one is separate, later scope" -- explicitly waiting for this phase.
+This phase builds a real command-stack undo/redo system covering exactly the
+three editing actions this editor actually supports today: transform edits
+(the Inspector's Transform `DragFloat3`/`DragFloat` fields, AND Phase 18e's
+translate gizmo), entity creation (the Scene panel's Create menu), and
+entity deletion (the Inspector's "Delete Object" button). Confirmed,
+deliberately not expanded scope -- material/texture assignment, light/camera
+property edits, parenting, shading-mode/Play-Edit toggles, and scene
+load/save itself all stay outside undo/redo, exactly as documented below.
+
+#### Architecture: a tagged-union `Command`, a plain `UndoStack`, reused scene-serialization capture/restore
+
+- **`undo_stack.hpp`/`undo_stack.cpp`** (new): the pure, GL/ECS-agnostic
+  half of this feature, matching this codebase's established "plain
+  structs/enums + free functions, not a virtual class hierarchy" style
+  (`gizmo.hpp`'s `GizmoAxis`/`GizmoDragState`, `shading_mode.hpp`'s
+  `ShadingMode` + `decideNextEditShadingMode()`, `camera_capture.hpp`'s
+  `decideCameraCapture()`). `Command` is a `CommandKind` enum
+  (`kTransformEdit`/`kCreateEntity`/`kDeleteEntity`) plus per-kind payload
+  fields (`TransformSnapshot before`/`after` for the first;
+  `SceneEntityRecord record` for the other two) -- not a virtual
+  `ICommand::undo()/redo()` interface with three subclasses: there is no
+  runtime-extensible set of command kinds here (exactly three, closed by
+  this phase's own confirmed scope), so a `switch` on `CommandKind` gives
+  everything virtual dispatch would, with no heap-allocated polymorphic
+  command objects. `UndoStack` owns a `std::vector<Command>` plus a
+  `position_` index (how many commands are currently "done") -- standard
+  linear command-stack semantics: `push()` first discards any stale "redo
+  tail" (every command from `position_` onward) before appending, so
+  pushing a genuinely new action after an undo correctly makes the
+  old, now-unreachable "future" unreachable, exactly the way a real
+  editor's undo/redo behaves. `undo()`/`redo()` take a caller-supplied
+  `std::function<void(Command&)>` callback rather than applying any effect
+  themselves -- deliberately: neither method has, or needs, any
+  `EntityRegistry`/`ResourceManager`/`Shader` access at all, so this whole
+  file needs no live GL context, ECS registry, or GPU-resident asset of any
+  kind to test (see Verify below), the identical
+  `scene_serialization.hpp`/`.cpp` (pure) vs. `scene_loader.cpp`
+  (`EntityRegistry`/`ResourceManager`-facing) split this project already
+  established for the identical reason. The callback receives a *mutable*
+  reference to the target `Command` specifically so it can rewrite
+  `Command::entity` in place -- see the next bullet for why that's
+  necessary.
+- **`EntityId` never recycles indices, so a create/delete `Command`'s own
+  `entity` field has to be mutable.** `ecs.hpp`'s own `EntityId` comment:
+  `EntityRegistry::create()` hands out monotonically increasing indices,
+  *never* recycled, even after an entity is destroyed. So undoing a
+  creation (destroy) then redoing it (recreate from the stored record) does
+  **not** resurrect the original id -- it allocates a brand-new one.
+  Likewise, undoing a deletion (recreate) produces a new id, and redoing
+  that *same* deletion (destroy again) has to destroy *that* new id, not
+  the long-gone original. `Command::entity` is therefore not a fixed label
+  but "the currently-live id this command refers to," rewritten by
+  `Application::recreateCommandEntity()`/`destroyCommandEntity()`
+  (`application.cpp`) every time a `kCreateEntity`/`kDeleteEntity`
+  command's entity is destroyed/recreated. `kTransformEdit`'s own `entity`
+  never changes (an edit never destroys/recreates anything), so it needs no
+  such rewriting.
+- **Entity deletion: reused `scene_serialization.hpp` machinery, not a
+  parallel snapshot mechanism.** Per this phase's own brief's strong steer,
+  `scene_loader.cpp`'s existing `loadScene()`/`saveScene()` per-entity
+  bodies were extracted into two new, independently reusable functions,
+  declared in `scene_serialization.hpp` alongside `SceneEntityRecord`
+  itself:
+  - `captureEntityRecord(registry, id, activeDirectionalLight)` -- exactly
+    `saveScene()`'s own per-entity record-building logic (Transform,
+    ModelComponent, RigidBody, Collider, PointLight, DirectionalLight,
+    CameraComponent, MaterialOverride, and the Parent-to-name lookup), now
+    called both by `saveScene()`'s own `each<Transform>()` loop *and* by
+    `Application::deleteEntity()`/`spawnEntityFromCreateMenu()`.
+  - `restoreEntityFromRecord(registry, record, resources, shader)` --
+    exactly `loadScene()`'s own per-record entity-building first pass
+    (NameComponent, Transform, RigidBody, Collider, PointLight,
+    DirectionalLight, CameraComponent, MaterialOverride), now called both
+    by `loadScene()`'s own per-record loop *and* by
+    `Application::recreateCommandEntity()`. Deliberately does **not** add a
+    Parent component or resolve "which DirectionalLight is active" --
+    both need a caller-specific name/id resolution (`loadScene()`'s own
+    whole-file `idByName` map vs. `Application`'s own
+    `findEntityByName()` against the *current* live registry) that only
+    each caller can build; both callers do that resolution themselves,
+    immediately after this call returns, mirroring `loadScene()`'s own
+    existing two-pass shape.
+
+  `loadScene()`/`saveScene()` themselves are now thin wrappers around these
+  two functions plus the whole-file-only bookkeeping (the `idByName` map,
+  the Parent second pass, "last record with `directionalLightActive` wins")
+  -- behavior-unchanged, confirmed by re-running this project's own
+  existing default-scene round-trip headlessly (see Verify).
+- **Entity creation: also reuses the same record, not a separate
+  `CreateEntityKind` + spawn-position pair.** The obvious-looking
+  alternative -- store the `CreateEntityKind` and the spawn position used,
+  then re-run `spawnEntityFromCreateMenu()` on redo -- was rejected: that
+  function computes its spawn position from `camera_.position()` *at call
+  time*, so redoing days (or just several camera-moves) later would
+  silently spawn the entity at the wrong place. Instead,
+  `spawnEntityFromCreateMenu()` now finishes by calling
+  `captureEntityRecord()` on the entity it just fully built (after every
+  kind-specific component -- PointLight/DirectionalLight/CameraComponent --
+  has already been added) and pushes a `kCreateEntity` `Command` carrying
+  that record. Redoing a creation is then byte-for-byte the same
+  `restoreEntityFromRecord()` call deletion-undo already needs -- one
+  mechanism, not two -- and is strictly *more* correct: the record already
+  holds the entity's real, as-built name/position/components, not a recipe
+  that has to be re-executed against possibly-changed ambient state. This
+  matches this project's own established "simplest correct increment" bias
+  (e.g. `physics.hpp`'s own RigidBody mass-field comment) more closely than
+  the kind+position alternative would have.
+- **A confined, deliberate creation-path gap:** only
+  `spawnEntityFromCreateMenu()` (the Scene panel's Create menu, plus its
+  own `ENGINE_DEBUG_CREATE` headless mirror) pushes a `kCreateEntity`
+  command. `spawnEntityFromDroppedModel()` (Phase 15g's Viewport
+  drag-and-drop) shares the same underlying `spawnPositionedEntity()`
+  helper but is a *different*, un-mentioned creation path this phase's own
+  confirmed scope names only "entity creation
+  (`spawnEntityFromCreateMenu()`)" for -- so a dropped model is not
+  currently undoable. Documented here rather than silently absorbed into
+  "creation is covered," per this project's "document known gaps, don't
+  paper over them" convention.
+- **A confined, deliberate deletion-restore gap: orphaned children are not
+  re-parented on undo.** `destroyEntityOrphaningChildren()`
+  (`transform_hierarchy.hpp`, Phase 14f) permanently promotes a deleted
+  entity's direct children to roots, decomposing each to its own current
+  *world* transform, at the moment of deletion -- a real, separate state
+  change to those OTHER entities, not just to the one being deleted.
+  Undoing the deletion restores the deleted entity itself (including its
+  own Parent link, if it had one) via `captureEntityRecord()`/
+  `restoreEntityFromRecord()`, but does **not** attempt to re-discover and
+  re-parent whichever children were orphaned at delete time back onto the
+  restored entity -- doing so would need its own separate,
+  `SceneEntityRecord`-shaped "which children got orphaned, and what were
+  their PRE-orphan local transforms" snapshot, real additional scope this
+  phase's own brief does not ask for. The orphaned children simply keep
+  their orphaned (root, current-world-position) state, which is safe (no
+  crash, no dangling reference) but not a full undo of every SIDE EFFECT
+  the original deletion had. Verified directly, not just reasoned about --
+  see Verify's own step-by-step log.
+
+#### Wiring: reporting intent, not mutating directly
+
+- **The Inspector's "Delete Object" button no longer calls
+  `destroyEntityOrphaningChildren()` itself.** It now only sets a new
+  `deleteEntityRequested` out-parameter (`EditorUI::renderDockspaceShell()`)
+  -- the identical "EditorUI reports intent, Application acts" shape
+  `createRequest`/`saveSceneRequested`/`textureAssignRequested` already
+  establish. `Application::deleteEntity(id)` (new) is the one real
+  implementation: captures a `SceneEntityRecord`, pushes a `kDeleteEntity`
+  `Command` onto `undoStack_`, *then* destroys the entity -- capture has to
+  happen before destruction, since `captureEntityRecord()` reads the
+  entity's still-live components. `ENGINE_DEBUG_DELETE` (constructor) now
+  calls this same method too, instead of hand-rolling the same
+  destroy-plus-clear-selection sequence a second time.
+- **A completed transform edit is reported through one shared
+  `transformEditCommitted` out-parameter**, set by whichever of two
+  producers actually completes an edit this frame (never both in the same
+  frame -- a user cannot simultaneously drag the gizmo and type into an
+  Inspector field):
+  - `renderInspectorPanel()`'s Position/Rot Y/Scale fields: each is
+    bracketed by a small `noteActivation()`/`commitIfDeactivated()` pair
+    using ImGui's own `IsItemActivated()`/`IsItemDeactivatedAfterEdit()` --
+    `noteActivation()` captures the Transform's full `TransformSnapshot`
+    into `EditorUI`'s own new `pendingInspectorTransformEditBefore_` member
+    the instant a field is first activated (captured *before* that same
+    call's own possible mutation, since the very first frame of a drag can
+    both activate and already report a changed value); `commitIfDeactivated()`
+    builds the `Command` (guarded by `transformSnapshotsEqual()`, so a
+    click that activates-then-deactivates without ever moving the value
+    pushes nothing) once that same field's interaction ends. A multi-frame
+    click-drag therefore becomes exactly one `Command`, never one per
+    frame -- the phase brief's own explicit requirement.
+  - `EditorUI::updateGizmo()`: the existing `GizmoDragState` state machine
+    already knows exactly when a drag starts (`gizmoDragStartLocalPosition_`
+    captured) and ends (`gizmoDragState_.axis` transitions back to `kNone`)
+    -- this phase adds one `if (wasDragging && result.state.axis ==
+    GizmoAxis::kNone)` block at that exact release transition, building a
+    `Command` from the cached start position and the entity's own
+    now-final live Transform, the identical `transformSnapshotsEqual()`
+    no-op guard as the Inspector path.
+
+  `Application::render()` pushes `transformEditCommitted` onto `undoStack_`
+  when present -- `EditorUI` itself never touches an `UndoStack` at all,
+  matching its pre-existing "just a Dear ImGui wrapper over data
+  Application owns" role. The registry mutation itself already happened
+  live, inline, exactly as before this phase (Position `DragFloat3`/the
+  gizmo drag both still write straight into the entity's own Transform the
+  instant they're dragged) -- this out-parameter is purely the
+  undo-history bookkeeping for an edit that already took visible effect.
+- **The toolbar's real undo/redo buttons.** `renderViewportToolbar()` gains
+  four new parameters -- `canUndo`/`canRedo` (read-only snapshots of
+  `undoStack_.canUndo()`/`canRedo()`, gating each button's `enabled` the
+  same way `physicsRunning` already gates Play/Pause's highlight) and
+  `undoRequested`/`redoRequested` (set true the frame either is clicked).
+  `Application::render()` calls `undo()`/`redo()` when either comes back
+  true. Both buttons now gray out correctly at either end of the history --
+  screenshot-proven in Verify below.
+- **Keyboard shortcuts, following the Ctrl+S precedent exactly.**
+  `run()` gains a Ctrl+Z (undo) and Ctrl+Y-*or*-Ctrl+Shift+Z (redo) block,
+  the identical edge-triggered (`ctrlZWasDown_`/`redoChordWasDown_`),
+  `!ImGui::GetIO().WantCaptureKeyboard`-gated, direct-`window_.isKeyPressed()`
+  chord read `ctrlSWasDown_`'s own block already establishes (not routed
+  through `InputActionMap` -- a chord needs an AND of simultaneous keys,
+  which that class's own single-key-OR-bindings shape doesn't support, the
+  same reason Ctrl+S itself bypasses it). Both redo chords are supported
+  (trivial -- one more `||` term) rather than forcing a single convention;
+  `ctrlZDown` explicitly excludes Shift being held so a Ctrl+Shift+Z press
+  registers as redo only, never also as undo on the same physical press.
+- **The new redo icon: Font Awesome's own "arrow-rotate-right," U+F01E --
+  verified against the vendored font, not guessed.** `editor_icons.hpp`
+  gains `kIconRedo` and `ToolbarButton::kRedo`. The codepoint was confirmed
+  directly against the SAME upstream `fa-solid-900.ttf` (Font Awesome Free
+  6.7.2 Solid) Phase 17b/17c's own `pyftsubset` runs already used, via
+  `fontTools.ttLib.TTFont(...).getBestCmap()`: `0xF0E2 ->
+  "arrow-rotate-left"` (the existing `kIconUndo`), `0xF01E ->
+  "arrow-rotate-right"` -- Font Awesome's own paired left/right rotate-arrow
+  icons, used everywhere for undo/redo, confirming this is the natural,
+  intended counterpart rather than an assumption. Re-subsetted into the
+  SAME vendored `assets/fonts/editor-icons.ttf`, the identical command
+  Phase 17c already established, one more codepoint appended:
+  ```
+  python3 -m fontTools.subset fa-solid-900.ttf \
+    --unicodes=F07B,F1B2,F0EB,F185,F030,F03E,F00A,F0E2,F04B,F04C,F01E \
+    --glyph-names --layout-features='' --no-hinting --desubroutinize \
+    --output-file=editor-icons.ttf
+  ```
+  The result is **3,152 bytes, 12 glyphs** (the eleven named codepoints
+  plus the mandatory `.notdef`), up from Phase 17c's 2,916-byte/11-glyph
+  file -- still a small fraction of the ~426 KB upstream release.
+  `editor_ui.cpp`'s own `kIconGlyphRanges` array grows one more `{lo, hi}`
+  pair, built from the same `editor_icons.hpp` constant as every other
+  entry.
+
+#### Deliberately not done this phase (documented scope, not an oversight)
+
+- **No undo for material/texture assignment, light/camera property edits,
+  parenting changes, shading-mode/Play-Edit-mode toggles, or scene
+  load/save itself.** Exactly this phase's own confirmed scope boundary.
+- **No merging/coalescing of unrelated consecutive edits.** Each of the
+  three action types always gets its own discrete `Command` -- no "smart
+  grouping" heuristics (e.g. treating several quick Position drags as one
+  step). The only "merging" that exists at all is the no-op guard
+  (`transformSnapshotsEqual()`), which *suppresses* a push, never combines
+  two real ones.
+- **No undo-history persistence across a scene load.** `undoStack_` is
+  simply never cleared automatically today, because this engine has
+  exactly one real "load a scene" call site (`ENGINE_LEGACY_SCENE`'s own
+  constructor-time `loadScene()` call) and no in-editor "load a different
+  scene" UI at all yet -- there is no live call site where this would even
+  matter. A future phase that adds a real Scene > Open/Load UI is the
+  right place to decide this for real (and should very likely clear it
+  then, per `undoStack_`'s own `application.hpp` comment: a stale
+  `SceneEntityRecord`/`EntityId` from an unloaded scene is meaningless at
+  best).
+- **No undo-history LIST UI.** Only the toolbar's Undo/Redo buttons plus
+  the two keyboard shortcuts -- no panel showing the stack's own contents.
+- **Two confined creation/deletion gaps**, both documented above in detail
+  and confirmed inert (not crashing, not silently wrong) by this phase's
+  own headless proof: a drag-and-drop-created entity isn't undoable, and an
+  undone deletion doesn't re-parent whichever children were orphaned at
+  delete time.
+
+#### Verify
+
+- **Full clean rebuild** (`rm -rf build`, `cmake -B build -S .
+  -DCMAKE_BUILD_TYPE=Debug`, `cmake --build build`) produced **zero
+  warnings** from any engine source file. `ctest` reports **17/17
+  passing** -- the 16 pre-existing targets plus this phase's own new
+  `undo_stack_test`: real, non-trivial coverage of `UndoStack`'s own
+  push/undo/redo/truncate-on-new-push semantics (an empty stack's
+  undo()/redo() are confirmed no-ops that never invoke the callback; a
+  three-command push/undo/undo/undo/redo/redo/redo round-trip confirmed
+  hands each command back in the correct last-undone-first /
+  first-redone-first order; pushing after two undos confirmed discards the
+  stale two-command redo tail, with the newly pushed command's own `after`
+  value -- not either of the discarded ones -- coming back on the next
+  undo; the `Command::entity`-rewrite contract create/delete commands
+  depend on, confirmed by simulating a destroy-then-recreate-as-a-new-id
+  cycle and checking a SECOND undo of the same command slot sees the
+  rewritten id, not the original one; `clear()` resets both size and
+  position), plus `transformSnapshotsEqual()`'s own exact-equality
+  contract and the three `makeXyzCommand()` constructors. `editor_icons_test`
+  also gained two new assertions confirming `kRedo` returns its own
+  distinct glyph, not a second copy of `kUndo`.
+- **The no-regression baseline, isolated to exactly the toolbar's own new
+  enabled state.** A pre-Phase-18h build (Phase 18g's own commit,
+  `5e81b9a`, built fresh in a separate `git worktree`) and this phase's
+  build were both run headlessly (`ENGINE_MAX_FRAMES=60`, no debug env
+  vars, no selection) and screenshotted. `compare -metric AE` between the
+  two PNGs reports **5,030** differing pixels, confirmed by inspection to
+  be confined ENTIRELY to the toolbar's own button row: the now-real,
+  enabled "undo" glyph (previously drawn dim/disabled) plus the brand-new
+  "redo" button inserted after it, pushing Play/Pause one button-width to
+  the right -- the whole 3D viewport and every other panel (Scene/Assets/
+  Inspector) are pixel-identical outside that one row.
+- **Full wired-path proof, not just the isolated pure functions --
+  create/move/delete/undo x3/redo x2, exact positions and entity counts at
+  every step.** Two new headless hooks, `ENGINE_DEBUG_UNDO=<count>`/
+  `ENGINE_DEBUG_REDO=<count>` (fire at fixed scripted frames 25/30,
+  calling the exact same `Application::undo()`/`redo()` a real Ctrl+Z/
+  toolbar click would, `<count>` times each, logging the registry's full
+  entity/position state after every individual call), combined with the
+  existing `ENGINE_DEBUG_CREATE=cube ENGINE_DEBUG_SELECT=Cube
+  ENGINE_DEBUG_GIZMO_DRAG=Cube ENGINE_DEBUG_DELETE=falling_cube` (Cube
+  created, selected, dragged +2.0 along world +X via the real gizmo drag
+  script, then `falling_cube` deleted -- orphaning `parented_demo_cube` to
+  its own current world position, per Phase 14f's existing behavior). The
+  resulting undo stack, built in this exact order --
+  `[Create(Cube), Delete(falling_cube), TransformEdit(Cube)]` -- and the
+  full, verbatim log of every step:
+  ```
+  after undo() #1: 3 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); Cube=(0.934383,0.682818,1.221885)
+  after undo() #2: 4 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); Cube=(0.934383,0.682818,1.221885); falling_cube=(0,2.5,1.1)
+  after undo() #3: 3 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); falling_cube=(0,2.5,1.1)
+  after redo() #1: 4 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); falling_cube=(0,2.5,1.1); Cube=(0.934383,0.682818,1.221885)
+  after redo() #2: 3 named entities; parented_demo_cube=(0.5,2.8,1.1); scene=(0,0,0); Cube=(0.934383,0.682818,1.221885)
+  ```
+  Every single value is an exact match for what the command stack predicts:
+  undo #1 reverts the drag (Cube's position lands back on its own original,
+  captured-at-creation spawn point, `0.934383,0.682818,1.221885` -- not a
+  re-derived-from-camera guess); undo #2 restores `falling_cube` at
+  `(0,2.5,1.1)`, byte-identical to `assets/scenes/default.json`'s own
+  authored position, as a **brand-new entity** (its recreated id is
+  different from its original one, confirmed in the log by index, matching
+  this phase's own documented "`EntityId`s never recycle" design); undo #3
+  removes `Cube` entirely, returning the scene to exactly its original
+  3-entity baseline; redo #1 recreates `Cube` at that SAME original spawn
+  position (not the dragged one -- only 2 of the 3 stacked commands were
+  redone, so the still-pending `TransformEdit` correctly stays un-replayed);
+  redo #2 deletes `falling_cube` a second time. `parented_demo_cube`'s own
+  position, `(0.5,2.8,1.1)`, never changes across any of the five steps --
+  the documented "orphaned children are not re-parented on undo" gap,
+  confirmed inert rather than merely asserted.
+  - Three screenshots taken at exact log-synchronized moments (a custom
+    capture script polling the running process's own stdout for each
+    step's distinctive log line, then screenshotting immediately, rather
+    than `tools/run_headless.sh`'s own early-stopping "content looks big
+    enough" heuristic, which is tuned for "does anything render at all,"
+    not "capture state as of a specific later frame") visually confirm the
+    same trajectory: right after the drag (undo/redo not yet triggered),
+    the Scene panel lists exactly `parented_demo_cube`/`scene`/`Cube`
+    (`falling_cube` already gone), `Cube` selected with its Inspector
+    Position reading `2.934 0.683 1.222` (the dragged value), and the
+    toolbar's undo glyph bright/enabled while redo stays dim/disabled;
+    right after the three undos, the Scene panel lists
+    `parented_demo_cube`/`scene`/`falling_cube` (`Cube` gone, `falling_cube`
+    back), and the toolbar has visibly FLIPPED -- undo now dim/disabled,
+    redo now bright/enabled; right after the two redos, the Scene panel
+    lists `parented_demo_cube`/`scene`/`Cube` again (`falling_cube` gone a
+    second time), `Cube` now visibly rendered in the 3D viewport at its
+    original spawn position, and BOTH toolbar buttons read bright/enabled
+    (one redo step -- the transform edit -- still legitimately available).
+  - The Inspector's own Transform-field edit path (`renderInspectorPanel()`'s
+    `noteActivation()`/`commitIfDeactivated()`) shares its entire consuming
+    half -- `Command` construction via `makeTransformEditCommand()`,
+    `transformSnapshotsEqual()`'s no-op guard, `undoStack_.push()`,
+    `Application::undo()`/`redo()`, `setTransformFromSnapshot()` -- with
+    the gizmo path this run already exercises end-to-end; only the
+    ImGui-specific *producing* half
+    (`IsItemActivated()`/`IsItemDeactivatedAfterEdit()`) is unique to it,
+    and is not independently exercisable headlessly the same reason
+    `ENGINE_DEBUG_GIZMO_DRAG` itself had to exist in the first place (Xvfb
+    has no physical pointer device to drive a real ImGui widget
+    interaction) -- verified by code-reading/logical soundness only, the
+    same honest verification-ceiling accounting this project's own Phase
+    17d README section already gives for a different Xvfb-unreachable
+    interaction (title-bar dragging).
+  - `scene_loader.cpp`'s own refactor (`captureEntityRecord()`/
+    `restoreEntityFromRecord()` now doing what `saveScene()`/`loadScene()`
+    used to do inline) is behavior-preserving: the same headless run's own
+    startup log shows the existing `assets/scenes/default.json` loading
+    exactly as before (all three entities, `parented_demo_cube`'s existing
+    Parent link intact pre-deletion), and every recreated/captured record
+    above round-trips its own values exactly.
+
+### Phase 18i: New Scene, Save As, Open Scene -- multiple named scene files
+
+Through Phase 18h this engine only ever knew about ONE scene file:
+`kDefaultScenePath`, hardcoded to `assets/scenes/default.json`. "Save Scene"
+(Ctrl+S / File > Save Scene) always overwrote that same file; there was no
+way to start a fresh empty scene, no way to save to a different file, and no
+way to load anything other than whatever `default.json` happened to hold at
+startup. The project owner's own explicit request: "I'd like to load or
+start a new scene so I can have multiple options." This phase closes that
+gap with three new File menu items -- New Scene, Save As..., Open Scene...
+-- and one small architectural change underneath all three: which scene
+file is "the" current one is now a tracked, changeable piece of state, not
+a compile-time constant.
+
+#### What
+
+- **`currentScenePath_` (new `Application` member) replaces the hardcoded
+  "every save targets `kDefaultScenePath`" assumption.** Starts as
+  `kDefaultScenePath` in the constructor, unconditionally, regardless of
+  whether `ENGINE_LEGACY_SCENE` was set -- byte-identical to every prior
+  phase's own behavior in the common case. Changed in exactly three places,
+  all of them real scene transitions: `newScene()` (-> a fixed sentinel
+  path, see below), `saveSceneAs()` (-> the freshly chosen path), and
+  `openScene()` (-> the path just loaded from). The existing plain "Save
+  Scene" (`saveCurrentScene()`) now saves to `currentScenePath_` instead of
+  always `kDefaultScenePath` -- the one behavior change to a pre-existing
+  method this phase makes, and a pure generalization: "save to the file I'm
+  currently working on" meant `kDefaultScenePath` in every case before this
+  phase (there was only ever one file to be "currently working on"), and
+  still does for an untouched fresh run.
+- **New Scene (`Application::newScene()`)** clears `registry_` to a
+  genuinely empty scene -- no entities at all, standard "start fresh"
+  semantics, not a reload of the checked-in demo content -- via a new
+  shared helper, `clearSceneForTransition()`: every entity registry_ has
+  (collected from its own Transform pool, the same "every entity this
+  schema can represent has a Transform" premise `saveScene()` already
+  relies on) is destroyed via `EntityRegistry::destroyEntity()`, then
+  `selectedEntity_`, `activeDirectionalLight_`, and `undoStack_` are all
+  reset/cleared. `currentScenePath_` becomes `kUntitledScenePath`
+  (`assets/scenes/untitled.json`) -- a fixed sentinel that is **never
+  written to disk by New Scene itself**; only a following Save/Save As
+  actually creates that file, the same "a brand-new, never-saved document"
+  behavior most editors give a fresh file. No confirmation prompt: this
+  engine has no "unsaved changes" dirty-tracking anywhere (every save has
+  always been an unconditional full snapshot, see Phase 15e), and inventing
+  one purely to gate a confirmation dialog here would be real, separate
+  scope -- a plain, immediate action is this project's own established
+  "simpler choice when either is reasonable" bias.
+- **Save As (`Application::saveSceneAs()`, File > Save As...)** is an
+  in-editor ImGui popup with a text field -- this engine has no native
+  OS file-picker dependency (GLFW provides none, and a new heavy dependency
+  for one popup is out of scope) -- that saves to
+  `assets/scenes/<sanitized name>.json`. The name is sanitized by a new
+  pure function, `sanitizeSceneName()` (`scene_file_ops.hpp`/`.cpp`): every
+  character that isn't a letter, digit, `_`, or `-` is stripped outright
+  (not escaped), interior whitespace collapses to `_`, and an input that
+  sanitizes to nothing at all (empty, whitespace-only, entirely punctuation)
+  is rejected (`std::nullopt`). Critically, `.` is not in the allowed set --
+  this is what makes a pathological input like `../../etc/passwd` harmless:
+  every `.` and `/` is simply gone, leaving one ordinary filename component
+  (`etcpasswd`) with no directory-traversal meaning left at all, rather than
+  needing a separate bespoke "reject `..`" check. The popup's own "Save"
+  button stays disabled until the current text field sanitizes to something
+  real, with a live preview line showing exactly which file the save would
+  create/overwrite. An existing file with the same name is **silently
+  overwritten**, matching this engine's own plain Save Scene, which has
+  always silently overwritten `kDefaultScenePath` with no confirmation step
+  (Phase 15e) -- Save As follows the identical convention for consistency
+  rather than introducing a brand-new "are you sure?" behavior this engine
+  has never had anywhere else; the popup does show a plain, non-blocking
+  "will be overwritten" heads-up line when that's the case, purely
+  informational.
+- **Open Scene (`Application::openScene()`, File > Open Scene...)** is a
+  second popup listing every `.json` file actually present under
+  `assets/scenes/` -- a new pure function, `listSceneFileNames()`
+  (`scene_file_ops.hpp`/`.cpp`), does the listing: a small, dedicated, flat,
+  single-directory walk (deliberately not a reuse of the Asset Browser's
+  much larger recursive `buildAssetTree()`, which handles two categories
+  and arbitrary subdirectory nesting neither of which `assets/scenes/`
+  actually needs), re-run fresh every frame the popup is open (cheap enough
+  that no one-time caching is needed, unlike `buildAssetTree()`'s own
+  constructor-time build) so a scene just Saved As during the same run
+  immediately shows up the next time the popup opens. Clicking an entry
+  replaces the current scene's entities with the loaded scene's (the exact
+  same `clearSceneForTransition()` helper New Scene uses -- loading a
+  different scene is exactly as much a scene transition as starting a new
+  one) and updates `currentScenePath_`. A malformed/corrupt scene file is
+  handled gracefully: `parseSceneRecords()` (the pure, non-`registry_`-
+  touching half of scene serialization) is called FIRST, as a pre-check,
+  before anything about the live scene is touched -- a file that fails
+  there (missing, invalid JSON, wrong schema) leaves the currently loaded
+  scene completely untouched, LOG_ERROR'd, no crash. A narrower failure mode
+  (the JSON parses fine, but a referenced model/texture asset itself can't
+  load) is only reachable after `clearSceneForTransition()` has already run
+  -- `loadScene()`'s own per-record loop has no rollback of its own (a
+  later record's asset failure leaves every earlier record's entity already
+  live in `registry_`), so `openScene()`'s own catch block calls
+  `clearSceneForTransition()` a second time to destroy that partial set of
+  entities, ending this failure mode in a genuinely empty `registry_` --
+  matching what a real New Scene produces, not a half-loaded scene -- and
+  leaving `currentScenePath_` unchanged rather than repointing it at a file
+  whose load didn't actually succeed. What's left as a documented, accepted
+  gap is narrower than that: the scene that was open before this call is
+  still gone (`clearSceneForTransition()` already cleared it before
+  `loadScene()` was even attempted, and this method makes no attempt to
+  restore it) -- the same risk profile `loadScene()` already has at STARTUP
+  for a bad `default.json`, just reached from a live in-editor action
+  instead of process launch (see "Deliberately not done" below).
+- **Reuses Phase 18h's own `captureEntityRecord()`/`restoreEntityFromRecord()`/
+  `saveScene()`/`loadScene()` machinery unchanged.** This phase adds
+  multi-file path management and UI around the existing save/load
+  machinery -- the scene JSON format itself
+  (`scene_serialization.hpp`'s `SceneEntityRecord`) is completely
+  untouched.
+- **Headless verification hooks, the same "debug env var calls the exact
+  same production function a real interaction would" precedent every prior
+  phase's own hooks establish:** `ENGINE_DEBUG_NEW_SCENE=1`,
+  `ENGINE_DEBUG_SAVE_SCENE_AS=<raw name>` (sanitized the identical way a
+  real popup's text field would be, at the SAME constructor-time call
+  site), and `ENGINE_DEBUG_OPEN_SCENE=<name>[,<name>...]` -- the one env
+  var in this whole file that carries a comma-separated LIST rather than a
+  single value, specifically so one headless run can chain more than one
+  Open Scene action in sequence (loading a just-Saved-As scene back, then
+  loading back to "default") the way multiple separate process launches
+  never could -- New Scene/`currentScenePath_`/`undoStack_` are all live,
+  in-process state a fresh process launch can't resume mid-sequence. Each
+  fires at its own fixed scripted frame (`kDebugSaveSceneAsFrame=40`,
+  `kDebugNewSceneFrame=50`, `kDebugOpenSceneBaseFrame=60` +
+  `kDebugOpenSceneFrameSpacing=10` per list entry), spaced comfortably after
+  Phase 18h's own `kDebugUndoFrame`/`kDebugRedoFrame=25/30` so a run
+  combining both phases' own hooks still produces a clean, easy-to-read
+  timeline.
+
+#### Confirming Phase 18h's own undo-history decision
+
+Phase 18h's own `undoStack_` comment (`application.hpp`) explicitly named
+"a future phase that adds a real Scene > Open/Load UI" as the right place
+to decide whether undo history should survive a scene transition, and
+leaned toward clearing it: "an undo step referencing a `SceneEntityRecord`/
+`EntityId` from a scene that's no longer even loaded is meaningless at
+best, actively confusing at worst." This phase IS that future phase, and
+confirms exactly that call -- `clearSceneForTransition()` calls
+`undoStack_.clear()` (a method Phase 18h added specifically so this later
+call would have something ready to call) as part of both New Scene's and
+Open Scene's own cleanup.
+
+#### Deliberately not done this phase (documented scope, not an oversight)
+
+- **No "unsaved changes" dirty-tracking/confirmation prompts anywhere** --
+  New Scene and a Save As over an existing file both act immediately, with
+  no "are you sure?" step. Explicitly out of scope per this phase's own
+  brief; inventing dirty-tracking purely to gate a confirmation dialog would
+  be real, separate scope this engine has never had any piece of before.
+- **No native OS Save/Open file dialog.** The in-editor ImGui popup
+  approach (a text field for Save As, a clickable list for Open Scene) is
+  the confirmed right scope -- GLFW provides no native file picker, and
+  adding a new heavy dependency for one small feature was explicitly ruled
+  out.
+- **A narrow, documented Open Scene failure gap:** a scene file that parses
+  as valid JSON/schema but references a missing/unloadable model or texture
+  asset only fails AFTER `clearSceneForTransition()` has already run. The
+  registry itself doesn't end up wrong from this -- `openScene()`'s own
+  catch block calls `clearSceneForTransition()` a second time to roll back
+  whatever partial entities that failed `loadScene()` call left behind
+  (`loadScene()`'s own per-record loop has no rollback of its own: a later
+  record's asset failure leaves every earlier record's entity already live
+  in `registry_`), so this run still ends in a genuinely empty scene, and
+  `currentScenePath_` is left unchanged rather than repointed at the file
+  whose load failed. What IS left as a gap: the scene that was open
+  *before* this `openScene()` call is still gone -- `clearSceneForTransition()`
+  already cleared it before `loadScene()` was even attempted, and nothing
+  reverts to it -- the identical risk profile this engine's own STARTUP
+  `loadScene()` call already has for a broken `default.json` (propagates
+  out of the constructor, `main()`'s own top-level `try`/`catch` prints and
+  exits), just reached from a live in-editor action instead of a process
+  launch, where it degrades to an empty scene + a `LOG_ERROR` instead of
+  exiting the whole process. Building a full pre-flight validation of every
+  referenced asset before committing to the clear (rather than just the
+  pure JSON/schema pre-check this phase already does) -- which would let a
+  failed Open Scene restore the PREVIOUS scene instead of ending up
+  empty -- would be real, separate scope for a failure mode this narrow.
+- **`kUntitledScenePath` is never garbage-collected/cleaned up** if a user
+  starts several New Scenes without saving any of them -- there's only ever
+  one fixed sentinel path, and each unsaved New Scene simply overwrites
+  whatever the last one's own eventual Save would have written there. No
+  "Untitled 2", "Untitled 3" numbering -- this engine has no multi-scene-
+  tab concept for that numbering to mean anything within.
+
+#### Verify
+
+- **Full clean rebuild** (`rm -rf build`, `cmake -B build -S .
+  -DCMAKE_BUILD_TYPE=Debug`, `cmake --build build`) produced **zero
+  warnings** from any engine source file. `ctest` reports **18/18
+  passing** -- the 17 pre-existing targets plus this phase's own new
+  `scene_file_ops_test`: real, non-trivial coverage of `sanitizeSceneName()`
+  (the ordinary case; interior whitespace -> `_`; unsafe characters
+  stripped, not rejected; a `../../etc/passwd`-shaped input sanitizing down
+  to a harmless `etcpasswd` with no traversal meaning surviving; leading/
+  trailing incidental punctuation trimmed; empty/whitespace-only/
+  entirely-stripped inputs all rejected; a pathologically long input
+  truncated rather than rejected), `sceneRelativePathForName()` (including
+  the "default" name resolving to the exact same relative path
+  `kDefaultScenePath` itself uses -- Open Scene's "default" entry and this
+  engine's original single scene file must be the SAME file, not a
+  look-alike), and `listSceneFileNames()` against a scratch directory (a
+  missing/empty `assets/scenes/` both yield an empty list, not an error;
+  only top-level `*.json` files are listed, sorted alphabetically, extension
+  stripped; a non-`.json` sibling and a nested subdirectory's own `.json`
+  file are both correctly excluded -- this is a flat listing, not a
+  recursive tree).
+- **No-regression pixel-diff, isolated to exactly the default-startup/
+  plain-Save-Scene case.** A pre-Phase-18i build (Phase 18h's own commit,
+  `5faa9b6`, built fresh in a separate `git worktree`) and this phase's
+  build were both run headlessly (`ENGINE_MAX_FRAMES=60`, no debug env
+  vars) and screenshotted via `tools/run_headless.sh`. `compare -metric AE`
+  between the two PNGs reports **0** differing pixels -- the two files are
+  in fact byte-identical (matching `md5sum` output) -- confirming
+  `currentScenePath_` starting as `kDefaultScenePath` and plain Save
+  Scene's generalization to `currentScenePath_` are both true no-ops for
+  the untouched, most-common case.
+- **Full wired-path proof: Save As -> New Scene (confirm empty) -> Open
+  Scene(saved) (confirm entities restored) -> Open Scene(default) (confirm
+  that still works too), one process run, exact entity counts/names and
+  `currentScenePath_` logged at every step.** Using
+  `ENGINE_DEBUG_SAVE_SCENE_AS="phase18i_proof scene!!"` (deliberately
+  carrying spaces and punctuation, to exercise sanitization for real, not
+  just in the unit test -- sanitizes to `phase18i_proof_scene`),
+  `ENGINE_DEBUG_NEW_SCENE=1`, and
+  `ENGINE_DEBUG_OPEN_SCENE=phase18i_proof_scene,default`, starting from the
+  real, unmodified `assets/scenes/default.json` (`parented_demo_cube`,
+  `scene`, `falling_cube`):
+  ```
+  after saveSceneAs(): 3 named entities; parented_demo_cube; scene; falling_cube;
+    currentScenePath_=".../assets/scenes/phase18i_proof_scene.json"
+  after newScene(): 0 named entities;
+    currentScenePath_=".../assets/scenes/untitled.json"
+  after openScene("phase18i_proof_scene"): 3 named entities; parented_demo_cube; scene; falling_cube;
+    currentScenePath_=".../assets/scenes/phase18i_proof_scene.json"
+  after openScene("default"): 3 named entities; parented_demo_cube; scene; falling_cube;
+    currentScenePath_=".../assets/scenes/default.json"
+  ```
+  Every value matches exactly what the design predicts: Save As writes a
+  brand-new file and repoints `currentScenePath_` at it without touching
+  the live registry at all (still 3 entities immediately after); New Scene
+  genuinely empties `registry_` (0 named entities, not 3) and repoints
+  `currentScenePath_` at the untitled sentinel, which the same run confirms
+  is never written to disk (no `untitled.json` appears under
+  `assets/scenes/` afterward); Open Scene restores exactly the saved
+  entities from the just-Saved-As file; a second Open Scene, back to
+  `"default"`, loads correctly too, proving this isn't a one-shot
+  mechanism. Four real screenshots, taken at wall-clock moments correlated
+  against this exact log's own timestamps, were inspected directly (Read
+  tool, not just file-size-sanity-checked): the Save As moment shows the
+  full default scene (pyramid/table/cube on the checkered platform) with
+  the Scene panel listing all three entities; the New Scene moment shows an
+  **empty Scene panel tree** (no rows at all) while the Viewport's own
+  hardcoded PBR sphere grid/ground plane -- Phase 9 furniture that lives
+  outside `registry_` entirely, not scene-file content -- correctly stays
+  visible, confirming "empty scene" means "no entities," not "blank
+  screen"; the two Open Scene moments both show the full scene restored,
+  pixel-similar to the very first screenshot.
+- **Malformed scene file handled gracefully, verified directly, not just
+  reasoned about.** A separate headless run pointed
+  `ENGINE_DEBUG_OPEN_SCENE` at a hand-written invalid-JSON file
+  (`{ this is not valid json !!!`): the process exited with code **0** (no
+  crash), logged a specific `parseSceneRecords`/`nlohmann::json` parse-error
+  message via `LOG_ERROR`, and the very next log line confirms the
+  currently loaded scene (`default.json`, all 3 entities) was left
+  completely untouched -- `openScene()`'s own pre-check
+  (`parseSceneRecords()` before `clearSceneForTransition()`) does exactly
+  what it's documented to do.
+- **The narrower "parses fine, but a referenced model asset doesn't exist"
+  failure mode, also verified directly, including a genuine registry-state
+  bug this checked in with an earlier draft of this same phase and a
+  follow-up fix.** An independent review caught it: the original catch
+  block around `loadScene()` claimed a failed load left `registry_`
+  established-empty, but `loadScene()`'s own per-record loop
+  (`scene_loader.cpp`) has no rollback of its own -- `restoreEntityFromRecord()`
+  creates each record's entity and adds its non-model components BEFORE
+  ever touching that record's model path, so a later record's asset
+  failure left every earlier record's entity already live in `registry_`
+  when the exception reached `openScene()`, and the catch block still
+  repointed `currentScenePath_` at the failed file regardless. Reproduced
+  directly against two hand-broken copies of `default.json` (model path
+  repointed at a nonexistent file) before any fix: breaking the 1st record
+  (`parented_demo_cube`) left **2** named entities in `registry_` (not 0);
+  breaking the 2nd record (`scene`) also left **2** (`parented_demo_cube`,
+  `scene`) (not 0) -- and both runs' `currentScenePath_` ended up pointing
+  at the broken file, meaning a completely ordinary next Ctrl+S would have
+  silently overwritten the original scene file with the truncated load.
+  Fixed by having `openScene()`'s own catch block call
+  `clearSceneForTransition()` a second time (destroying whatever partial
+  entities that failed `loadScene()` call left behind) and no longer
+  updating `currentScenePath_` on that path. Re-running the identical two
+  broken-file cases after the fix: both now log **0** named entities and a
+  `currentScenePath_` unchanged from before the failed `openScene()` call
+  (still `default.json`, the scene actually loaded going into the
+  attempt) -- matching a real `newScene()`'s own `0`-named-entity state
+  exactly, confirmed side by side in the same run, not a "restore the
+  previous scene" behavior (a different, larger feature than what this fix
+  does: the previous scene's own entities were already destroyed by
+  `clearSceneForTransition()` before `loadScene()` was ever attempted, and
+  nothing brings them back). `loadScene()` itself was left untouched -- its
+  other call site (this constructor's own startup load of
+  `kDefaultScenePath`, outside any try/catch here, propagating out to
+  `main()`'s top-level `try`/`catch` on failure) keeps its own pre-existing
+  behavior exactly as before.
+
+With Phase 18i, the full Phase 18 arc (18a-18i) is now complete: the
+floating viewport toolbar (18a), Play/Edit mode physics gating (18b),
+ground friction/terminal velocity (18c), a real 3D silhouette selection
+outline (18d), a real translate gizmo (18e), a scene Camera entity actually
+controlling Play mode plus real Wireframe/Solid/Rendered shading modes
+(18g), real undo/redo (18h), and now multiple named scenes with New/Save
+As/Open (18i) -- every gap this arc's own sub-phases named along the way is
+closed. As with the Phase 15 and Phase 17 arcs before it, each sub-phase
+closed exactly the gap in front of it: 18h's own `undoStack_` comment
+explicitly named "a future Scene > Open/Load UI" as unfinished business and
+proposed exactly the resolution this phase implements, the same
+"name the next gap explicitly, close it for real when its own phase
+arrives" discipline this project has followed since the Phase 14 arc.
+
+### Phase 18j: a rotate gizmo -- three colored rings, click-drag to spin the selected entity
+
+The first of two new gizmo phases (rotate now, scale to follow as Phase
+18k), plus a planned Phase 18l ("lock editing to Edit-mode-only") after
+that. Phase 18e's translate gizmo already built the foundational pure math
+(`screenPointToWorldRay()`, `closestPointsBetweenLines()`) and the
+"pure decision function in `gizmo.hpp`/`gizmo.cpp`, ImGui wiring in
+`EditorUI`, `Application` applies the result" architecture -- this phase
+extends that same file/architecture rather than starting a parallel one,
+the identical "grow the existing pure module" precedent Phase 18g's own
+`camera_component.cpp` addition already set.
+
+- **Architecture: `gizmo.hpp`/`gizmo.cpp` grow three new pure functions,
+  the same GL/ImGui-free module Phase 18e already established.**
+  - `intersectRayWithPlane()` -- the standard ray/plane intersection
+    formula, returning `std::nullopt` for exactly two cases: the ray
+    grazing the plane itself (direction nearly perpendicular to the
+    plane's own normal -- the plane-equivalent of
+    `closestPointsBetweenLines()`'s own near-parallel-lines case, reusing
+    that SAME `kParallelEpsilon` threshold, since both are "the angle
+    between two unit directions is near zero" degeneracies), and an
+    intersection landing behind the ray's own origin (never a usable
+    result for a forward-cast mouse ray).
+  - `gizmoRingPlaneBasis()`/`gizmoRingAngle()` -- the two orthonormal
+    vectors spanning the plane perpendicular to a given axis (`u` = angle
+    zero, `v` = the direction a positive angle sweeps toward, chosen as
+    `cross(axisDirection, u)` specifically so an angle DELTA computed in
+    this basis, applied through `Transform::rotate(deltaDeg,
+    axisDirection)`, visually spins the grabbed ring point the same
+    direction the mouse dragged it -- by construction, not by ad-hoc
+    sign-matching), and the angle of any world point around a ring's own
+    center in that basis.
+  - `hitTestGizmoRings()` -- tests a ray against all three rings, using
+    `intersectRayWithPlane()` then comparing the intersection point's own
+    radial distance from the gizmo's origin against the ring's drawn
+    radius. Since that intersection point is, by construction, exactly IN
+    the ring's own plane, `|radius_at_hit - ringRadius|` is the EXACT
+    closest distance from that point to the circle (not an approximation)
+    -- genuine closest-point-on-a-circle math, standing in contrast to
+    `hitTestGizmoAxes()`'s own closest-point-on-a-LINE-SEGMENT math for the
+    translate gizmo's straight arrow handles, which a ring is not.
+  - `updateGizmoRotateDrag()` -- the "not dragging / dragging-ring-X/Y/Z"
+    state machine, the same `current state + this frame's inputs -> next
+    state (+ derived output)` shape `updateGizmoDrag()` already
+    establishes, but adapted where the two gizmos' own math genuinely
+    differs rather than forced into a shared abstraction: translate's own
+    state anchors a FIXED start position and recomputes an absolute new
+    position from it every frame (matching `Transform::setPosition()`'s
+    own "replace the value" contract); rotate's own state instead tracks
+    the LAST frame's measured angle and hands back an INCREMENTAL delta
+    each frame, meant to be applied via `Transform::rotate(deltaDeg,
+    axis)` -- transform.hpp's own existing method (`new_rotation =
+    incoming * old`), never a second, hand-rolled quaternion composition
+    scheme. The angle delta is wrapped via `atan2(sin(delta), cos(delta))`
+    so a drag crossing the atan2 +-180-degree seam reports a small,
+    correctly-signed delta rather than a wrong-signed near-full-turn. A
+    grab declines cleanly (stays not-dragging) when the ray grazes the
+    ring's own plane; a mid-drag frame that briefly grazes holds the last
+    known angle rather than jumping to a garbage delta, resuming cleanly
+    once the ray is no longer degenerate -- the identical "no meaningful
+    result this frame, not garbage" convention `updateGizmoDrag()`'s own
+    briefly-parallel case already establishes, just for a different
+    degeneracy.
+- **Rendering: `makeGizmoRing()`, reusing the translate gizmo's own shader
+  and per-axis model-matrix loop verbatim.** `mesh.hpp`'s new
+  `makeGizmoRing()` builds a thin flat annulus (two concentric circles
+  joined into a ribbon of quads -- the simplest "keep it simple" shape,
+  matching `makeGizmoArrow()`'s own unfancy cylinder+cone), lying in the
+  local Y-Z plane (its own normal along local +X) -- the SAME local-+X
+  convention `makeGizmoArrow()` already uses. That deliberate choice means
+  `Application::renderGizmo()` needs no second rotation table at all: the
+  identical per-axis rotate/scale/color loop (X = red / Y = green / Z =
+  blue, matching the translate gizmo's axis colors exactly) that already
+  points an arrow along X/Y/Z now points a ring's own NORMAL along X/Y/Z
+  too, which is exactly what makes each ring end up lying in the plane
+  PERPENDICULAR to its own axis -- the standard rotate-gizmo appearance.
+  `gizmoRingMesh_` is drawn through the SAME `gizmoShader_` program
+  (`gizmo.vert`/`.frag`, unmodified -- a plain `uModel`/`uView`/
+  `uProjection` + flat `uColor`) as `gizmoArrowMesh_`; no new shader files
+  this phase. Ring radius uses `gizmoAxisLength()` -- the exact same
+  distance-based scaling function the translate gizmo's arrows already
+  use, not a second scaling scheme.
+- **Interaction: `EditorUI::updateGizmoRotate()`, a clean parallel to
+  `updateGizmo()`, not a forced merge.** Rotate's own angle-based drag
+  state (`gizmoRotateDragState_`) is genuinely shaped differently enough
+  from translate's own position-based state (`gizmoDragState_`) that a
+  single shared state machine would have needed an awkward union of the
+  two anyway -- a clean parallel private method, mirroring `updateGizmo()`'s
+  own hit-test/drag/undo-Command structure line for line, was the simpler
+  choice. Composes each frame's reported delta directly onto the entity's
+  LIVE rotation via `transform->rotate(*result.deltaAngleDeg,
+  gizmoAxisDirection(axis))` -- literally reusing `Transform::rotate()`,
+  never a hand-rolled second composition. On release, builds the identical
+  `TransformSnapshot` before/after undo `Command` `updateGizmo()`'s own
+  Phase 18h integration already establishes, using a freshly added
+  `gizmoRotateDragStartRotation_` member (the entity's rotation as of the
+  grab frame) as `before`.
+  - **Camera-capture precedence, identical mechanism.** `updateGizmoRotate()`
+    returns `true` on any frame the mouse is hovering OR dragging a ring --
+    the exact same `gizmoActiveThisFrame` signal `updateGizmo()`'s own
+    return value already feeds into `renderDockspaceShell()`'s
+    double-click-to-capture guard, so a rotate drag takes precedence over
+    the Phase 16 camera-capture gesture exactly like a translate drag
+    already does, through the SAME suppression check, not a second one.
+- **Mode: a new debug-only env var, `ENGINE_DEBUG_GIZMO_MODE=translate|rotate`,
+  defaulting to `translate`.** `gizmo.hpp`'s new `GizmoMode` enum is threaded
+  through `Application::renderGizmo()` (which mesh/rotation-table to draw)
+  and `EditorUI::renderDockspaceShell()`'s own new `gizmoMode` parameter
+  (which of `updateGizmo()`/`updateGizmoRotate()` runs this frame -- never
+  both). **This is explicitly NOT the real move/rotate/scale UI switcher** --
+  no W/E/R keyboard shortcuts, no toolbar buttons this phase. That real
+  switcher is deliberately deferred to Phase 18k, once scale exists too, so
+  it can be built once for all three tools instead of partially now and
+  revised twice. Left unset (or set to `translate`), this engine's behavior
+  is completely unchanged from Phase 18e/18i -- confirmed, not merely
+  assumed (see Verify below).
+- **Deliberately NOT done this phase** (documented scope, not an
+  oversight):
+  - **Rotate only.** No scale gizmo -- Phase 18k's own scope.
+  - **No move/rotate/scale UI switcher.** See "Mode" above -- Phase 18k's
+    own scope.
+  - **No lock-editing-to-Edit-mode.** The rotate gizmo works in exactly
+    whatever mode the translate gizmo already works in; Phase 18l's own
+    scope, untouched here.
+  - **No mutual self-occlusion between the three rings**, and **no
+    hover-highlight color change** -- the identical, identically-scoped
+    polish items Phase 18e's own README section already lists for the
+    translate gizmo's three arrows, unchanged here.
+  - **No parent-hierarchy-aware rotation.** Exactly Phase 18e's own
+    documented local-vs-world simplification, applied to rotation instead
+    of position: the ring's own visual origin is the entity's resolved
+    WORLD position, but the rotation delta is composed directly onto the
+    entity's own LOCAL `Transform::rotation()`, unconverted through any
+    parent's own transform.
+- **Verify.**
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S .
+    -DCMAKE_BUILD_TYPE=Debug`, this project's real convention) produced
+    **zero warnings**. `ctest` reports **18/18 passing** -- the same 18
+    targets as Phase 18i (this phase adds no new test executable; it
+    extends `gizmo_test` in place, since it tests the same `gizmo.cpp` file)
+    with a large new block of hand-computed rotate-gizmo cases:
+    `intersectRayWithPlane()` (an oblique hit checked against a
+    hand-derived point, a grazing-ray rejection, and a behind-the-origin
+    rejection); `gizmoRingPlaneBasis()` (all three axes' exact `u`/`v`
+    vectors plus `kNone`); `gizmoRingAngle()` (the four cardinal directions
+    around the X ring, plus an off-center gizmo origin with a non-
+    axis-aligned 3-4-5-triangle offset, whose expected angle,
+    `atan2(4,3) ~= 53.13 deg`, is hand-verifiable); `hitTestGizmoRings()`
+    (a ray landing squarely on the X ring while the Y/Z rings are correctly
+    skipped as grazing, not coincidental hits; a ray missing every ring
+    reporting `kNone`; and three genuinely competing candidates -- hand-
+    derived radii `~4.472`/`~2.828`/`~4.472` for X/Y/Z -- confirming the
+    GENUINELY closer ring (Y) wins even with a pick tolerance loose enough
+    for the two farther candidates to also individually qualify); and a
+    full `updateGizmoRotateDrag()` idle -> grab -> multi-step drag ->
+    **wraparound across the atan2 +-180-degree seam** (179 deg -> -170 deg
+    reports a wrapped `+11` deg delta, not the raw `-349`/`+349`) ->
+    release sequence, plus the edge-triggering contract, a declined grazing
+    grab, and a dedicated mid-drag-grazing-then-resumes-cleanly case
+    proving no leftover/corrupted anchor after a skipped frame.
+  - **No regression when nothing is selected, or when the mode var is
+    unset/rotate with no selection -- proven against a real pre-18j
+    baseline, not assumed.** A pre-Phase-18j build (Phase 18i's own commit,
+    `adf1368`, built fresh in a separate `git worktree` so the working tree
+    under active edit was never touched) and this phase's build were both
+    run headlessly with a fixed 3-second-delay manual capture (bypassing
+    `run_headless.sh`'s own polling heuristic, which Phase 18g's own README
+    section already documented can occasionally land on a genuine
+    mid-settle transient frame during the dockspace's own Viewport panel
+    resize -- confirmed here too: the polling-based capture spuriously
+    reported 150,131 differing pixels on an otherwise-identical pair,
+    while the fixed-delay capture reports the true result below).
+    `compare -metric AE` between the two builds' own no-selection
+    screenshots reports **`0`** differing pixels (byte-identical PNG file
+    sizes, 274,493 bytes each). Setting `ENGINE_DEBUG_GIZMO_MODE=rotate`
+    with still no selection ALSO reports **`0`** differing pixels against
+    that same baseline -- `Application::renderGizmo()`'s leading "no
+    selection => draw nothing" guard runs before `gizmoMode_` is ever
+    consulted, so the new tool genuinely never engages with nothing
+    selected, regardless of which mode is active.
+  - **The translate gizmo's own exact Phase 18e behavior, unchanged.**
+    `ENGINE_DEBUG_SELECT=scene ENGINE_DEBUG_GIZMO_DRAG=scene` (mode left
+    unset, defaulting to `kTranslate`) reproduces Phase 18e's own exact
+    documented log trajectory: `x` climbing `0.000000 -> 0.000000 (grab) ->
+    0.500001 -> 1.000001 -> 1.500001 -> 2.000001`, `y`/`z` unchanged at
+    every step.
+  - **The three rotate rings, visually confirmed.** A screenshot with
+    `ENGINE_DEBUG_GIZMO_MODE=rotate ENGINE_DEBUG_SELECT=scene` shows three
+    clearly distinguishable rings -- red, green, blue -- converging at the
+    `scene` entity's own origin, each visibly perpendicular to its own
+    axis, alongside the pre-existing teal silhouette outline; no translate
+    arrows are drawn in this mode.
+  - **Full wired-path proof: a scripted rotate drag actually spins the
+    entity, composed onto its existing rotation.** A new
+    `ENGINE_DEBUG_GIZMO_ROTATE_DRAG=<entity name>` env var feeds a scripted
+    sequence of synthetic screen-space mouse positions (aimed at successive
+    points around the X ring's own circumference, computed via this
+    phase's own `gizmoRingPlaneBasis()`) into `EditorUI::updateGizmoRotate()`
+    through the SAME `setDebugMouseOverride()` entry point
+    `ENGINE_DEBUG_GIZMO_DRAG` already established -- only the raw mouse
+    input is synthetic; every function downstream is the exact same
+    production code a real drag runs through. Run against `scene` (which
+    starts with a real, non-identity 12-degree Y rotation already applied
+    -- deliberately not an identity-rotation entity, so this proves the
+    "compose onto the EXISTING rotation" contract for real, not just
+    against a trivial starting case), scripting a total ring-angle span of
+    120 degrees (20 -> 140 degrees) around world +X: the log shows the
+    Euler-decomposed rotation evolving `(0, 12, 0) -> (0, 12, 0) [grab] ->
+    (30.55, 10.37, 6.07) -> (60.54, 5.97, 10.43) -> (90.00, 0.00, 12.00) ->
+    (119.45, -5.97, 10.43) [release]` degrees -- the non-obvious
+    X/Y/Z-mixing at each intermediate step is the CORRECT, expected
+    consequence of composing a world-space X rotation onto an
+    already-Y-tilted object (Euler decomposition of non-commuting
+    rotations about different axes is not additive per-axis; the gizmo
+    math itself is a single clean quaternion composition throughout,
+    confirmed independently by `gizmo_test.cpp`'s own from-identity cases
+    above). A screenshot taken after the drag completes shows the `scene`
+    mesh visibly tipped over from its original upright pyramid-on-a-table
+    pose into a rotated, lying-further-down orientation, with the
+    Inspector's own `Rot Y` field reading `-5.967` -- matching the logged
+    final Euler Y exactly. `compare -metric AE` against the pre-drag
+    three-rings screenshot reports **17,360** of 480,000 pixels differing,
+    an unmistakable, visually-confirmed rotation.
+
+### Phase 18k: a scale gizmo, plus the real W/E/R move/rotate/scale tool switcher
+
+The third and final gizmo tool, plus the real, live, in-UI tool switcher both
+Phase 18e and Phase 18j explicitly deferred until now -- "once scale exists
+too, so it can be built once for all three tools instead of partially now
+and revised twice" (Phase 18j's own README section, above). Both halves land
+in this one phase, closing the arc those two phases opened.
+
+- **Rendering: `makeGizmoScaleHandle()`, a cube-tipped handle reusing
+  `makeGizmoArrow()`'s own shaft verbatim.** `mesh.hpp`'s new
+  `makeGizmoScaleHandle()` builds the identical thin cylindrical shaft
+  `makeGizmoArrow()` already builds (byte-for-byte the same construction,
+  duplicated rather than shared via a helper -- matching this file's own
+  existing precedent of each `makeGizmoXyz()` being a fully self-contained,
+  independently readable builder), then caps it with a small solid CUBE
+  (6 faces, 4 vertices each, real per-face outward normals, the identical
+  `makeCube()` idiom just translated along +X instead of centered on the
+  origin) in place of that arrow's cone -- the standard DCC-tool visual
+  distinction between a move handle and a scale handle. `shaftLength=0.82`
+  + `tipSize=0.18` sum to the same unit length `makeGizmoArrow()`/
+  `makeGizmoRing()` both already use, so `Application::renderGizmo()`'s
+  existing per-axis rotation table (X: no rotation; Y: +90 deg about Z; Z:
+  -90 deg about Y) and `gizmoAxisLength()`-based uniform scale apply to it
+  completely unmodified -- a plain 3-way mesh selector
+  (`gizmoArrowMesh_`/`gizmoRingMesh_`/`gizmoScaleMesh_`) is the only new
+  code that method needed.
+- **Hit-testing: `hitTestGizmoAxes()`, reused unmodified.** A scale handle's
+  pickable geometry is the exact same finite line segment from the gizmo's
+  own origin outward along one axis that the translate gizmo's arrows
+  already use -- the cube-vs-cone tip only changes what's DRAWN, never what
+  `hitTestGizmoAxes()` tests against -- so `EditorUI::updateGizmoScale()`
+  calls it verbatim, exactly like `updateGizmo()` does. No second,
+  near-duplicate hit-test function was written.
+- **Interaction math: `gizmo.hpp`'s new `updateGizmoScaleDrag()`, reusing
+  `closestPointsBetweenLines()` verbatim and converting its result into a
+  RATIO instead of a delta.** The chosen mapping, world-space distance along
+  the axis to scale multiplier: `ratio = (current distance from the gizmo's
+  own origin to where the ray currently projects on the frozen axis line) /
+  (that SAME distance at grab time)`, then `newComponent = startScale[axis]
+  * ratio` -- dragging further from the origin than the grab point scales
+  UP, dragging back toward (or past) the origin scales DOWN (then flips
+  negative), and the gizmo's own handle naturally tracks the growing/
+  shrinking object since it's drawn at the entity's own live position with
+  no dependency on scale. Both the grab-time anchor (`startAxisT`) and the
+  origin the axis line is measured from (`startGizmoOrigin`) are frozen at
+  grab time and never re-read mid-drag, the identical "the axis line has to
+  stay fixed in space for the whole gesture" discipline `GizmoDragState`
+  already establishes for translate -- applied here for a related but
+  distinct reason (`GizmoDragState`'s own anchor freezes because the
+  ENTITY's position is what's changing under it; scale's anchor freezes
+  because re-reading the origin fresh wouldn't itself move, but re-deriving
+  the ratio's own denominator from a moving reference would still make the
+  math depend on frame ordering in a way a fixed anchor avoids). A grab is
+  declined -- not just when `closestPointsBetweenLines()` itself fails
+  (ray nearly parallel to the axis, the identical translate-gizmo case) --
+  but also when the grab lands closer than `kGizmoScaleMinGrabDistance`
+  (0.01 world units) to the gizmo's own origin, a new degeneracy unique to
+  scale: the grab distance is the ratio's own DENOMINATOR, so a near-zero
+  one is declined the same "no meaningful anchor, don't divide by ~0"
+  instinct this file already applies to every other near-degenerate case,
+  just guarding a division instead of a determinant/dot-product this time.
+- **The zero/negative-scale clamp: `kGizmoMinScaleComponent = 0.01`, applied
+  to the RESULT, not the ratio.** Checked against `transform.hpp`'s
+  `Transform::getModelMatrix()`, not assumed: a zero scale component
+  collapses the model matrix along that axis to a singular (non-invertible)
+  matrix, degenerate for any downstream code that needs to invert it (a
+  normal matrix built as `transpose(inverse(mat3(model)))`, the standard
+  technique this engine's own lit shaders use); a NEGATIVE component mirrors
+  the mesh along that axis without correspondingly flipping its triangle
+  winding, which this engine's own rendering does not correct for on its
+  own -- the mesh would render visibly inside-out/inverted (and, combined
+  with the same uninverted normal-matrix concern, wrong-signed lighting
+  normals) rather than the "flip in place" a user dragging a handle back
+  past the origin would actually expect. `updateGizmoScaleDrag()` therefore
+  clamps `max(rawComponent, kGizmoMinScaleComponent)` on every frame's
+  result -- catching both a too-small-positive raw ratio AND a negative one
+  the same way (`max()` against a positive floor handles both in one
+  comparison). 0.01, not 0.0, both because a literal zero is exactly the
+  degenerate case being avoided and because it happens to already match this
+  engine's own pre-existing Inspector convention -- the Transform panel's
+  own `Scale` `DragFloat3` (`editor_ui.cpp`, predating this phase) was
+  already hand-clamped to `[0.01, 100.0]`, so this phase's own floor is not
+  a new number invented in isolation, it's the SAME one the rest of this
+  editor already treats as "the smallest sane scale."
+- **State machine: `updateGizmoScaleDrag()`, the same idle/dragging-X/Y/Z
+  shape as the other two tools' own state machines.** `GizmoScaleDragState`
+  (`axis`, `startAxisT`, `startEntityScale`, `startGizmoOrigin`) mirrors
+  `GizmoDragState`'s own shape field-for-field, adapted for the ratio math
+  above; edge-triggered grab (only a fresh `mousePressedThisFrame` press
+  starts a drag, a held-but-not-fresh press does nothing, the identical
+  contract `updateGizmoDrag()`/`updateGizmoRotateDrag()` both already
+  enforce); a clean release (`!mouseDown` returns to the default-constructed
+  idle state); and the same "hold the last-known anchor, don't jump to
+  garbage" resume-cleanly behavior on a briefly-degenerate mid-drag frame.
+  `EditorUI::updateGizmoScale()` is a clean parallel to `updateGizmo()`/
+  `updateGizmoRotate()` (never a forced three-way merge), assigning the
+  entity's live scale directly to each frame's absolute `result.newScale`
+  (the identical `setPosition()`-shaped application `updateGizmo()` already
+  uses for translate -- contrast `updateGizmoRotate()`'s own incremental
+  `transform->rotate()`), and builds the identical before/after
+  `TransformSnapshot` undo `Command` on release, guarded by
+  `transformSnapshotsEqual()` the same way both other tools already are.
+  **Camera-capture precedence, the identical mechanism.** `updateGizmoScale()`
+  returns `true` on any frame the mouse is hovering OR dragging a handle --
+  the same `gizmoActiveThisFrame` signal feeding `renderDockspaceShell()`'s
+  double-click-to-capture guard that both other tools' own return values
+  already do, so a scale drag suppresses Phase 16's camera capture through
+  the exact same check, not a second one.
+
+#### The real switcher: W (translate) / E (rotate) / R (scale)
+
+- **Unity's convention, not Blender's, and specifically because of it.**
+  Blender's own G/R/S would collide with ordinary typing into a future
+  Inspector text field (G, R, and S are all real letters); W/E/R are no
+  different in that specific regard, which is exactly why the same
+  `!ImGui::GetIO().WantCaptureKeyboard` gate this project's existing
+  Ctrl+S/Ctrl+Z shortcuts already use matters here too -- reused verbatim,
+  not a new gating scheme.
+- **Single keys, not chords, but the identical edge-triggered,
+  direct-`window_`-read shape.** `Application::run()`'s new
+  `wKeyWasDown_`/`eKeyWasDown_`/`rKeyWasDown_` members are three separate
+  bools (not one shared "was any tool-switch key down"), the identical
+  reason `ctrlZWasDown_`/`redoChordWasDown_` are already two separate bools:
+  releasing W and, in the same gesture, pressing E must register as a fresh
+  switch, not be suppressed by translate's own edge-tracking.
+- **A new gate neither Ctrl+S nor Ctrl+Z needed: `!cameraCaptured_`.** W and
+  E specifically collide with `InputActionMap`'s own `MoveForward`/`MoveUp`
+  default bindings (`input_action_map.cpp` -- `MoveUp` is bound to BOTH
+  Space and E). Without this gate, flying the free-fly camera with W would
+  also switch the gizmo to translate on every held frame's first poll, and E
+  would fight the rotate gizmo the same way. Gating on `!cameraCaptured_`
+  sidesteps the collision entirely (the camera and a gizmo are never
+  interactable at the same time -- captured means WASD/mouse fly the camera
+  and no ImGui panel, gizmo included, can be clicked at all) and, not
+  coincidentally, is also the only state in which switching the active tool
+  means anything real to switch.
+- **`Application::setGizmoMode()`: the ONE place `gizmoMode_` is ever
+  allowed to change.** Both the constructor's own
+  `ENGINE_DEBUG_GIZMO_MODE` application and `run()`'s new W/E/R handling
+  call this rather than assigning `gizmoMode_` directly -- a no-op (no log,
+  no reset) when the requested mode already matches the current one, so a
+  real W press while translate is already active, or the constructor
+  applying an unset/"translate" env var onto the in-class default, are both
+  harmless. `ENGINE_DEBUG_GIZMO_MODE` still exists, now just as the
+  STARTING mode for a headless run (it now also accepts `scale`) --
+  verified both still work, see Verify below.
+- **The landmine fix: `EditorUI::resetAllGizmoDragStates()`, called from
+  `setGizmoMode()` every time the mode genuinely changes.** Phase 18j's own
+  review left this explicit, already-known gap open: through Phase 18j,
+  `gizmoMode_` was set exactly once, in the constructor, and never touched
+  again for the rest of a run -- so whichever ONE of
+  `updateGizmo()`/`updateGizmoRotate()` ran each frame was always the SAME
+  one for the whole run, and the OTHER tool's own persistent drag state
+  (`gizmoDragState_`/`gizmoRotateDragState_`) could never go stale, because
+  the tool that owned it was never skipped mid-drag. This phase adds real,
+  live, mid-run switching for the first time, which breaks that assumption:
+  `renderDockspaceShell()` only ever calls ONE of
+  `updateGizmo()`/`updateGizmoRotate()`/`updateGizmoScale()` per frame
+  (whichever matches the CURRENT `gizmoMode_`) -- so a drag left in progress
+  in one tool at the exact frame the mode switches away from it would
+  otherwise sit frozen with a real grabbed axis and a now-stale anchor
+  indefinitely, ready to resume from that stale anchor (potentially
+  teleporting the entity) if the user ever switched back to that same tool
+  while the mouse happened to still be down. `resetAllGizmoDragStates()`
+  resets all THREE tools' own drag state to idle unconditionally, in one
+  call, every time -- not conditionally on which one was actually mid-drag
+  (unconditional is simpler AND strictly safer: resetting an already-idle
+  tool is a harmless no-op). A mid-drag mode switch therefore cleanly
+  ABANDONS that drag: the entity keeps whatever position/rotation/scale the
+  partial drag had already applied (each frame's delta is applied directly
+  to the live Transform as it happens, never deferred until release), but no
+  further movement happens, no undo `Command` is pushed for the now-
+  abandoned partial edit (there is no clean "release" to build one from),
+  and every tool starts genuinely fresh (`axis == kNone`) the next time it's
+  actually used.
+- **Toolbar buttons: kept keyboard-only, deliberately.** The floating
+  Viewport toolbar (`renderViewportToolbarOverlay()`) already carries six
+  buttons at a self-measuring, auto-centered width
+  (`toolbarGroupWidthLastFrame_`); adding three more mode-indicator buttons
+  was evaluated and set aside for two concrete reasons, not just "ran out of
+  scope": first, this phase's own verification explicitly requires a
+  no-selection/translate-mode screenshot to be **pixel-identical** to the
+  pre-18k baseline (see Verify below) -- any visible toolbar change would
+  break that comparison outright, and the whole point of that check is
+  proving this phase touches nothing about the toolbar's own established
+  appearance. Second, three new icons would need three new Font Awesome
+  codepoints hand-subsetted into `assets/fonts/editor-icons.ttf` (the
+  `kIconGlyphRanges` array this project re-subsets by hand each phase that
+  adds one, per its own Phase 17b/17c/18h precedent) for a feature that a
+  single keypress already reaches cleanly -- real, but avoidable, scope.
+  Keyboard-only is the right size for this phase; toolbar buttons remain a
+  clean, independent follow-up if a later phase wants a purely-mouse-driven
+  path to the same switch.
+- **Deliberately NOT done this phase** (documented scope, not an
+  oversight):
+  - **No parent-hierarchy-aware scale.** Exactly Phase 18e's/Phase 18j's own
+    documented local-vs-world simplification, applied to scale instead of
+    position/rotation: the handle's own visual origin is the entity's
+    resolved WORLD position, but the scale ratio is applied directly onto
+    the entity's own LOCAL `Transform::scale()`, unconverted through any
+    parent's own transform.
+  - **No mutual self-occlusion between the three handles**, and **no
+    hover-highlight color change** -- the identical, identically-scoped
+    polish items both Phase 18e's and Phase 18j's own README sections
+    already list for their own tools, unchanged here for scale.
+  - **No lock-editing-to-Edit-mode.** All three gizmos work in exactly
+    whatever mode they already worked in through Phase 18j; Phase 18l's own
+    scope, explicitly next, untouched here.
+  - **No non-uniform-scale-vs-rotation interaction polish** (e.g. a
+    "uniform scale" modifier key, or per-axis scale gizmo handles that
+    visually stretch to preview the drag before release) -- this phase ships
+    the standard three-independent-axis DCC-tool behavior only, matching
+    exactly what Maya/3ds Max/Blender/Unity/Unreal's own DEFAULT scale
+    gizmo (no modifier held) already does.
+- **Verify.**
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S .
+    -DCMAKE_BUILD_TYPE=Debug`) produced **zero warnings**. `ctest` reports
+    **18/18 passing** -- the same 18 targets as Phase 18j (this phase adds
+    no new test executable either; it extends `gizmo_test` in place again,
+    since it tests the same `gizmo.cpp` file every gizmo phase has grown).
+    The new block covers: a full `updateGizmoScaleDrag()` idle -> grab ->
+    multi-step drag (2x -> 3x -> **exactly back to 1x** -> **0.4x, below the
+    original**) -> release sequence, with every intermediate value hand-
+    computed and only the DRAGGED axis's own component ever changing (a
+    distinct-per-axis starting scale, `(2,3,4)`, specifically so a bug
+    touching the wrong axis or all three would visibly fail); a dedicated
+    near-zero-ratio clamp case (raw `0.001` clamps to exactly
+    `kGizmoMinScaleComponent`, not `0`) and a dedicated negative-ratio clamp
+    case (dragging past the origin also clamps to the same positive floor,
+    never negative); the edge-triggering contract; a grab declined for a
+    ray parallel to the axis; a grab declined for landing too close to the
+    origin (`kGizmoScaleMinGrabDistance`'s own new degeneracy); and a
+    mid-drag-parallel-then-resumes-cleanly case proving no leftover/
+    corrupted anchor after a skipped frame. **The mode-switch drag-state-
+    reset fix** gets its own dedicated proof, using `updateGizmoDrag()` (the
+    real production translate state machine, `gizmoDragState_`'s own type)
+    directly: a real drag is put mid-gesture (grabbed, moved to x=5), then
+    the EXACT SAME "mouse still down, no fresh press, cursor now at a
+    different point (x=6)" input is fed against the UNRESET stale state
+    (incorrectly resumes, teleporting to `(6,0,0)` -- the landmine,
+    reproduced) and again against the reset state
+    (`GizmoDragState{}`, exactly what `resetAllGizmoDragStates()` produces
+    -- correctly starts nothing, no position update at all -- the fix,
+    proven), plus a confirmation that the newly-active tool
+    (`updateGizmoRotateDrag()`) is equally unaffected by the same leftover
+    mouse-down input. Worth being precise about what this unit proof does
+    and does not cover: `tests/gizmo_test.cpp` links only `gizmo.cpp`, never
+    `EditorUI`/`Application`, so this proves `updateGizmoDrag()`'s own
+    behavior differs correctly between a reset and an unreset state -- it
+    does NOT call the real `EditorUI::resetAllGizmoDragStates()` or
+    `Application::setGizmoMode()` at all, so it alone cannot catch a
+    regression in that actual integration code (e.g. the reset call being
+    deleted from `setGizmoMode()`). That integration is what the new
+    headless, mid-drag-mode-switch-and-back proof below covers instead --
+    see "The actual discriminating proof" further down this same list.
+  - **Zero regression to the default appearance, proven against a real
+    pre-18k baseline, not assumed.** A pre-Phase-18k build (Phase 18j's own
+    commit, `449dc00`, built fresh in a separate `git worktree`) and this
+    phase's build were both run headlessly with a fixed-delay manual
+    capture (Phase 18j's own established workaround for
+    `run_headless.sh`'s polling-based capture occasionally landing on a
+    mid-settle transient frame). `compare -metric AE` between the two
+    builds' own no-selection screenshots reports **`0`** differing pixels
+    (byte-identical PNG file sizes, **274,493 bytes each** -- the exact same
+    byte count Phase 18j's own README already recorded for this identical
+    comparison, confirming the capture technique itself reproduces
+    byte-for-byte). Setting `ENGINE_DEBUG_GIZMO_MODE=scale` with still no
+    selection ALSO reports **`0`** differing pixels against that same
+    baseline -- `Application::renderGizmo()`'s leading "no selection => draw
+    nothing" guard runs before `gizmoMode_` is ever consulted, so the new
+    tool genuinely never engages with nothing selected, regardless of mode.
+  - **The three tools' handles, visually confirmed distinct.** Screenshots
+    with `ENGINE_DEBUG_SELECT=scene` and each of
+    `ENGINE_DEBUG_GIZMO_MODE=translate|rotate|scale` in turn show, at the
+    identical camera pose: translate's three CONE-tipped arrows, rotate's
+    three RINGS, and scale's three CUBE-tipped handles -- clearly,
+    unambiguously distinct shapes at the same handle length/position, the
+    standard DCC-tool visual language.
+  - **Full wired-path proof: a scripted scale drag actually produces
+    non-uniform per-axis scaling.** A new
+    `ENGINE_DEBUG_GIZMO_SCALE_DRAG=<entity name>` env var (only active when
+    `ENGINE_DEBUG_GIZMO_MODE=scale`) feeds a scripted sequence of synthetic
+    screen-space mouse positions -- aimed at successive absolute world
+    distances along the X axis (`0.4 -> 0.8 -> 1.2 -> 0.4 -> 0.16`, the
+    grab distance reused verbatim from the translate gizmo's own
+    already-proven-safe `kDebugGizmoDragOffsets[0]`, since a fresh GRAB
+    (unlike every later step) is a real hit-test against the handle's own
+    finite, camera-distance-scaled drawn length, not just a re-projection
+    onto an infinite line) -- into `EditorUI::updateGizmoScale()` through
+    the SAME `setDebugMouseOverride()` entry point `ENGINE_DEBUG_GIZMO_DRAG`/
+    `_ROTATE_DRAG` already established; only the raw mouse input is
+    synthetic, every function downstream is the exact same production code
+    a real drag runs through. Run against `scene` (starting scale
+    `(1,1,1)`), the log shows the X component evolving
+    `1.000000 -> 1.000000 [grab] -> 2.000006 -> 3.000010 -> 1.000000 ->
+    0.400000 [release]` while Y/Z stay at exactly `1.000000` throughout --
+    matching the hand-computed ratios (`0.8/0.4=2`, `1.2/0.4=3`,
+    `0.4/0.4=1`, `0.16/0.4=0.4`) to five decimal places, and a screenshot
+    taken after the drag completes shows the Inspector's own `Scale` field
+    reading `0.400 1.000 1.000` and the `scene` mesh visibly compressed
+    along its own local X axis relative to every earlier screenshot, while
+    the ground/spheres/other entities are completely unaffected -- an
+    unmistakable, visually-confirmed NON-uniform scale.
+  - **The live W/E/R switcher, proven both alone and mid-drag.** Since
+    Xvfb has no physical keyboard to generate a real keypress from outside
+    the process (the same constraint `ENGINE_DEBUG_SIMULATE_ESCAPE`'s own
+    comment already documents for the mouse-equivalent case -- confirmed
+    directly here too: `xdotool key`/`keydown`/`keyup` sent at the X11
+    level, with and without an explicit `--window` target, against this
+    WM-less Xvfb produced no observable effect on the running app, most
+    likely because GLFW's own key-focus routing depends on window-manager
+    cooperation this headless setup doesn't provide), a new
+    `ENGINE_DEBUG_GIZMO_MODE_SWITCH=<w|e|r>[,<w|e|r>...]` env var resolves
+    each entry directly to the `GizmoMode` a real tap of that key would
+    request and fires one scripted `Application::setGizmoMode()` call per
+    entry, each at its own fixed frame -- the exact same production function
+    a real edge-triggered W/E/R press calls, so only the INPUT is synthetic.
+    Run alone (`ENGINE_DEBUG_SELECT=scene ENGINE_DEBUG_GIZMO_MODE_SWITCH=e`),
+    the log shows `Gizmo mode switched: "translate" -> "rotate"` firing at
+    frame 17, and a screenshot taken afterward shows the rotate rings now
+    rendered (started translate, per the default). Run COMBINED with a
+    translate drag already in progress (`ENGINE_DEBUG_GIZMO_DRAG=scene
+    ENGINE_DEBUG_GIZMO_MODE_SWITCH=e`, the switch landing at frame 17, mid-
+    way through the drag's own scripted frame window `[15, 20)`): the
+    logged position climbs `0.000000 -> 0.000000 [grab] -> 0.500001`
+    through frame 17, then freezes at exactly `0.500001` for every remaining
+    scripted frame (18, 19, and release at 20). **This single-switch proof by
+    itself, an independent review later confirmed, does NOT actually exercise
+    `resetAllGizmoDragStates()` -- it was mis-stated as doing so in an
+    earlier revision of this section.** The freeze is fully explained by
+    `renderDockspaceShell()`'s own dispatch `switch` simply no longer calling
+    `updateGizmo()` once `gizmoMode_ != kTranslate`, nothing to do with the
+    reset; and the newly-active rotate tool not spuriously moving is
+    trivially true on this run's first-ever entry into rotate mode
+    regardless of whether the reset ran, since `gizmoRotateDragState_` was
+    already sitting at its default-constructed idle value from construction,
+    untouched by anything yet. Reviewer-verified directly: temporarily
+    turning `resetAllGizmoDragStates()` into a no-op, rebuilding, and
+    re-running this exact single-switch scenario produced a **byte-for-byte
+    identical log**, with or without the fix -- proof this scenario alone
+    could never catch a regression here.
+  - **The actual discriminating proof: switch away from a mid-drag tool,
+    then back, while the drag's own mouse-down input is still being fed.**
+    `ENGINE_DEBUG_GIZMO_MODE_SWITCH` now accepts a comma-separated LIST (the
+    same list shape `ENGINE_DEBUG_OPEN_SCENE`, Phase 18i, already
+    established for chaining more than one scripted action into a single
+    run), so a single run can schedule a SECOND switch, back to the original
+    tool, later in the same run -- the one scenario the fix actually guards
+    against and the single-switch proof above could never reach. Run with
+    `ENGINE_DEBUG_SELECT=scene ENGINE_DEBUG_GIZMO_DRAG=scene
+    ENGINE_DEBUG_GIZMO_MODE_SWITCH=e,w` (switch to rotate at frame 17, mid-
+    drag, then back to translate at frame 19, the drag script's own LAST
+    step, still with mouse "held"): with the fix intact, the log shows the
+    identical `0.000000 -> 0.000000 [grab] -> 0.500001` climb through frame
+    17 as the single-switch run above, then **stays frozen at exactly
+    `0.500001` all the way through the switch back to translate at frame 19
+    and release at frame 20** -- `gizmoDragState_` was reset to idle by the
+    first switch, so the drag script's own still-being-fed mouse-down input
+    at frame 19 has no fresh press to grab with (`mousePressedThisFrame` is
+    only true on step 0), and nothing moves. **Non-vacuousness, verified
+    directly the same way the reviewer's own audit worked**:
+    `EditorUI::resetAllGizmoDragStates()` was temporarily turned into a
+    no-op (`return;` as its first line) and the engine rebuilt. The SAME
+    `e,w` run then produced a final logged position of `2.000001, 0.000000,
+    0.000000` instead of the frozen `0.500001` -- with the reset gone,
+    `gizmoDragState_` sat exactly where frame 16 left it (`axis == kX`,
+    anchored at the entity's ORIGINAL position) all through frames 17-18, so
+    switching back to translate at frame 19 found a still-active drag
+    (`axis != kNone`, which `updateGizmoDrag()`'s own state machine resumes
+    unconditionally on any held mouse, `mousePressedThisFrame` or not) and
+    re-projected onto that stale anchor using frame 19's own mouse position,
+    teleporting the entity roughly to that frame's own target offset instead
+    of leaving it frozen -- the exact landmine this phase's fix exists to
+    prevent, reproduced on demand. Restoring `resetAllGizmoDragStates()` and
+    rebuilding brought the log back to the frozen `0.500001` shown above.
+    This is the test that actually would have caught the fix being deleted
+    or broken; the single-switch proof above is kept for what it still does
+    prove (a genuine mid-run mode switch reaching `setGizmoMode()` at all,
+    and the freeze from the dispatch `switch`), just no longer credited with
+    proving the reset. `ENGINE_DEBUG_GIZMO_MODE_SWITCH=e` alone (no comma)
+    was re-run after this change and still fires exactly one switch at frame
+    17 with an unchanged log -- confirming the list syntax is a pure
+    extension of the original single-value contract, not a breaking change
+    to it.
 
 ## Libraries used and why
 
@@ -4472,6 +10342,7 @@ already existed.
 | **Assimp** | CMake `FetchContent` (git, tag `v5.4.3`) | De facto standard asset-import library; loads Phase 5's OBJ/glTF scenes via one well-known API instead of hand-rolling per-format parsers. Importer scope narrowed to just OBJ + glTF (see "Phase 5" above) to keep build time/scope down. |
 | **nlohmann/json** | CMake `FetchContent` (git, tag `v3.11.3`) | Single-header, MIT-licensed JSON library; Phase 8b's scene file format (see "Phase 8b" above) -- fetched the same way as GLFW/GLM/Assimp (an ordinary tagged git dependency), not hand-vendored like GLAD/stb_image below (see "Phase 8b"'s own writeup on why that precedent doesn't apply to a JSON library). |
 | **Dear ImGui** | CMake `FetchContent` (git, tag `v1.92.9b`), built as a first-party `imgui` static library target (see "Phase 8c" above) | Phase 8c's debug overlay (entity inspector, render-pass toggles, frame stats) -- the de facto standard immediate-mode debug UI library for real-time engines/tools; ships no CMake build of its own by design, so this project compiles its core sources + GLFW/OpenGL3 backend files directly, the same "small first-party target" shape `glad` below already uses. |
+| **Font Awesome Free 6.7.2 (Solid)** | Vendored, hand-subsetted to 11 glyphs (3,152 bytes) in `assets/fonts/editor-icons.ttf`, from the same offline-downloaded upstream release file Phase 17b first subsetted (re-subsetted with 4 more codepoints by Phase 17c, one more by Phase 18h -- see those sections above) | Scene Hierarchy/Assets Browser row icons (folder/mesh/point-light/directional-light/camera/texture, Phase 17b) plus the Viewport toolbar's own grid/undo/redo/play/pause icons (Phase 17c/18h -- its other two buttons reuse the directional-light/texture glyphs above verbatim) -- OFL 1.1 licensed (fonts), permissive/redistribution-friendly; vendored rather than `FetchContent`'d since the upstream repo is large and a subsetting step is needed either way (see "Phase 17b"'s own writeup for the full reasoning). |
 
 ### GL loader: why hand-written instead of a generated GLAD
 

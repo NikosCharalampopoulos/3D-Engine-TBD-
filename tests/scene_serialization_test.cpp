@@ -64,7 +64,17 @@ void expectQuatNear(const glm::quat& actual, const glm::quat& expected, const st
 // actually works rather than only happening to work when scenes are
 // authored parent-first (see this file's own "Malformed input: 'parent'
 // names an entity that doesn't exist" case, further below, for the sibling
-// negative test).
+// negative test). A sixth/seventh/eighth entity (Phase 15e) exercise
+// "pointLight"/"directionalLight"/"camera" -- each with non-default field
+// values, the same "a dropped block or a silent fall-back to the
+// component's own struct defaults shows up as a mismatch" reasoning the
+// rigidBody/collider case above already established. The directionalLight
+// entity's "active" marker is deliberately set true here, and a SECOND
+// directionalLight entity (ninth) is added with "active" left false, so the
+// round-trip below can confirm the marker is preserved per-entity, not just
+// "some boolean survived somewhere." A tenth entity (Phase 15f) exercises
+// "materialOverride" together with a "model" block on the same entity -- the
+// real shape a Material-Inspector-assigned override actually appears in.
 std::vector<engine::SceneEntityRecord> makeTestRecords() {
     std::vector<engine::SceneEntityRecord> records;
 
@@ -111,6 +121,67 @@ std::vector<engine::SceneEntityRecord> makeTestRecords() {
     parentListedSecond.position = glm::vec3(4.0f, 0.0f, 0.0f);
     records.push_back(parentListedSecond);
 
+    // Phase 15e: a Point Light entity -- every pointLight* field deliberately
+    // non-default (PointLight{}'s own defaults are plain white / (1.0, 0.7,
+    // 1.8), see light.hpp), so a bug that silently fell back to those
+    // defaults instead of actually round-tripping the authored values would
+    // show up as a mismatch below.
+    engine::SceneEntityRecord pointLight;
+    pointLight.name = "lamp";
+    pointLight.position = glm::vec3(0.0f, 2.0f, 0.0f);
+    pointLight.hasPointLight = true;
+    pointLight.pointLightColor = glm::vec3(1.0f, 0.6f, 0.2f);
+    pointLight.pointLightConstant = 1.2f;
+    pointLight.pointLightLinear = 0.45f;
+    pointLight.pointLightQuadratic = 0.9f;
+    records.push_back(pointLight);
+
+    // A Directional Light entity that IS the active one -- "active": true
+    // must round-trip exactly, not just direction/color.
+    engine::SceneEntityRecord activeSun;
+    activeSun.name = "sun";
+    activeSun.hasDirectionalLight = true;
+    activeSun.directionalLightDirection = glm::vec3(0.1f, -0.8f, 0.35f);
+    activeSun.directionalLightColor = glm::vec3(1.0f, 0.85f, 0.6f);
+    activeSun.directionalLightActive = true;
+    records.push_back(activeSun);
+
+    // A second Directional Light entity that is NOT active -- proves
+    // "active" is tracked per-entity, not a single file-wide flag that
+    // would (incorrectly) leak true onto every directionalLight block.
+    engine::SceneEntityRecord inactiveMoon;
+    inactiveMoon.name = "backup_moon";
+    inactiveMoon.hasDirectionalLight = true;
+    inactiveMoon.directionalLightDirection = glm::vec3(-0.2f, -0.5f, -0.1f);
+    inactiveMoon.directionalLightColor = glm::vec3(0.4f, 0.5f, 0.9f);
+    inactiveMoon.directionalLightActive = false;
+    records.push_back(inactiveMoon);
+
+    // A Camera entity -- fov/near/far all deliberately non-default
+    // (CameraComponent{}'s own defaults are 60.0/0.1/100.0, see
+    // camera_component.hpp).
+    engine::SceneEntityRecord camera;
+    camera.name = "scout_camera";
+    camera.hasCameraComponent = true;
+    camera.cameraFovYDeg = 75.5f;
+    camera.cameraNearPlane = 0.25f;
+    camera.cameraFarPlane = 500.0f;
+    records.push_back(camera);
+
+    // Phase 15f: an entity with a "materialOverride" block -- also has a
+    // "model" block (matching the real shape a Material-Inspector-assigned
+    // override actually appears in: an entity always has a ModelComponent
+    // before it can have a texture override at all, see
+    // material_override.hpp's own header comment), so this also exercises
+    // "model" and "materialOverride" round-tripping TOGETHER on one entity,
+    // not just materialOverride in isolation.
+    engine::SceneEntityRecord overriddenCube;
+    overriddenCube.name = "retextured_cube";
+    overriddenCube.modelPath = "assets/models/falling_cube.obj";
+    overriddenCube.hasMaterialOverride = true;
+    overriddenCube.materialOverrideDiffuseTexturePath = "assets/textures/rusted_metal_albedo.png";
+    records.push_back(overriddenCube);
+
     return records;
 }
 
@@ -140,6 +211,38 @@ int main() {
             expectTrue(reloaded[i].hasCollider == original[i].hasCollider, tag + ".hasCollider");
             expectTrue(reloaded[i].colliderHalfExtent == original[i].colliderHalfExtent, tag + ".colliderHalfExtent");
             expectTrue(reloaded[i].parentName == original[i].parentName, tag + ".parentName");
+
+            // Phase 15e: PointLight/DirectionalLight/CameraComponent fields --
+            // same "has* plus every value" coverage rigidBody/collider above
+            // already get.
+            expectTrue(reloaded[i].hasPointLight == original[i].hasPointLight, tag + ".hasPointLight");
+            expectVec3Near(reloaded[i].pointLightColor, original[i].pointLightColor, tag + ".pointLightColor");
+            expectTrue(reloaded[i].pointLightConstant == original[i].pointLightConstant, tag + ".pointLightConstant");
+            expectTrue(reloaded[i].pointLightLinear == original[i].pointLightLinear, tag + ".pointLightLinear");
+            expectTrue(reloaded[i].pointLightQuadratic == original[i].pointLightQuadratic,
+                       tag + ".pointLightQuadratic");
+
+            expectTrue(reloaded[i].hasDirectionalLight == original[i].hasDirectionalLight,
+                       tag + ".hasDirectionalLight");
+            expectVec3Near(reloaded[i].directionalLightDirection, original[i].directionalLightDirection,
+                            tag + ".directionalLightDirection");
+            expectVec3Near(reloaded[i].directionalLightColor, original[i].directionalLightColor,
+                            tag + ".directionalLightColor");
+            expectTrue(reloaded[i].directionalLightActive == original[i].directionalLightActive,
+                       tag + ".directionalLightActive");
+
+            expectTrue(reloaded[i].hasCameraComponent == original[i].hasCameraComponent,
+                       tag + ".hasCameraComponent");
+            expectTrue(reloaded[i].cameraFovYDeg == original[i].cameraFovYDeg, tag + ".cameraFovYDeg");
+            expectTrue(reloaded[i].cameraNearPlane == original[i].cameraNearPlane, tag + ".cameraNearPlane");
+            expectTrue(reloaded[i].cameraFarPlane == original[i].cameraFarPlane, tag + ".cameraFarPlane");
+
+            // Phase 15f: MaterialOverride fields -- same "has* plus every
+            // value" coverage every block above already gets.
+            expectTrue(reloaded[i].hasMaterialOverride == original[i].hasMaterialOverride,
+                       tag + ".hasMaterialOverride");
+            expectTrue(reloaded[i].materialOverrideDiffuseTexturePath == original[i].materialOverrideDiffuseTexturePath,
+                       tag + ".materialOverrideDiffuseTexturePath");
         }
     }
 
@@ -185,6 +288,103 @@ int main() {
     }
     expectTrue(threwForBadSchema, "parseSceneRecords throws when \"entities\" isn't an array");
     std::filesystem::remove(badSchemaPath);
+
+    // --- Malformed input: "pointLight"/"directionalLight"/"camera" present
+    // but not an object (Phase 15e) -- the identical "presence alone sets
+    // has*, but the block itself must actually be an object" contract
+    // "rigidBody"/"collider" already enforce (scene_serialization.cpp's own
+    // `if (!xxxJson.is_object())` checks), exercised here for the three new
+    // blocks the same way the "entities isn't an array" case above exercises
+    // the top-level schema.
+    const std::filesystem::path badPointLightPath =
+        std::filesystem::temp_directory_path() / "engine_scene_test_bad_pointlight.json";
+    {
+        std::ofstream badPointLightFile(badPointLightPath);
+        // "pointLight" as a plain string instead of an object.
+        badPointLightFile << R"({"entities": [{"name": "lamp", "pointLight": "not an object"}]})";
+    }
+    bool threwForBadPointLight = false;
+    try {
+        engine::parseSceneRecords(badPointLightPath.string());
+    } catch (const std::exception&) {
+        threwForBadPointLight = true;
+    }
+    expectTrue(threwForBadPointLight, "parseSceneRecords throws when \"pointLight\" isn't an object");
+    std::filesystem::remove(badPointLightPath);
+
+    const std::filesystem::path badDirectionalLightPath =
+        std::filesystem::temp_directory_path() / "engine_scene_test_bad_directionallight.json";
+    {
+        std::ofstream badDirectionalLightFile(badDirectionalLightPath);
+        // "directionalLight" as a plain array instead of an object.
+        badDirectionalLightFile << R"({"entities": [{"name": "sun", "directionalLight": [1, 2, 3]}]})";
+    }
+    bool threwForBadDirectionalLight = false;
+    try {
+        engine::parseSceneRecords(badDirectionalLightPath.string());
+    } catch (const std::exception&) {
+        threwForBadDirectionalLight = true;
+    }
+    expectTrue(threwForBadDirectionalLight, "parseSceneRecords throws when \"directionalLight\" isn't an object");
+    std::filesystem::remove(badDirectionalLightPath);
+
+    const std::filesystem::path badCameraPath =
+        std::filesystem::temp_directory_path() / "engine_scene_test_bad_camera.json";
+    {
+        std::ofstream badCameraFile(badCameraPath);
+        // "camera" as a plain boolean instead of an object.
+        badCameraFile << R"({"entities": [{"name": "scout_camera", "camera": true}]})";
+    }
+    bool threwForBadCamera = false;
+    try {
+        engine::parseSceneRecords(badCameraPath.string());
+    } catch (const std::exception&) {
+        threwForBadCamera = true;
+    }
+    expectTrue(threwForBadCamera, "parseSceneRecords throws when \"camera\" isn't an object");
+    std::filesystem::remove(badCameraPath);
+
+    // --- Malformed input: "materialOverride" present but not an object
+    // (Phase 15f) -- same "presence alone sets has*, but the block itself
+    // must actually be an object" contract every block above already
+    // enforces.
+    const std::filesystem::path badMaterialOverrideObjectPath =
+        std::filesystem::temp_directory_path() / "engine_scene_test_bad_material_override_object.json";
+    {
+        std::ofstream badMaterialOverrideObjectFile(badMaterialOverrideObjectPath);
+        // "materialOverride" as a plain number instead of an object.
+        badMaterialOverrideObjectFile << R"({"entities": [{"name": "retextured_cube", "materialOverride": 5}]})";
+    }
+    bool threwForBadMaterialOverrideObject = false;
+    try {
+        engine::parseSceneRecords(badMaterialOverrideObjectPath.string());
+    } catch (const std::exception&) {
+        threwForBadMaterialOverrideObject = true;
+    }
+    expectTrue(threwForBadMaterialOverrideObject, "parseSceneRecords throws when \"materialOverride\" isn't an object");
+    std::filesystem::remove(badMaterialOverrideObjectPath);
+
+    // --- Malformed input: "materialOverride" present but missing its
+    // REQUIRED "diffuseTexture" field (Phase 15f) -- unlike every other
+    // optional block (e.g. "rigidBody": {} is a valid, at-rest body), an
+    // empty "materialOverride": {} is a schema error -- see
+    // scene_serialization.hpp's own "Schema" comment for why there is no
+    // meaningful default to fall back to here.
+    const std::filesystem::path missingDiffuseTexturePath =
+        std::filesystem::temp_directory_path() / "engine_scene_test_missing_diffuse_texture.json";
+    {
+        std::ofstream missingDiffuseTextureFile(missingDiffuseTexturePath);
+        missingDiffuseTextureFile << R"({"entities": [{"name": "retextured_cube", "materialOverride": {}}]})";
+    }
+    bool threwForMissingDiffuseTexture = false;
+    try {
+        engine::parseSceneRecords(missingDiffuseTexturePath.string());
+    } catch (const std::exception&) {
+        threwForMissingDiffuseTexture = true;
+    }
+    expectTrue(threwForMissingDiffuseTexture,
+               "parseSceneRecords throws when \"materialOverride\" is present but missing \"diffuseTexture\"");
+    std::filesystem::remove(missingDiffuseTexturePath);
 
     // --- Malformed input: "parent" names an entity that doesn't exist ----
     // Phase 14b: this is exactly the "validate at this boundary, specific

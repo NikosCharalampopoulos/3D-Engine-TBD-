@@ -17,6 +17,13 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+// Post-14f bug-review fix's own sanity check (below) needs glm::decompose()
+// directly, to independently confirm the degenerate-scale test case actually
+// exercises the decompose-fails path -- same experimental-API opt-in
+// transform_hierarchy.cpp itself uses, needed here for the identical reason.
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/matrix_decompose.hpp>
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -342,6 +349,101 @@ int main() {
                    "a childless entity's own Transform is gone after destroyEntityOrphaningChildren()");
         expectTrue(registry.getComponent<engine::NameComponent>(lonely) == nullptr,
                    "a childless entity's own NameComponent is gone too (every pool, not just Transform/Parent)");
+    }
+
+    // --- Post-14f bug-review fix: a degenerate-scale child is still
+    // orphaned even though glm::decompose() fails on its world matrix -------
+    // Not reachable through the Inspector (its Scale field clamps to
+    // [0.01, 100], see editor_ui.cpp's own Phase 14e comment) but reachable
+    // through a hand-edited/malformed assets/scenes/*.json -- scene_loader.cpp
+    // applies no such clamp on load, and Transform::setScale() itself
+    // (transform.hpp) is a plain setter with no clamp either, so a literal
+    // 0.0f on any axis is directly constructible here exactly the way a
+    // malformed scene file could produce it.
+    {
+        engine::EntityRegistry registry;
+
+        const engine::EntityId parent = registry.create();
+        engine::Transform& parentTransform = registry.addComponent<engine::Transform>(parent);
+        parentTransform.setPosition(glm::vec3(3.0f, 0.0f, 0.0f));
+        // Zero on the X axis specifically -- confirmed (not assumed) to make
+        // glm::decompose() actually return false for a matrix built the same
+        // T*R*S way Transform::getModelMatrix() builds it: a small standalone
+        // program running this exact scale through glm::decompose() prints
+        // "decompose=FALSE" for (0,1,1)/(1,0,1)/(1,1,0)/(0,0,0), and "true"
+        // for (1,1,1) and for the Inspector's own 0.01 clamp floor -- so this
+        // is the smallest deviation from a well-formed Transform that
+        // actually reaches the buggy path, not a guess.
+        parentTransform.setScale(glm::vec3(0.0f, 1.0f, 1.0f));
+
+        const engine::EntityId child = registry.create();
+        engine::Transform& childTransform = registry.addComponent<engine::Transform>(child);
+        childTransform.setPosition(glm::vec3(1.0f, 2.0f, 3.0f));
+        childTransform.setRotation(glm::angleAxis(glm::radians(45.0f), glm::vec3(0.0f, 1.0f, 0.0f)));
+        childTransform.setScale(glm::vec3(1.5f, 1.5f, 1.5f));
+        registry.addComponent<engine::Parent>(child, engine::Parent{parent});
+
+        // Sanity check on the premise itself: resolveWorldMatrix(child)'s
+        // result, run through the same glm::decompose() call
+        // destroyEntityOrphaningChildren() makes internally, must actually
+        // fail here -- otherwise this test wouldn't be exercising the
+        // decompose-fails path at all.
+        {
+            const glm::mat4 childWorld = engine::resolveWorldMatrix(registry, child);
+            glm::vec3 scale, translation, skew;
+            glm::quat rotation;
+            glm::vec4 perspective;
+            expectTrue(!glm::decompose(childWorld, scale, rotation, translation, skew, perspective),
+                       "sanity: the child's world matrix under a zero-X-scale parent actually fails to decompose "
+                       "(otherwise this test isn't exercising the bug at all)");
+        }
+
+        const glm::vec3 childLocalPositionBeforeDelete = childTransform.position();
+        const glm::quat childLocalRotationBeforeDelete = childTransform.rotation();
+        const glm::vec3 childLocalScaleBeforeDelete = childTransform.scale();
+
+        engine::destroyEntityOrphaningChildren(registry, parent);
+
+        // (a) The core fix: even though decompose() failed, the child must
+        // still exist and be a real root (no Parent component at all) --
+        // this is exactly the assertion that would have failed against the
+        // pre-fix code, which left `Parent{parent}` on `child` untouched
+        // whenever decompose() failed.
+        expectTrue(registry.getComponent<engine::Transform>(parent) == nullptr,
+                   "the deleted degenerate-scale parent has no Transform left in the registry");
+        expectTrue(registry.getComponent<engine::Parent>(child) == nullptr,
+                   "the child of a degenerate-scale parent is still orphaned to root even though its world matrix "
+                   "failed to decompose -- the core Post-14f bug-review fix");
+
+        // (b) The child's Transform wasn't crashed/corrupted: per the fixed
+        // behavior (and this function's own header comment on the
+        // decompose-fails tradeoff), a failed decompose() leaves the child's
+        // existing LOCAL Transform completely untouched rather than
+        // overwriting it with anything -- so it must still hold its exact
+        // pre-delete values, all finite.
+        expectTrue(registry.getComponent<engine::Transform>(child) != nullptr,
+                   "the orphaned child still has its own Transform (only re-pointed, not destroyed)");
+        const engine::Transform* childTransformAfter = registry.getComponent<engine::Transform>(child);
+        expectVec3Near(childTransformAfter->position(), childLocalPositionBeforeDelete,
+                       "decompose() failing leaves the child's position completely untouched (its old LOCAL value "
+                       "becomes its new effective one, not zeroed/garbage)");
+        expectVec3Near(childTransformAfter->scale(), childLocalScaleBeforeDelete,
+                       "decompose() failing leaves the child's scale completely untouched");
+        expectTrue(glm::all(glm::epsilonEqual(childTransformAfter->rotation(), childLocalRotationBeforeDelete,
+                                               1e-4f)),
+                   "decompose() failing leaves the child's rotation completely untouched");
+        bool transformFinite = std::isfinite(childTransformAfter->position().x) &&
+                                std::isfinite(childTransformAfter->position().y) &&
+                                std::isfinite(childTransformAfter->position().z) &&
+                                std::isfinite(childTransformAfter->scale().x) &&
+                                std::isfinite(childTransformAfter->scale().y) &&
+                                std::isfinite(childTransformAfter->scale().z) &&
+                                std::isfinite(childTransformAfter->rotation().w) &&
+                                std::isfinite(childTransformAfter->rotation().x) &&
+                                std::isfinite(childTransformAfter->rotation().y) &&
+                                std::isfinite(childTransformAfter->rotation().z);
+        expectTrue(transformFinite, "the orphaned child's Transform is fully finite (not NaN/inf) after a "
+                                    "decompose()-failed orphan -- not corrupted by the fix");
     }
 
     if (failures == 0) {

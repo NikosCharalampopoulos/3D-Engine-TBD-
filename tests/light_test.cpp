@@ -1,0 +1,232 @@
+// Phase 15a's own test: exercises engine::collectPointLights() (src/light.cpp)
+// in isolation -- same "plain executable, links only the pure logic file
+// it's testing" shape as physics_test.cpp (see that file's own header
+// comment). light.cpp depends only on ecs.hpp/transform.hpp, neither of
+// which touch GL/Window at all, so this needs no live window/GL context/GPU
+// either.
+//
+// Phase 15b extends this same file (rather than a new directional_light_test.cpp)
+// with engine::resolveActiveDirectionalLight() coverage -- it's the exact
+// same "pure logic in light.cpp, no GL/Window dependency" shape
+// collectPointLights() above already has, tested against the same kind of
+// fresh EntityRegistry each case builds by hand, so a second small test
+// executable just to test the SAME translation unit's second function would
+// only duplicate this file's own header/boilerplate for no isolation benefit.
+
+#include "engine/light.hpp"
+
+#include "engine/ecs.hpp"
+#include "engine/transform.hpp"
+
+#include <glm/glm.hpp>
+#include <glm/gtc/epsilon.hpp>
+
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+namespace {
+
+int failures = 0;
+
+void expectTrue(bool condition, const std::string& what) {
+    if (!condition) {
+        std::fprintf(stderr, "FAIL: %s\n", what.c_str());
+        ++failures;
+    }
+}
+
+void expectNear(float actual, float expected, const std::string& what, float epsilon = 1e-4f) {
+    expectTrue(glm::epsilonEqual(actual, expected, epsilon), what + " (expected " + std::to_string(expected) +
+                                                                   ", got " + std::to_string(actual) + ")");
+}
+
+}  // namespace
+
+int main() {
+    // --- An entity with both Transform and PointLight is collected, at its
+    // Transform's own position ------------------------------------------------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(1.0f, 2.0f, 3.0f));
+        registry.addComponent<engine::PointLight>(
+            id, engine::PointLight{glm::vec3(0.2f, 0.4f, 0.6f), 1.0f, 0.35f, 0.44f});
+
+        std::vector<engine::PointLightSample> samples;
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/8, samples);
+
+        expectTrue(!overflowed, "well under maxTotal: collectPointLights reports no overflow");
+        expectTrue(samples.size() == 1, "one PointLight entity collects exactly one sample");
+        if (samples.size() == 1) {
+            expectNear(samples[0].position.x, 1.0f, "sample position.x matches the entity's Transform");
+            expectNear(samples[0].position.y, 2.0f, "sample position.y matches the entity's Transform");
+            expectNear(samples[0].position.z, 3.0f, "sample position.z matches the entity's Transform");
+            expectNear(samples[0].color.r, 0.2f, "sample color.r matches the PointLight component");
+            expectNear(samples[0].constant, 1.0f, "sample constant matches the PointLight component");
+            expectNear(samples[0].linear, 0.35f, "sample linear matches the PointLight component");
+            expectNear(samples[0].quadratic, 0.44f, "sample quadratic matches the PointLight component");
+        }
+    }
+
+    // --- Appends to a non-empty `out`, doesn't overwrite it -----------------
+    // (this is how Application::render() seeds `out` with its own fixed
+    // kPointLights table before calling collectPointLights() -- see
+    // light.hpp's own comment on why this is an append, not an overwrite.)
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(0.0f));
+        registry.addComponent<engine::PointLight>(id, engine::PointLight{});
+
+        std::vector<engine::PointLightSample> samples;
+        samples.push_back(engine::PointLightSample{glm::vec3(9.0f), glm::vec3(1.0f), 1.0f, 0.7f, 1.8f});
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/8, samples);
+
+        expectTrue(!overflowed, "1 pre-seeded + 1 entity, well under maxTotal 8: no overflow reported");
+        expectTrue(samples.size() == 2, "collectPointLights appends, leaving a pre-seeded entry in place");
+        if (samples.size() == 2) {
+            expectNear(samples[0].position.x, 9.0f, "the pre-seeded entry is untouched");
+        }
+    }
+
+    // --- A PointLight with no Transform contributes nothing (the same
+    // "opt-in, no implicit pairing" tolerance ecs.hpp documents elsewhere) --
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::PointLight>(id, engine::PointLight{});
+
+        std::vector<engine::PointLightSample> samples;
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/8, samples);
+
+        expectTrue(!overflowed, "skipped for lacking a Transform, not maxTotal: not reported as an overflow");
+        expectTrue(samples.empty(), "a PointLight with no Transform is skipped, not a crash");
+    }
+
+    // --- An entity with a Transform but no PointLight contributes nothing --
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(5.0f));
+
+        std::vector<engine::PointLightSample> samples;
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/8, samples);
+
+        expectTrue(!overflowed, "no PointLight component at all: not reported as an overflow");
+        expectTrue(samples.empty(), "an entity with only a Transform contributes no PointLightSample");
+    }
+
+    // --- maxTotal caps the total, extras silently skipped (not a crash, not
+    // an out-of-bounds append past what the caller asked for) ---------------
+    {
+        engine::EntityRegistry registry;
+        for (int i = 0; i < 5; ++i) {
+            const engine::EntityId id = registry.create();
+            registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(static_cast<float>(i), 0.0f, 0.0f));
+            registry.addComponent<engine::PointLight>(id, engine::PointLight{});
+        }
+
+        std::vector<engine::PointLightSample> samples;
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/3, samples);
+
+        expectTrue(overflowed, "5 entities against maxTotal 3: the 2 skipped ones are reported as an overflow");
+        expectTrue(samples.size() == 3, "collectPointLights stops appending once maxTotal is reached");
+    }
+
+    // --- maxTotal already reached by the pre-seeded entries: nothing new is
+    // appended at all ---------------------------------------------------------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(0.0f));
+        registry.addComponent<engine::PointLight>(id, engine::PointLight{});
+
+        std::vector<engine::PointLightSample> samples(2, engine::PointLightSample{});
+        const bool overflowed = engine::collectPointLights(registry, /*maxTotal=*/2, samples);
+
+        expectTrue(overflowed, "maxTotal already met by pre-seeded entries: the entity is reported as an overflow");
+        expectTrue(samples.size() == 2, "maxTotal already met by pre-seeded entries: nothing appended");
+    }
+
+    // --- resolveActiveDirectionalLight(): no active entity (default
+    // EntityId{}, the "nothing" sentinel) returns `fallback` unchanged --
+    // this is what keeps a scene with zero Directional Light entities (every
+    // scene before Phase 15b, and this engine's own default scene today)
+    // rendering exactly as it did before this phase -----------------------
+    {
+        engine::EntityRegistry registry;
+        const engine::DirectionalLight fallback{glm::vec3(0.6f, -0.7f, 0.35f), glm::vec3(1.0f, 0.95f, 0.85f)};
+
+        const engine::DirectionalLight resolved =
+            engine::resolveActiveDirectionalLight(registry, engine::EntityId(), fallback);
+
+        expectNear(resolved.direction.x, fallback.direction.x, "no active entity: resolved direction == fallback");
+        expectNear(resolved.color.r, fallback.color.r, "no active entity: resolved color == fallback");
+    }
+
+    // --- An active entity that actually has a DirectionalLight component
+    // returns THAT component's own direction/color, not `fallback` ---------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::DirectionalLight>(
+            id, engine::DirectionalLight{glm::vec3(1.0f, -2.0f, 3.0f), glm::vec3(0.1f, 0.2f, 0.3f)});
+        const engine::DirectionalLight fallback{glm::vec3(0.6f, -0.7f, 0.35f), glm::vec3(1.0f, 0.95f, 0.85f)};
+
+        const engine::DirectionalLight resolved = engine::resolveActiveDirectionalLight(registry, id, fallback);
+
+        expectNear(resolved.direction.x, 1.0f, "active entity: resolved direction.x matches its component");
+        expectNear(resolved.direction.y, -2.0f, "active entity: resolved direction.y matches its component");
+        expectNear(resolved.direction.z, 3.0f, "active entity: resolved direction.z matches its component");
+        expectNear(resolved.color.r, 0.1f, "active entity: resolved color.r matches its component");
+    }
+
+    // --- An active id that no longer has a DirectionalLight component
+    // (entity destroyed, or the component otherwise removed/never added)
+    // falls back to `fallback`, exactly like "no active entity" above --
+    // ecs.hpp's own EntityId comment: getComponent() on such an id is always
+    // a safe nullptr, never UB, so this must not crash either -------------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        // Note: no addComponent<DirectionalLight>() call for `id` at all --
+        // this stands in for both "component was never added" and "entity
+        // was destroyed" (destroyEntity() leaves getComponent() returning
+        // nullptr exactly the same way an id that never had the component
+        // does -- see ecs.hpp's own destroyEntity()/EntityId comments).
+        const engine::DirectionalLight fallback{glm::vec3(0.6f, -0.7f, 0.35f), glm::vec3(1.0f, 0.95f, 0.85f)};
+
+        const engine::DirectionalLight resolved = engine::resolveActiveDirectionalLight(registry, id, fallback);
+
+        expectNear(resolved.direction.x, fallback.direction.x,
+                   "active id with no DirectionalLight component: resolved direction == fallback");
+    }
+
+    // --- A degenerate (zero-length) direction on the active entity falls
+    // back to `fallback` too, rather than reaching glm::normalize() with an
+    // unusable input downstream (see resolveActiveDirectionalLight()'s own
+    // light.hpp comment for the div-by-zero/NaN hazard this guards) --------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::DirectionalLight>(
+            id, engine::DirectionalLight{glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.1f, 0.2f, 0.3f)});
+        const engine::DirectionalLight fallback{glm::vec3(0.6f, -0.7f, 0.35f), glm::vec3(1.0f, 0.95f, 0.85f)};
+
+        const engine::DirectionalLight resolved = engine::resolveActiveDirectionalLight(registry, id, fallback);
+
+        expectNear(resolved.direction.x, fallback.direction.x,
+                   "zero-length active direction: resolved direction == fallback, not the degenerate value");
+        expectNear(resolved.color.r, fallback.color.r,
+                   "zero-length active direction: resolved color == fallback too (the whole component is rejected)");
+    }
+
+    if (failures == 0) {
+        std::printf("light_test: all checks passed\n");
+        return EXIT_SUCCESS;
+    }
+    std::fprintf(stderr, "light_test: %d check(s) failed\n", failures);
+    return EXIT_FAILURE;
+}

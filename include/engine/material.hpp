@@ -73,9 +73,22 @@ public:
     // takes textureUnit itself, so the two never collide as long as callers
     // don't also put something else on textureUnit + 1 (nothing in this
     // engine does; every call site uses the default textureUnit = 0).
-    void bind(unsigned int textureUnit = 0) const {
+    //
+    // Phase 15f: `diffuseOverride`, when non-null, is bound INSTEAD of this
+    // Material's own diffuseTexture_ -- diffuseTexture_ itself is never
+    // read, written, or reassigned by this parameter, only shadowed for the
+    // duration of this one call. This is precisely what lets
+    // Model::draw()/drawNode() (model.hpp/.cpp) honor one entity's
+    // MaterialOverride component (material_override.hpp) without mutating
+    // the shared, cached Material every OTHER entity drawing this same
+    // Model reads through the exact same bind() call, with no override
+    // argument, immediately before or after -- see material_override.hpp's
+    // own header comment for the full "why a per-call override argument,
+    // not an in-place mutation" reasoning this sidesteps.
+    void bind(unsigned int textureUnit = 0, const Texture* diffuseOverride = nullptr) const {
         shader_->use();
-        diffuseTexture_->bind(textureUnit);
+        const Texture& diffuse = diffuseOverride != nullptr ? *diffuseOverride : *diffuseTexture_;
+        diffuse.bind(textureUnit);
         shader_->setInt("uDiffuseTexture", static_cast<int>(textureUnit));
         if (normalMap_) {
             normalMap_->bind(textureUnit + 1);
@@ -131,6 +144,20 @@ public:
     // per-entity material editing needs an actual per-entity material
     // override/clone step first (e.g. Model gaining a "give me my own
     // unshared copy of this material" operation) -- there isn't one today.
+    //
+    // Phase 15f update: that "actual per-entity override step" now exists --
+    // see material_override.hpp's MaterialOverride component and this
+    // class's own bind(textureUnit, diffuseOverride) above -- but it covers
+    // ONLY the diffuse texture, not these two fields. `tint`/`shininess`
+    // stay exactly as mutable-but-not-Inspector-exposed as this note always
+    // described, deliberately: the identical shared-cache hazard this whole
+    // note explains still applies to them verbatim, and the Asset Browser
+    // (Phase 15d) this phase's texture picker reuses has nothing analogous
+    // to "browse for a tint" -- extending MaterialOverride with optional
+    // tint/shininess fields (plus a plain ColorEdit3/DragFloat pair writing
+    // into them, the same override-argument shape bind() already has for
+    // the texture case) is the natural next slice, not something this phase
+    // needed to build to close its own "Browse..." brief.
     glm::vec3 tint;
     float shininess;
 };

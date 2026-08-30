@@ -101,6 +101,15 @@ uniform sampler2D uBrdfLUT;
 uniform sampler2D uSSAOMap;
 uniform int uSSAOEnabled;
 
+// Phase 18g: Solid shading mode -- see basic.frag's own uSolidShading
+// comment for the full design; the identical flag, just gating this
+// shader's own uAlbedoMap sample instead. When true (nonzero), albedo below
+// stays exactly uAlbedo (the material's own flat scalar color), completely
+// skipping the uAlbedoMap texture() lookup -- every other PBR term
+// (metallic/roughness/normal/lighting/IBL) is untouched, so shape/shading
+// still reads correctly, just without a diffuse/albedo texture.
+uniform int uSolidShading;
+
 // Phase 13g: Screen-Space Reflections -- refines the IBL-only specular term
 // below (specularIBL, Phase 10's prefiltered-environment-cubemap reflection)
 // for smooth/mirror-like surfaces by ray-marching this frame's already-fully-
@@ -757,7 +766,9 @@ void main() {
     }
 
     vec3 albedo = uAlbedo;
-    if (uUseAlbedoMap != 0) {
+    // Phase 18g: Solid mode skips the texture sample outright -- see
+    // uSolidShading's own comment above.
+    if (uUseAlbedoMap != 0 && uSolidShading == 0) {
         albedo *= texture(uAlbedoMap, vTexCoord).rgb;
     }
     float metallic = uMetallic;

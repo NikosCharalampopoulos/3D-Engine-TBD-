@@ -132,7 +132,35 @@ sleep 0.4
 #      two *consecutive* 0.2s-apart polls (not just once) skips past a
 #      single anomalous frame like that one, at the cost of one extra 0.2s
 #      in the common case where there's nothing to debounce.
+#   3. Phase 17d bumped the required consecutive passes 2 -> 3. Root cause
+#      (confirmed directly against the vendored Dear ImGui source, not
+#      guessed): the SAME one-frame docking-settle transient #2 above
+#      already documents -- Dear ImGui's own imgui.cpp (Begin(), around the
+#      "Update visibility" section) intentionally sets
+#      `window->HiddenFramesCannotSkipItems = 1` for a docked window whose
+#      tab is being selected for the first time ("When we are about to
+#      select this tab (which will only be visible on the _next_ frame)...
+#      This is analogous to regular windows being hidden from one frame" --
+#      that comment's own words), which is why each of the four dockspace
+#      panels' own tab-bar pill (background fill + label text, drawn only
+#      once DockTabIsVisible is confirmed) can be missing -- just the bare
+#      collapse arrow visible -- for exactly one frame after a dock node's
+#      tab bar is first created, predating this project's custom title bar
+#      entirely (confirmed: an unmodified pre-Phase-17d build, rebuilt and
+#      multi-sampled the same way, exhibits the identical single-frame gap).
+#      Phase 17d's title bar simply adds enough always-rendered content
+#      (icon/name/window-control buttons) that THIS transient frame's own
+#      screenshot now *also* clears MIN_SCREENSHOT_BYTES -- something the
+#      smaller pre-Phase-17d frame usually didn't do, so two consecutive
+#      passes used to already mean "past the transient" by coincidence, not
+#      by design. Three consecutive passes restores that same margin
+#      directly (one settle frame can satisfy at most one pass; a second
+#      "still-transient" frame passing immediately afterward has never been
+#      observed in this project's own multi-frame sampling either side of
+#      this phase) rather than depending on any particular build's exact
+#      frame-1 byte count.
 MIN_SCREENSHOT_BYTES=2000
+REQUIRED_CONSECUTIVE_PASSES=3
 consecutive_passes=0
 for _ in $(seq 1 40); do
     if ! kill -0 "${APP_PID}" 2>/dev/null; then
@@ -153,7 +181,7 @@ for _ in $(seq 1 40); do
     fi
     if (( passed )); then
         consecutive_passes=$((consecutive_passes + 1))
-        if (( consecutive_passes >= 2 )); then
+        if (( consecutive_passes >= REQUIRED_CONSECUTIVE_PASSES )); then
             break
         fi
     else

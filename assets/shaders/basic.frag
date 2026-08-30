@@ -193,6 +193,18 @@ uniform int uClusterDebug;
 uniform sampler2D uSSAOMap;
 uniform int uSSAOEnabled;
 
+// Phase 18g: Solid shading mode -- true (nonzero) makes this shader skip its
+// own uDiffuseTexture sample entirely and shade with a flat vec4(1.0)
+// "texture" instead, so baseColor below falls back to just uTint (the
+// material's own tint color, already multiplied in either way) -- an
+// object's SHAPE still reads correctly (every lighting/shadow term below is
+// completely unaffected by this flag), it just loses its diffuse texture,
+// exactly what this project's own "Solid" mode is defined to mean (see
+// shading_mode.hpp's own header comment). Left at its default (0) for
+// ordinary Rendered-mode frames -- application.cpp only ever sets this to 1
+// for a frame whose effective ShadingMode is kSolid.
+uniform int uSolidShading;
+
 // Picks which of the CLUSTER_GRID_X x CLUSTER_GRID_Y x CLUSTER_GRID_Z
 // clusters this fragment falls into, from its screen-space tile
 // (gl_FragCoord.xy, the same pixel coordinates cluster_aabb.comp's own
@@ -367,7 +379,11 @@ void main() {
 
     vec3 viewDir = normalize(uViewPos - vFragPos);
 
-    vec4 texColor = texture(uDiffuseTexture, vTexCoord);
+    // Phase 18g: Solid mode substitutes a flat vec4(1.0) in place of the
+    // real texture sample -- baseColor below then reduces to plain uTint,
+    // the material's own tint color, with every lighting term after this
+    // point completely unaffected -- see uSolidShading's own comment above.
+    vec4 texColor = uSolidShading != 0 ? vec4(1.0) : texture(uDiffuseTexture, vTexCoord);
     vec3 baseColor = texColor.rgb * uTint;
 
     // Diffuse/specular accumulate across every light; ambient is scene-wide

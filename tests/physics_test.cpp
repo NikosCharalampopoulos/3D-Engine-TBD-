@@ -27,6 +27,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/epsilon.hpp>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -166,6 +167,172 @@ int main() {
         expectTrue(transform != nullptr, "gravity-disabled entity still has its Transform");
         if (transform != nullptr) {
             expectNear(transform->position().y, kStartY, "gravity-disabled body with zero velocity never moves");
+        }
+    }
+
+    // --- Phase 18c: ground friction decelerates horizontal velocity toward
+    // zero, and stops exactly there (no overshoot into reversed motion) ----
+    // An entity that starts already resting exactly at its rest height, with
+    // a nonzero horizontal (X) velocity and gravity on: every single step
+    // dips it fractionally below restY (gravity always integrates SOME
+    // downward velocity before the ground check runs, even starting from
+    // rest -- see stepPhysics()'s own comment), so the ground-snap branch --
+    // and therefore friction -- runs on every one of these steps, not just
+    // once.
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(0.0f, kRestY, 0.0f));
+        registry.addComponent<engine::RigidBody>(id, engine::RigidBody{glm::vec3(3.0f, 0.0f, 0.0f), true});
+        registry.addComponent<engine::Collider>(id, engine::Collider{kHalfExtent});
+
+        // Hand-compute expected horizontal speed via the exact same clamped-
+        // friction recurrence stepPhysics() itself follows (see
+        // kGroundFriction's own physics.hpp comment): speed decreases by
+        // kGroundFriction * deltaTime each step, clamped to never go below
+        // zero.
+        auto expectedSpeedAfter = [&](int steps) {
+            float speed = 3.0f;
+            for (int i = 0; i < steps; ++i) {
+                const float decel = engine::kGroundFriction * kDeltaTime;
+                speed = (speed > decel) ? (speed - decel) : 0.0f;
+            }
+            return speed;
+        };
+
+        // A handful of steps: still sliding, measurably slower than it
+        // started, but not yet stopped.
+        constexpr int kFewSteps = 10;
+        for (int i = 0; i < kFewSteps; ++i) {
+            engine::stepPhysics(registry, kDeltaTime, kGroundY);
+        }
+        {
+            const engine::RigidBody* body = registry.getComponent<engine::RigidBody>(id);
+            const engine::Transform* transform = registry.getComponent<engine::Transform>(id);
+            expectTrue(body != nullptr && transform != nullptr, "friction: entity still has its components after 10 steps");
+            if (body != nullptr && transform != nullptr) {
+                expectNear(body->velocity.x, expectedSpeedAfter(kFewSteps),
+                           "friction: horizontal speed after 10 steps matches hand-computed clamped-friction recurrence");
+                expectTrue(body->velocity.x > 0.0f && body->velocity.x < 3.0f,
+                           "friction: horizontal speed measurably decreased but hasn't reached zero yet after 10 steps");
+                expectNear(body->velocity.z, 0.0f, "friction: velocity.z (never nonzero here) stays exactly zero");
+                expectNear(transform->position().y, kRestY, "friction: still resting exactly at restY, unaffected by friction");
+            }
+        }
+
+        // Enough further steps that 3.0 world-units/second of horizontal
+        // speed must have been fully consumed (3.0 / (kGroundFriction *
+        // kDeltaTime) ~= 36.7 steps) -- run comfortably past that.
+        constexpr int kStepsToStop = 60;
+        for (int i = 0; i < kStepsToStop; ++i) {
+            engine::stepPhysics(registry, kDeltaTime, kGroundY);
+        }
+        {
+            const engine::RigidBody* body = registry.getComponent<engine::RigidBody>(id);
+            expectTrue(body != nullptr, "friction: entity still has its RigidBody after stopping");
+            if (body != nullptr) {
+                expectNear(body->velocity.x, 0.0f, "friction: horizontal speed reaches exactly zero, not asymptotically close");
+            }
+        }
+
+        // And it STAYS at zero -- friction must never overshoot into
+        // reversed (negative) motion once the object has actually stopped.
+        constexpr int kMoreSteps = 60;
+        for (int i = 0; i < kMoreSteps; ++i) {
+            engine::stepPhysics(registry, kDeltaTime, kGroundY);
+            const engine::RigidBody* body = registry.getComponent<engine::RigidBody>(id);
+            if (body != nullptr) {
+                expectNear(body->velocity.x, 0.0f, "friction: velocity.x stays exactly zero on every subsequent step, never reverses sign");
+            }
+        }
+    }
+
+    // --- Phase 18c: ground friction decelerates the RESULTANT horizontal
+    // vector, not each axis independently -------------------------------
+    // A diagonal slide (equal X and Z speed) must decelerate at the same
+    // RATE as an axis-aligned slide of the same total speed -- i.e. the
+    // magnitude of (vx, vz) shrinks by kGroundFriction * deltaTime per step,
+    // with vx and vz shrinking together in proportion, not each losing
+    // kGroundFriction * deltaTime independently (which would decelerate a
+    // diagonal slide's total speed roughly sqrt(2) times too fast).
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(0.0f, kRestY, 0.0f));
+        const float diagonalComponent = 2.0f / std::sqrt(2.0f);  // total speed 2.0, split evenly between X and Z
+        registry.addComponent<engine::RigidBody>(id, engine::RigidBody{glm::vec3(diagonalComponent, 0.0f, diagonalComponent), true});
+        registry.addComponent<engine::Collider>(id, engine::Collider{kHalfExtent});
+
+        constexpr int kSteps = 5;
+        for (int i = 0; i < kSteps; ++i) {
+            engine::stepPhysics(registry, kDeltaTime, kGroundY);
+        }
+
+        const engine::RigidBody* body = registry.getComponent<engine::RigidBody>(id);
+        expectTrue(body != nullptr, "diagonal friction: entity still has its RigidBody after 5 steps");
+        if (body != nullptr) {
+            float expectedSpeed = 2.0f;
+            for (int i = 0; i < kSteps; ++i) {
+                const float decel = engine::kGroundFriction * kDeltaTime;
+                expectedSpeed = (expectedSpeed > decel) ? (expectedSpeed - decel) : 0.0f;
+            }
+            const float actualSpeed = glm::length(glm::vec2(body->velocity.x, body->velocity.z));
+            expectNear(actualSpeed, expectedSpeed, "diagonal friction: resultant horizontal speed matches the same per-step deceleration rate as an axis-aligned slide");
+            expectNear(body->velocity.x, body->velocity.z, "diagonal friction: X and Z stay equal (decelerated together, not independently)");
+        }
+    }
+
+    // --- Phase 18c: terminal-velocity clamp -- a huge initial downward
+    // velocity is clamped on the very first step ---------------------------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(0.0f, 1000.0f, 0.0f));
+        registry.addComponent<engine::RigidBody>(id, engine::RigidBody{glm::vec3(0.0f, -1000.0f, 0.0f), true});
+        // Deliberately no Collider: this test is only about the velocity
+        // clamp, and letting it free-fall (rather than land) keeps that
+        // clamp exercised across every one of the steps below.
+
+        engine::stepPhysics(registry, kDeltaTime, kGroundY);
+
+        const engine::RigidBody* body = registry.getComponent<engine::RigidBody>(id);
+        expectTrue(body != nullptr, "terminal velocity: entity still has its RigidBody after 1 step");
+        if (body != nullptr) {
+            expectNear(body->velocity.y, -engine::kTerminalFallSpeed,
+                       "terminal velocity: an extreme initial downward velocity is clamped to -kTerminalFallSpeed on the very first step");
+        }
+    }
+
+    // --- Phase 18c: terminal-velocity clamp -- ordinary gravity accumulated
+    // over many steps still never exceeds it --------------------------------
+    {
+        engine::EntityRegistry registry;
+        const engine::EntityId id = registry.create();
+        registry.addComponent<engine::Transform>(id).setPosition(glm::vec3(0.0f, 1000.0f, 0.0f));
+        registry.addComponent<engine::RigidBody>(id, engine::RigidBody{});
+        // No Collider: this needs a long, uninterrupted fall to actually
+        // reach kTerminalFallSpeed under ordinary gravity, without landing
+        // and having the ground-snap branch zero velocity.y first.
+
+        // kTerminalFallSpeed / (kGravityAcceleration * kDeltaTime) ~= 244.7
+        // steps for ordinary gravity alone to reach it; run comfortably past
+        // that, checking every single step never exceeds the clamp.
+        constexpr int kSteps = 400;
+        bool everExceeded = false;
+        for (int i = 0; i < kSteps; ++i) {
+            engine::stepPhysics(registry, kDeltaTime, kGroundY);
+            const engine::RigidBody* body = registry.getComponent<engine::RigidBody>(id);
+            if (body != nullptr && body->velocity.y < -engine::kTerminalFallSpeed - 1e-4f) {
+                everExceeded = true;
+            }
+        }
+        expectTrue(!everExceeded, "terminal velocity: ordinary gravity accumulation never exceeds -kTerminalFallSpeed across 400 steps");
+
+        const engine::RigidBody* body = registry.getComponent<engine::RigidBody>(id);
+        expectTrue(body != nullptr, "terminal velocity: entity still has its RigidBody after 400 steps");
+        if (body != nullptr) {
+            expectNear(body->velocity.y, -engine::kTerminalFallSpeed,
+                       "terminal velocity: after enough uninterrupted fall time, velocity.y settles at exactly -kTerminalFallSpeed");
         }
     }
 

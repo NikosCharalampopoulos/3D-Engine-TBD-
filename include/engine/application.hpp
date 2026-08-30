@@ -497,11 +497,13 @@
 #include <vector>
 
 #include "engine/camera.hpp"
+#include "engine/camera_component.hpp"
 #include "engine/cluster_light_culler.hpp"
 #include "engine/debug_ui.hpp"
 #include "engine/ecs.hpp"
 #include "engine/editor_ui.hpp"
 #include "engine/framebuffer.hpp"
+#include "engine/gizmo.hpp"
 #include "engine/ibl_probe.hpp"
 #include "engine/input.hpp"
 #include "engine/material.hpp"
@@ -509,10 +511,12 @@
 #include "engine/pbr_material.hpp"
 #include "engine/resource_manager.hpp"
 #include "engine/shader.hpp"
+#include "engine/shading_mode.hpp"
 #include "engine/shadow_map.hpp"
 #include "engine/skybox.hpp"
 #include "engine/ssao.hpp"
 #include "engine/transform.hpp"
+#include "engine/undo_stack.hpp"
 #include "engine/window.hpp"
 
 namespace engine {
@@ -533,8 +537,17 @@ public:
     // own Phase 14a comment) -- default false, an ordinary resizable window
     // at (width, height) the user can maximize themselves. See main.cpp's
     // ENGINE_WINDOW_MAXIMIZED handling for how a real run opts in.
-    Application(int width, int height, const std::string& title, std::uint64_t maxFrames = 0,
-                bool maximized = false);
+    //
+    // Phase 17d: `decorated` is passed straight through to Window too (see
+    // its own Phase 17d comment) -- default true, an ordinary OS-decorated
+    // window, the identical "class defaults to the old/native behavior,
+    // main.cpp's own call site opts into the new one" shape `maximized`
+    // already has. See main.cpp's ENGINE_WINDOW_DECORATED handling for how a
+    // real run opts INTO the OS's native title bar/border instead of this
+    // project's new default custom-drawn one (README.md's own Phase 17d
+    // section).
+    Application(int width, int height, const std::string& title, std::uint64_t maxFrames = 0, bool maximized = false,
+                bool decorated = true);
 
     void run();
 
@@ -555,12 +568,12 @@ public:
     // frame (renderDockspaceShell() takes it by reference, see that method's
     // own Phase 14d comment) but has no reason to be its long-term home, the
     // same relationship it already has with registry_ itself. Application::
-    // render() is the OTHER reader: it resolves this same entity's world-
-    // space bounding sphere and projects it into the selection-outline rect
-    // EditorUI draws (see render()'s own Phase 14d comment) -- both readers
-    // needing the same value each frame is exactly why this lives on
-    // Application, one level above either of them, rather than on whichever
-    // of the two happened to need it first.
+    // render() is the OTHER reader: it draws this same entity's mesh into
+    // the Phase 18d selection mask (renderSelectionMask()) that ultimately
+    // becomes the 3D silhouette outline EditorUI's Viewport panel shows --
+    // both readers needing the same value each frame is exactly why this
+    // lives on Application, one level above either of them, rather than on
+    // whichever of the two happened to need it first.
     //
     // Exposed via this one const getter (not a mutable reference) for a later
     // phase to consume -- concretely, Phase 14e's real Inspector panel, which
@@ -573,6 +586,47 @@ private:
     void update(double deltaTime, const InputState& input);
     void render();
 
+    // Phase 16: the one place cameraCaptured_ (below) is ever actually
+    // written -- called from run() (Escape's own precedence check, via
+    // decideCameraCapture(), camera_capture.hpp) and from render() (a
+    // Viewport double-click, reported through editorUI_.
+    // renderDockspaceShell()'s new `cameraCaptureRequested` out-parameter),
+    // and directly from the constructor for ENGINE_DEBUG_FORCE_CAMERA_CAPTURE
+    // (see that env var's own application.cpp comment) -- the same "one real
+    // function, every real trigger AND the debug var all call it" precedent
+    // spawnEntityFromCreateMenu()/ENGINE_DEBUG_CREATE and
+    // saveCurrentScene()/ENGINE_DEBUG_SAVE_SCENE already establish. A no-op
+    // (returns immediately) when `captured` already equals cameraCaptured_ --
+    // every call site above is free to call this unconditionally with
+    // whatever decideCameraCapture() (or the debug var) computed, rather
+    // than each needing its own "did this actually change" guard.
+    //
+    // Applies every real side effect of a capture-state transition in ONE
+    // place, so no call site can apply one but forget another:
+    //   - window_.setCursorCaptured(captured) -- hides/locks or restores the
+    //     OS cursor (window.hpp's own Phase 16 comment).
+    //   - camera_.resetMouseTracking() -- discards Camera's own tracked last
+    //     cursor position on EITHER transition, not just entry. Strictly
+    //     necessary on entry (see camera.hpp's own processMouseInput()
+    //     comment on "priming": without this, the first processMouseInput()
+    //     call after re-entering capture would diff against whatever
+    //     position was tracked from BEFORE this capture session ended --
+    //     stale by however long the camera sat uncaptured -- and could snap
+    //     the view). Harmless, and kept for symmetry/defensiveness (this
+    //     project's own established style -- e.g. resetMouseTracking()'s own
+    //     comment already calls out "switching into the scripted demo path
+    //     and later resuming" as exactly this kind of transition), on exit
+    //     too: nothing currently reads Camera's tracked position while
+    //     uncaptured (update() simply stops calling processMouseInput() at
+    //     all -- see this class's own Phase 16 update() comment), but a
+    //     future change that fed the camera ANY input while uncaptured would
+    //     otherwise inherit a stale tracked position with no reset in
+    //     between.
+    //   - A LOG_INFO line naming the transition, the same "state changes
+    //     that matter for headless verification get logged" precedent every
+    //     other ENGINE_DEBUG_*-reachable state change in this class follows.
+    void setCameraCaptured(bool captured);
+
     // Phase 14c: reads editorUI_'s own last-recorded Viewport panel content-
     // region size (see editor_ui.hpp's viewportWidth()/viewportHeight() and
     // this class's own Phase 14c header comment) into viewportWidth_/
@@ -582,8 +636,9 @@ private:
     // -- move-assigns a freshly constructed Framebuffer over every one of
     // this class's viewport-sized render targets (hdrFramebuffer_/
     // hdrResolveFramebuffer_/brightFramebuffer_/pingpongFramebuffer0_/1_/
-    // ssaoGBuffer_/ssaoRaw_/ssaoBlurred_/viewportColorFramebuffer_, each at
-    // its own existing resolution ratio) and recomputes
+    // ssaoGBuffer_/ssaoRaw_/ssaoBlurred_/viewportColorFramebuffer_/
+    // selectionMaskFramebuffer_ (Phase 18d), each at its own existing
+    // resolution ratio) and recomputes
     // clusterLightCuller_'s cluster AABBs (they're a pure function of the
     // projection matrix + screen size in pixels, both of which change when
     // this happens -- see cluster_light_culler.hpp's own comment on why that
@@ -628,6 +683,125 @@ private:
     // nothing itself; render() rebinds the default framebuffer/window
     // viewport immediately afterward via hdrFramebuffer_.bindForWriting().
     void renderSSAO(const glm::mat4& view, const glm::mat4& projection);
+
+    // Phase 18d: the selection mask pass -- draws ONLY the currently-
+    // selected entity's mesh (Model::drawDepthOnly()) into
+    // selectionMaskFramebuffer_, writing 1.0 wherever a fragment survives
+    // both this target's own ordinary GL depth test (self-occlusion within
+    // the selected mesh) AND an explicit discard against SSAO's own
+    // ssaoGBuffer_ depth texture (occlusion by every OTHER object in the
+    // scene -- see selection_mask.frag's own comment for exactly why reusing
+    // that already-computed depth, rather than a second full-scene depth
+    // pre-pass, is both correct and free). A no-op -- selectionMaskFramebuffer_
+    // is left untouched, still holding whatever it held last frame -- when
+    // nothing is selected or the selected entity has no ModelComponent to
+    // draw; render()'s own uHasSelection uniform (postprocess.frag) is what
+    // actually gates postprocess.frag from ever sampling that possibly-stale
+    // buffer in that case, not a clear here. Called from render() right
+    // after renderSSAO(), the same pre-pass grouping shadow/SSAO already use
+    // -- this pass depends only on ssaoGBuffer_'s depth texture (already
+    // finished by the time renderSSAO() returns), not on hdrFramebuffer_'s
+    // own main color pass, so there is no ordering reason to run it any
+    // later.
+    void renderSelectionMask(const glm::mat4& view, const glm::mat4& projection);
+
+    // Phase 18e: draws the translate gizmo's three colored axis handles
+    // (mesh.hpp's makeGizmoArrow(), reused per-axis with a rotated/scaled
+    // model matrix -- see gizmo.hpp's own header comment) at the selected
+    // entity's world position, directly into viewportColorFramebuffer_ --
+    // called from render() right after the final postprocess composite (the
+    // whole rest of the 3D pipeline is done by then; this paints on top of
+    // it) rather than earlier in the pipeline, since the gizmo is editor
+    // chrome, not scene content: it should never cast/receive shadows, feed
+    // SSAO's occlusion estimate, or be color-graded/bloomed by the tonemap
+    // pass the way an actual scene object is. Drawn with GL_DEPTH_TEST
+    // disabled (see this method's own .cpp comment for why) so it always
+    // reads on top, the same "manipulation UI, not a scene object" choice
+    // gizmo.frag's own comment documents for why this whole pass is
+    // flat/unlit. A true no-op -- draws nothing at all -- when nothing is
+    // selected or the selection has no Transform, matching this engine's
+    // established "no selection => no [feature]" convention (the old 2D
+    // outline, Phase 18d's real one).
+    //
+    // Reads `selectedEntity_` and each entity's Transform as they stood at
+    // the START of this frame -- the same one-frame latency every other
+    // per-frame read of `selectedEntity_`/a Transform already has in this
+    // class (see that member's own header comment): a drag EditorUI applies
+    // later this same frame (its own renderDockspaceShell() call, further
+    // down in render()) is what the gizmo will be drawn at NEXT frame, not
+    // this one.
+    //
+    // Phase 18j: also reads `gizmoMode_` -- kTranslate draws
+    // gizmoArrowMesh_'s three arrows exactly as Phase 18e always did;
+    // kRotate draws gizmoRingMesh_'s three rings instead, through the
+    // IDENTICAL per-axis model-matrix loop (same rotation table, same
+    // gizmoAxisLength()-based scale, same X/Y/Z colors, same gizmoShader_ --
+    // mesh.hpp's makeGizmoRing() deliberately lies in the local Y-Z plane,
+    // i.e. its own normal is local +X, specifically so it needs no second
+    // rotation table of its own). Phase 18k adds kScale, drawing
+    // gizmoScaleMesh_'s three cube-tipped handles instead, through the
+    // SAME loop again -- mesh.hpp's makeGizmoScaleHandle() deliberately
+    // reuses makeGizmoArrow()'s own local-+X-shaft convention, so it needs no
+    // rotation table of its own either. Never draws more than one of the
+    // three in the same frame -- see GizmoMode's own gizmo.hpp header
+    // comment for why this was a debug-only selection through Phase 18j and
+    // is a live, runtime-mutable one (`gizmoMode_`, `setGizmoMode()` below)
+    // from Phase 18k on.
+    void renderGizmo(const glm::mat4& view, const glm::mat4& projection);
+
+    // Phase 18k: the ONE place `gizmoMode_` is ever allowed to actually
+    // change -- both the constructor (applying ENGINE_DEBUG_GIZMO_MODE as
+    // this run's STARTING mode) and run()'s new live W/E/R keyboard shortcut
+    // handling call this rather than assigning `gizmoMode_` directly, so
+    // this single call site can never be bypassed by a future one.
+    //
+    // A no-op (does NOT call editorUI_.resetAllGizmoDragStates() below) when
+    // `mode` already equals `gizmoMode_` -- e.g. the constructor applying an
+    // unset/"translate" ENGINE_DEBUG_GIZMO_MODE onto the in-class default,
+    // already kTranslate, or a real W press while the translate tool is
+    // already active -- both harmless redundant "switches" that touch no
+    // real state, matching this class's own established "only log/act when
+    // something actually changed" instinct (e.g. the old Phase 18j
+    // constructor-time gizmoMode_ log, which only fired for a non-default
+    // value).
+    //
+    // When `mode` genuinely differs, this is the fix for the specific
+    // landmine Phase 18j's own review explicitly left open for this phase:
+    // through Phase 18j, `gizmoMode_` was set exactly once, in the
+    // constructor, and never touched again for the rest of the run -- so
+    // `EditorUI`'s OTHER two tools' own persistent drag state
+    // (gizmoDragState_/gizmoRotateDragState_, editor_ui.hpp) could never go
+    // stale, because the tool that owned each one was never skipped mid-run.
+    // Phase 18k adds real, live, mid-run mode switching for the first time,
+    // which breaks that assumption: `EditorUI::renderDockspaceShell()` only
+    // ever calls ONE of updateGizmo()/updateGizmoRotate()/updateGizmoScale()
+    // per frame (whichever matches the now-current `gizmoMode_`) -- so if a
+    // drag was in progress in one tool (its own drag state holding a real
+    // grabbed axis, not kNone) at the exact frame the mode switches away
+    // from it, that tool's own update*() function simply stops being called
+    // at all, and its drag state would otherwise sit frozen indefinitely,
+    // still pointing at a real axis with a now-stale anchor. If the user
+    // later switches BACK to that same tool while the mouse happens to still
+    // be down (e.g. a fast W->E->W double-tap without releasing the mouse
+    // button in between), that stale state would resume as if the drag had
+    // continued uninterrupted the whole time, re-projecting onto an anchor
+    // captured long ago and potentially teleporting the entity. Calling
+    // `editorUI_.resetAllGizmoDragStates()` here -- unconditionally, every
+    // time the mode genuinely changes, regardless of which tool (if any) was
+    // mid-drag -- means a mid-drag mode switch instead cleanly ABANDONS that
+    // drag: the entity keeps whatever position/rotation/scale the partial
+    // drag had already applied up to that point (each frame's delta is
+    // applied directly to the live Transform as it happens, never deferred
+    // until release -- see e.g. updateGizmo()'s own `result.newPosition`
+    // handling), but no further movement happens, no undo Command is pushed
+    // for the now-abandoned partial edit (there is no clean "release" to
+    // build one from), and every tool starts genuinely fresh (axis == kNone)
+    // the next time it's actually used -- never resuming a old gesture from
+    // a stale anchor. See resetAllGizmoDragStates()'s own editor_ui.hpp
+    // comment for exactly which state that resets, and
+    // tests/gizmo_test.cpp/README.md's own Phase 18k section for the
+    // scenario proving this.
+    void setGizmoMode(GizmoMode mode);
 
     // Phase 13g: the SSR compositing pass -- redraws ONLY the PBR sphere
     // grid (sphereInstances_), a second time this frame, into
@@ -680,7 +854,412 @@ private:
     // plumbing, see model.hpp's own Phase 14f comment for why. A no-op for
     // CreateEntityKind::kNone (defensive only -- every real call site above
     // already filters that out before calling this).
+    //
+    // Phase 15g note: this whole paragraph's own logic -- placement,
+    // Transform, NameComponent, the optional ModelComponent load -- now
+    // actually lives in one shared helper, spawnPositionedEntity() below,
+    // which this method calls once per switch case before adding whichever
+    // kind-specific extra component (PointLight/DirectionalLight/
+    // CameraComponent) that kind still needs; see that helper's own comment
+    // for why it was factored out (a Viewport model-asset drop needs the
+    // identical logic for an arbitrary path, not one of the four kinds
+    // above). Behavior for every kind here is unchanged by that refactor.
+    //
+    // Phase 15a: CreateEntityKind::kPointLight follows the same Transform +
+    // NameComponent shape as Empty (no ModelComponent -- this engine has no
+    // light-gizmo mesh), plus a freshly addComponent<PointLight>()'d
+    // light.hpp component at its own struct defaults. render()'s own
+    // collectPointLights() call picks it up starting the very next frame --
+    // no further registration needed here, the same "components are opt-in,
+    // nothing else has to know about a new one" property ecs.hpp's own top
+    // comment promises for any new component type.
+    //
+    // Phase 15b: CreateEntityKind::kDirectionalLight follows the identical
+    // Transform + NameComponent (no ModelComponent) shape, plus a freshly
+    // addComponent<DirectionalLight>()'d light.hpp component at its own
+    // struct defaults -- but ALSO, unlike kPointLight, immediately
+    // overwrites activeDirectionalLight_ (below) with this new entity's id.
+    // That one extra assignment IS the entirety of this phase's "which
+    // entity is active" mechanism -- see activeDirectionalLight_'s own
+    // comment below for why "most recently created" is the deliberately
+    // simplest rule that still makes sense with no multi-select UI concept
+    // anywhere else in this engine, and light.hpp's own
+    // resolveActiveDirectionalLight() for where render() reads this member
+    // back out each frame.
+    //
+    // Phase 15c: CreateEntityKind::kCamera follows the identical Transform +
+    // NameComponent (no ModelComponent) shape once more, plus a freshly
+    // addComponent<CameraComponent>()'d camera_component.hpp component at its
+    // own struct defaults. Unlike kDirectionalLight just above, this case
+    // does NOT assign any Application member afterward -- through Phase 18e
+    // there was deliberately no activeCameraEntity_-shaped member anywhere
+    // in this class, because nothing in render() read "which entity is the
+    // active camera" at all yet.
+    //
+    // Phase 18g: still no member assignment here -- resolveActiveCamera()
+    // (camera_component.hpp) resolves this fresh from registry_ every frame
+    // render() runs instead (no "most recently created" bookkeeping needed;
+    // see that function's own header comment for why). This call site is
+    // only reachable at all while the Create menu's own "Camera" item is
+    // enabled, i.e. while zero Camera entities currently exist (editor_ui.cpp's
+    // own Phase 18g renderCreateEntityMenuItems() comment) or via the
+    // ENGINE_DEBUG_CREATE headless hook, which -- like the UI -- is not
+    // itself extra-guarded against creating a second one; the defensive
+    // multiple-Camera-entity handling lives entirely in resolveActiveCamera()
+    // instead (see its own header comment for why: a hand-edited scene JSON
+    // is the one path that can't go through this menu-level restriction at
+    // all).
     void spawnEntityFromCreateMenu(CreateEntityKind kind);
+
+    // Phase 15g: factored out of spawnEntityFromCreateMenu() above -- the
+    // "place a new entity a fixed distance in front of camera_'s current
+    // facing direction, floored above the ground plane; give it a
+    // never-colliding NameComponent via uniqueEntityName(); optionally
+    // attach a ModelComponent loaded from a known asset path" logic every
+    // model-backed Create-menu kind (Cube/Sphere/Plane) already needed is
+    // this ONE shared function now, so a Viewport model-asset drop (this
+    // phase's own spawnEntityFromDroppedModel() below) can reuse the
+    // identical placement/Transform/NameComponent/ModelComponent-building
+    // logic for an ARBITRARY assets/models/ path instead of a second,
+    // easily-drifting copy of it -- matching this phase's own brief
+    // verbatim ("reuse spawnEntityFromCreateMenu()'s existing model-loading
+    // path... don't duplicate its Transform/NameComponent/ModelComponent-
+    // building logic wholesale").
+    //
+    // `loadPath` is nullptr for a model-less entity (Empty/Point Light/
+    // Directional Light/Camera -- every kind spawnEntityFromCreateMenu()
+    // itself still adds its own extra component to AFTER this call
+    // returns), else the already-resolveAssetPath()'d absolute path
+    // resources_.getModel() actually loads from; `storedPath` is always the
+    // reloadable assets/-relative form ModelComponent::path/scene
+    // serialization expect (ecs.hpp's own comment) and is ignored when
+    // loadPath is nullptr. `originDescription` is folded into the one
+    // LOG_INFO() line every caller otherwise had to build separately (e.g.
+    // "via the Scene panel's Create menu", "via a Viewport drag-and-drop of
+    // \"...\""), matching what spawnEntityFromCreateMenu()'s own single log
+    // call already said, unchanged, for every kind it builds.
+    //
+    // Deliberately does NOT wrap its own resources_.getModel() call in a
+    // try/catch -- see spawnEntityFromDroppedModel()'s own comment below for
+    // why that guard belongs at THAT call site instead, not here: this
+    // function is reused by both spawnEntityFromCreateMenu()'s own trusted,
+    // checked-in constants (which must keep propagating a load failure
+    // exactly as they always have) and the arbitrary-path drop case (which
+    // must not), so the choice of whether to guard the call has to live with
+    // each caller, not this shared helper.
+    //
+    // Post-15g bug-review fix: resources_.getModel() (when `loadPath` is
+    // non-null) now runs FIRST, before registry_.create() or any component
+    // is added -- NOT last, the way it read before this fix. A throwing
+    // getModel() call used to happen after this function had already built a
+    // real Transform + NameComponent for a brand-new entity, so
+    // spawnEntityFromDroppedModel()'s own try/catch (which wraps this whole
+    // call, and never gets an EntityId back to clean up) left that half-built
+    // entity permanently stranded in registry_ on a failed load -- reproduced
+    // directly: ENGINE_DEBUG_DROP_MODEL pointed at a real, unloadable file
+    // (a model's own sibling .mtl) created a stray, selectable, Save-Scene-
+    // persisted "ghost" entity with no ModelComponent. Loading first means a
+    // throw here happens before registry_ is touched at all, so a failed
+    // load now leaves registry_ in EXACTLY its pre-call state -- no rollback
+    // logic needed. Every existing (always-succeeding) caller is unaffected:
+    // reordering two calls that can never fail relative to each other has no
+    // observable effect.
+    EntityId spawnPositionedEntity(const std::string& baseName, const std::string* loadPath,
+                                    const std::string& storedPath, const std::string& originDescription);
+
+    // Phase 15g: the Viewport's own "drop a model asset" trigger -- called
+    // both from render()'s new asset-drop handling (once
+    // engine::classifyAssetDropPath(), asset_drop.hpp, says a dropped path is
+    // AssetDropCategory::kModel) and directly from the constructor for
+    // ENGINE_DEBUG_DROP_MODEL (application.cpp), the identical "debug env
+    // var calls the exact same production function a real UI/drop action
+    // calls" precedent spawnEntityFromCreateMenu()/ENGINE_DEBUG_CREATE
+    // already established.
+    //
+    // `assetRelativePath` is the SAME "assets/models/foo.obj"-shaped string
+    // AssetTreeNode::relativePath/ModelComponent::path already use. Reuses
+    // spawnPositionedEntity() above for the actual placement/Transform/
+    // NameComponent/ModelComponent construction -- the identical "in front
+    // of the camera, floored above the ground plane" heuristic every
+    // Create-menu model kind already uses, a deliberate simplification: a
+    // real raycast against the actual rendered scene at the mouse's exact
+    // drop position would need genuine ray/scene intersection this engine
+    // has no machinery for at all today (BoundingSphere-only culling,
+    // frustum.hpp, is a coarse visibility test, not a ray-hit query) -- a
+    // real, separate feature of its own, well beyond this phase's own
+    // "wire up drag-and-drop to what already exists" scope.
+    //
+    // Unlike spawnEntityFromCreateMenu()'s own three model-backed kinds
+    // (which only ever load one of four checked-in, known-good constants --
+    // see spawnPositionedEntity()'s own comment above for why THEY never
+    // guard resources_.getModel()), `assetRelativePath` here names an
+    // arbitrary real file the Asset Browser happened to show under
+    // assets/models/ -- which can include something Assimp cannot import as
+    // a scene root at all (this project's own assets/models/*.mtl files,
+    // listed in the identical tree as their own *.obj) -- so THIS function
+    // does catch resources_.getModel()'s own exception and LOG_WARN instead
+    // of letting it propagate, matching every other "the actual asset came
+    // from outside this file's own fixed constant list" call site's
+    // defensive style (the Inspector's own texture "Browse..." pick and
+    // ENGINE_DEBUG_ASSIGN_TEXTURE, both Phase 15f, application.cpp).
+    void spawnEntityFromDroppedModel(const std::string& assetRelativePath);
+
+    // Phase 15g: the Viewport's own "drop a texture asset onto the currently
+    // selected entity" trigger, and ENGINE_DEBUG_DROP_TEXTURE's identical
+    // production-function counterpart -- the same "one shared function, both
+    // a real UI/drop action and its own debug var call it" shape
+    // spawnEntityFromDroppedModel() above just established, applied to
+    // Phase 15f's own MaterialOverride mechanism instead of entity spawning.
+    // Deliberately NOT a call into the Inspector's own Phase 15f
+    // "Browse..." handling (render()'s textureAssignRequested block) or
+    // ENGINE_DEBUG_ASSIGN_TEXTURE's own constructor-time block -- those stay
+    // their own independent, untouched Phase 15f trigger paths for the
+    // identical MaterialOverride component (material_override.hpp); this
+    // phase's drag-and-drop is a THIRD trigger for it, not a rewrite of the
+    // first two, the same way ENGINE_DEBUG_CREATE is a second trigger for
+    // spawnEntityFromCreateMenu() alongside the real Create menu, not a
+    // replacement for it. `entityLabel` is whatever the caller wants logged
+    // to name the target entity (this entity's own index, for a real drop --
+    // render() has no NameComponent-guaranteed string handy at that call
+    // site -- or the debug var's own input name string).
+    void assignDroppedTextureOverride(EntityId entity, const std::string& entityLabel,
+                                       const std::string& textureAssetPath);
+
+    // Phase 15g: the Viewport's own asset-drop dispatcher -- called from
+    // render() whenever editorUI_.renderDockspaceShell()'s new
+    // `assetDropRequested` out-parameter comes back non-nullopt (a drag from
+    // the Assets panel was released over the Viewport's own ImGui::Image()
+    // this frame -- see editor_ui.hpp's own Phase 15g comment). Classifies
+    // `assetRelativePath` via engine::classifyAssetDropPath() (asset_drop.hpp,
+    // a pure function with no ImGui/registry dependency at all -- see that
+    // header's own comment for why classification lives there, not here or
+    // in editor_ui.cpp) and dispatches:
+    //   - AssetDropCategory::kModel: always calls spawnEntityFromDroppedModel()
+    //     above -- a model drop ALWAYS creates a new entity, regardless of
+    //     whether one happens to already be selected (this phase's own
+    //     brief is explicit: a model drop must never mutate an existing
+    //     entity, only ever create a new one).
+    //   - AssetDropCategory::kTexture: calls assignDroppedTextureOverride()
+    //     above against `selectedEntity_`, but ONLY if something is actually
+    //     selected -- a texture dropped with no selection has nothing to
+    //     assign it to, so this LOG_WARNs and does nothing further, the
+    //     documented, deliberately inert answer to that edge case (not a
+    //     crash, and not some implicit "select whatever's nearest" guess
+    //     this engine has no ray-picking machinery to even attempt).
+    //   - AssetDropCategory::kUnrecognized: LOG_WARNs and does nothing --
+    //     reachable in practice only by dragging a bare category folder
+    //     itself (e.g. "models") rather than a file beneath it, since every
+    //     row Assets panel drag source (renderAssetTreeNode(), editor_ui.cpp)
+    //     only ever carries a real assets/models/ or assets/textures/ path.
+    void handleViewportAssetDrop(const std::string& assetRelativePath);
+
+    // Phase 15e: Save Scene's real implementation -- calls
+    // scene_serialization.hpp's saveScene() against registry_/
+    // kDefaultScenePath/activeDirectionalLight_ and LOG_INFOs the result, so
+    // every real call site (Ctrl+S in run(), the File > Save Scene menu item
+    // in render(), and ENGINE_DEBUG_SAVE_SCENE in the constructor) shares one
+    // real production code path instead of three parallel hand-rolled ones
+    // -- the same "debug env var / UI action both call the exact same
+    // function" precedent spawnEntityFromCreateMenu() above already
+    // establishes for ENGINE_DEBUG_CREATE. Always saves to kDefaultScenePath
+    // -- the same file this process loaded from at startup (unless
+    // ENGINE_LEGACY_SCENE was set, in which case this still writes
+    // kDefaultScenePath, creating it fresh from whatever registry_ holds; see
+    // this method's own application.cpp definition for why that's fine, not
+    // a bug). A "Save As" to a different path is out of this phase's own
+    // scope (see README.md's Phase 15e section) -- this engine has no native
+    // file-dialog library integrated to build one with yet.
+    //
+    // Does NOT catch saveScene()'s own std::runtime_error on a write failure
+    // (e.g. a read-only filesystem) -- left to propagate exactly the way
+    // every other exception in this codebase does when nothing downstream
+    // is equipped to recover from it (this method's own call sites are no
+    // more able to meaningfully handle "the disk write failed" than
+    // spawnEntityFromCreateMenu()'s own unguarded resources_.getModel() call
+    // is able to handle "the model failed to load" -- see that method's own
+    // comment above): this run ends with a clear LOG_ERROR'd reason (from
+    // saveScene() itself) rather than silently reporting success it didn't
+    // actually achieve.
+    void saveCurrentScene();
+
+    // Phase 18i: shared cleanup for "the current scene's entities are about
+    // to be wholesale replaced" -- both newScene() and openScene() below are
+    // exactly that kind of transition, so both call this first. Destroys
+    // every entity registry_ currently has (collected via its own
+    // Transform pool -- see scene_serialization.hpp's own "every entity this
+    // schema can represent has a Transform" comment for why that pool is a
+    // complete enumeration of "every real entity," the identical premise
+    // saveScene() itself already relies on), via the same generic,
+    // Parent-unaware EntityRegistry::destroyEntity() primitive
+    // destroyEntityOrphaningChildren() is itself built on -- no orphan-vs-
+    // cascade decision is needed here the way a single Delete Object has,
+    // since EVERY entity is being destroyed together; there is no "child
+    // left behind" case to decide between when nothing survives at all.
+    //
+    // Also resets every other piece of per-scene ephemeral state a scene
+    // transition invalidates: selectedEntity_ (nothing in the incoming scene
+    // can be what was selected in the old one), activeDirectionalLight_ (its
+    // own stale-id tolerance -- see that member's own header comment -- only
+    // means this ISN'T strictly required for correctness, not that leaving a
+    // stale reference around across a scene change a user can actually see
+    // happen makes sense), and undoStack_ (UndoStack::clear() -- Phase 18h's
+    // own undoStack_ comment already named this exact moment as the right
+    // place to do it: "a future phase that adds a real Scene > Open/Load UI
+    // is the right place to decide whether undo history should survive that
+    // action... clearing it there too" -- this confirms that call).
+    void clearSceneForTransition();
+
+    // Phase 18i: File > New Scene -- starts a genuinely empty scene (no
+    // entities at all, standard "start fresh" semantics, not a reload of the
+    // checked-in demo content) via clearSceneForTransition() above, then
+    // resets currentScenePath_ to kUntitledScenePath (application.cpp) --
+    // this scene has never been saved anywhere yet, so a following plain
+    // Ctrl+S/Save Scene targets that untitled path (creating the file only
+    // once the user actually saves), exactly the way a brand-new document in
+    // most editors behaves.
+    //
+    // No confirmation prompt: this engine has no "unsaved changes" dirty-
+    // tracking anywhere (every phase through 18h's own saveCurrentScene()
+    // comment is explicit that this is out of scope), and inventing one
+    // purely to gate a confirmation dialog here would be real, separate
+    // scope this phase doesn't need -- see this method's own application.cpp
+    // comment for the full reasoning. A plain, immediate action, the same
+    // "simpler choice when either is reasonable" bias this codebase already
+    // shows elsewhere (e.g. physics.hpp's own RigidBody mass-field comment).
+    void newScene();
+
+    // Phase 18i: File > Save As... -- `sanitizedName` is assumed to already
+    // be sanitizeSceneName()'s own output (scene_file_ops.hpp): its one real
+    // caller (render()'s own Save As popup handling) only ever calls this
+    // once the popup's own live preview has confirmed the current text field
+    // sanitizes to a real name (the popup's Save button is disabled
+    // otherwise), and ENGINE_DEBUG_SAVE_SCENE_AS's own constructor-time call
+    // sanitizes its env var value the identical way before calling this, so
+    // this method itself does no further validation. Builds the real
+    // assets/scenes/<sanitizedName>.json path (sceneRelativePathForName()),
+    // calls the exact same saveScene() (scene_serialization.hpp)
+    // saveCurrentScene() above already does, then updates currentScenePath_
+    // to the new path -- a following plain Save Scene targets THIS file from
+    // now on, not kDefaultScenePath/whatever currentScenePath_ held before.
+    void saveSceneAs(const std::string& sanitizedName);
+
+    // Phase 18i: File > Open Scene... -- `sceneName` is one of the base
+    // names listSceneFileNames() (scene_file_ops.hpp) actually found under
+    // assets/scenes/: its one real caller (render()'s own Open Scene popup)
+    // only ever passes a name that popup itself just listed, and
+    // ENGINE_DEBUG_OPEN_SCENE mirrors it for headless verification.
+    //
+    // Pre-validates the target file by calling parseSceneRecords() BEFORE
+    // touching the live scene at all -- see this method's own application.cpp
+    // comment for exactly why a corrupt/malformed scene file must never wipe
+    // the CURRENTLY loaded scene out from under the user on its way to
+    // failing (this engine's loadScene() already throws on bad input, the
+    // same "propagate a specific, LOG_ERROR'd reason" contract this
+    // constructor's own startup loadScene() call already relies on -- see
+    // that call site's own comment -- but a bad file picked from an
+    // in-editor popup, unlike a bad file at STARTUP, must degrade to "stay
+    // on the scene already loaded," never take the whole editor down with
+    // it). Once that pre-check succeeds, performs the identical
+    // clearSceneForTransition() + loadScene() + currentScenePath_ update
+    // newScene()/saveSceneAs() themselves already establish.
+    //
+    // A file that passes that pre-check can still fail later, inside the
+    // real loadScene() call, if some record's modelPath/texture path names
+    // an asset that doesn't exist or won't load -- parseSceneRecords() only
+    // validates JSON/schema shape, not that every referenced asset is
+    // actually reachable. loadScene()'s own per-record loop has no
+    // rollback of its own (scene_loader.cpp: restoreEntityFromRecord()
+    // creates each record's entity and adds its non-model components
+    // BEFORE ever touching that record's model path), so a later record's
+    // asset failure would otherwise leave every earlier record's entity
+    // already live in registry_ when the exception reaches this method.
+    // openScene()'s own catch block calls clearSceneForTransition() AGAIN
+    // in that case, specifically to destroy that partial set of entities,
+    // so this failure mode still ends in a genuinely empty registry_ --
+    // exactly what a real newScene() produces, not a half-loaded scene
+    // silently passed off as usable -- and currentScenePath_ is left
+    // unchanged (still whatever it was before this call), never repointed
+    // at a file whose load did not actually succeed. What IS a documented,
+    // accepted gap: the scene that was open before this call is still
+    // gone -- clearSceneForTransition() already cleared it before
+    // loadScene() was even attempted, and this method makes no attempt to
+    // restore it, the identical "no recovery of the previous state" risk
+    // profile loadScene() already has at STARTUP for a bad
+    // assets/scenes/default.json, just reached from a live in-editor
+    // action instead of process launch.
+    void openScene(const std::string& sceneName);
+
+    // Phase 18h: the real "Delete Object" implementation -- the one place
+    // this class actually destroys an entity via
+    // destroyEntityOrphaningChildren() (transform_hierarchy.hpp) now,
+    // replacing editor_ui.cpp's own pre-18h direct call (see that file's
+    // updated renderInspectorPanel() comment). Captures a full
+    // SceneEntityRecord of `id` (captureEntityRecord(),
+    // scene_serialization.hpp) and pushes a kDeleteEntity Command onto
+    // undoStack_ BEFORE destroying anything -- undo() later restores this
+    // exact snapshot via restoreEntityFromRecord() (see that pair's own
+    // header comments for the full reuse design, undo_stack.hpp). Clears
+    // selectedEntity_ if it named `id`, the identical "clear on delete"
+    // behavior the Inspector's own click handler always had. Shared by
+    // every real deletion path this engine has: the Inspector's own
+    // "Delete Object" button (via render()'s own deleteEntityRequested
+    // handling) and ENGINE_DEBUG_DELETE (constructor) both call this now,
+    // instead of each hand-rolling its own destroyEntityOrphaningChildren()
+    // call -- the same "debug env var / real UI action share one production
+    // code path" precedent spawnEntityFromCreateMenu() already establishes.
+    void deleteEntity(EntityId id);
+
+    // Phase 18h: undo()/redo() -- pop the most recently done/undone Command
+    // off undoStack_ (see that class's own undo_stack.hpp comment) and
+    // apply its inverse/forward effect to registry_. Both are safe to call
+    // whenever nothing is left to undo/redo (UndoStack::undo()/redo()
+    // themselves are no-ops in that case) -- every real call site (the
+    // toolbar's own undo/redo buttons, Ctrl+Z/Ctrl+Y-or-Ctrl+Shift+Z in
+    // run(), ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO in update()) calls these
+    // unconditionally rather than checking canUndo()/canRedo() itself
+    // first.
+    void undo();
+    void redo();
+
+    // Phase 18h: undo()/redo()'s own small per-kind helpers -- both undo()
+    // (applying a Command's INVERSE effect) and redo() (applying its
+    // FORWARD effect) dispatch on Command::kind to one of these three, just
+    // choosing `before` vs. `after` (kTransformEdit) or recreate-vs-destroy
+    // (kCreateEntity/kDeleteEntity) in opposite directions -- see
+    // application.cpp's own definitions for the exact dispatch table.
+    //
+    // setTransformFromSnapshot(): writes `snapshot` straight into `id`'s own
+    // live Transform component -- a no-op (not an error) if `id` no longer
+    // has one, the same defensive "a stale id is safe, never UB" tolerance
+    // ecs.hpp's own EntityId comment already documents for every other
+    // getComponent() call site in this codebase.
+    void setTransformFromSnapshot(EntityId id, const TransformSnapshot& snapshot);
+
+    // destroyCommandEntity(): destroyEntityOrphaningChildren() on
+    // cmd.entity, clearing selectedEntity_ if it named that same id -- used
+    // for BOTH undoing a creation and redoing a deletion (the two cases
+    // where a Command's own live entity needs to stop existing).
+    void destroyCommandEntity(Command& cmd);
+
+    // recreateCommandEntity(): restoreEntityFromRecord() from cmd.record,
+    // then resolves that record's own optional parentName/
+    // directionalLightActive fields against the CURRENT live registry_
+    // (findEntityByName() -- see that free function's own comment) since
+    // restoreEntityFromRecord() itself deliberately does neither (see its
+    // own scene_serialization.hpp comment for why), and finally rewrites
+    // cmd.entity to the freshly created id -- used for BOTH undoing a
+    // deletion and redoing a creation (the two cases where a Command's own
+    // entity needs to come back into existence, always as a brand-new id --
+    // see undo_stack.hpp's own header comment for why). Logs and leaves
+    // cmd.entity unchanged (pointing at whatever it held before -- a
+    // now-permanently-stale id) if restoreEntityFromRecord() itself throws
+    // (a missing/unloadable model or texture asset -- shouldn't happen for
+    // a record captured from a real, previously-successfully-loaded live
+    // entity, but not assumed impossible either); no further undo/redo
+    // against this one Command can succeed after that, the same "don't
+    // crash the whole engine over one bad asset reference" instinct
+    // spawnEntityFromDroppedModel()'s own try/catch already establishes.
+    void recreateCommandEntity(Command& cmd);
 
     // Phase 9: one sphere in the PBR test-grid -- its own placement
     // (Transform) plus its own PBRMaterial (metallic/roughness/albedo all
@@ -781,6 +1360,19 @@ private:
     std::shared_ptr<Shader> gbufferShader_;
     std::shared_ptr<Shader> ssaoShader_;
     std::shared_ptr<Shader> ssaoBlurShader_;
+    // Phase 18d: the selection mask pass's own program (assets/shaders/
+    // selection_mask.vert/.frag) -- draws ONLY the currently-selected
+    // entity's mesh into selectionMaskFramebuffer_ (below), depth-tested
+    // against SSAO's own ssaoGBuffer_ depth texture so a selected fragment
+    // hidden behind some OTHER object is discarded rather than marked. See
+    // renderSelectionMask()'s own comment for the full pass.
+    std::shared_ptr<Shader> selectionMaskShader_;
+    // Phase 18e: the translate gizmo's own program (assets/shaders/
+    // gizmo.vert/.frag) -- a plain uModel/uView/uProjection vertex stage
+    // (mirroring selection_mask.vert's own minimal shape) paired with a
+    // flat, unlit uColor fragment stage (see gizmo.frag's own comment on why
+    // this manipulation-UI overlay is deliberately not scene-lit).
+    std::shared_ptr<Shader> gizmoShader_;
     // Phase 9: the PBR pass's own program (assets/shaders/pbr.vert/
     // pbr.frag), routed through resources_ for the same reason as every
     // other shader above. Must be constructed before sphereInstances_ below
@@ -908,6 +1500,22 @@ private:
     Framebuffer ssaoGBuffer_;
     Framebuffer ssaoRaw_;
     Framebuffer ssaoBlurred_;
+    // Phase 18d: the selection mask pass's own render target -- full
+    // viewport resolution (unlike ssaoGBuffer_/ssaoRaw_/ssaoBlurred_ above,
+    // which are all deliberately downsampled), single-sample, no special
+    // flags: an ordinary Framebuffer, the same "no special flags needed"
+    // shape brightFramebuffer_/pingpongFramebuffer0_/1_ already use, reused
+    // here rather than a new bespoke single-channel render-target type --
+    // only its .r channel is ever read (postprocess.frag's uSelectionMask),
+    // the same "one unused channel is an accepted, harmless cost" tradeoff
+    // ssaoRaw_/ssaoBlurred_ already make for the identical reason. Full
+    // resolution (not downsampled, unlike SSAO's own targets) because this
+    // outline's own edge-detection band (postprocess.frag's
+    // kSelectionOutlineRadius) needs to trace the selected entity's actual
+    // silhouette at screen resolution, not a blurred/blocky approximation
+    // of it -- SSAO's occlusion estimate can afford to be soft in a way a
+    // crisp selection outline can't.
+    Framebuffer selectionMaskFramebuffer_;
     // Phase 14c: the final tonemap/bloom-composite postprocess pass's own
     // render target -- what used to be a direct draw onto the default
     // framebuffer (GL_FRAMEBUFFER 0, at the window's real size) now lands
@@ -954,6 +1562,28 @@ private:
     // mesh.hpp's makeFullscreenQuad()) -- built once here, like groundMesh_,
     // rather than re-built every frame.
     Mesh postProcessQuad_;
+    // Phase 18e: the translate gizmo's shared arrow mesh (mesh.hpp's
+    // makeGizmoArrow()) -- one instance, drawn three times per frame (once
+    // per axis) with a different model matrix/color each time, the same
+    // "one shared Mesh, many instances" shape sphereMesh_/sphereInstances_
+    // just below already establish.
+    Mesh gizmoArrowMesh_;
+    // Phase 18j: the rotate gizmo's shared ring mesh (mesh.hpp's
+    // makeGizmoRing()) -- one instance, drawn three times per frame (once
+    // per axis), the identical "one shared Mesh, many instances" shape
+    // gizmoArrowMesh_ above already establishes, just for the rotate tool
+    // instead of translate. Only ever drawn instead of gizmoArrowMesh_, never
+    // alongside it -- see renderGizmo()'s own updated comment for how
+    // gizmoMode_ picks between the two.
+    Mesh gizmoRingMesh_;
+    // Phase 18k: the scale gizmo's shared cube-tipped handle mesh (mesh.hpp's
+    // makeGizmoScaleHandle()) -- one instance, drawn three times per frame
+    // (once per axis), the identical "one shared Mesh, many instances" shape
+    // gizmoArrowMesh_/gizmoRingMesh_ above already establish, just for the
+    // scale tool. Only ever drawn instead of the other two, never alongside
+    // either -- see renderGizmo()'s own updated comment for how gizmoMode_
+    // picks between all three.
+    Mesh gizmoScaleMesh_;
     // Phase 9: the PBR sphere test-grid. One shared Mesh (every sphere is
     // geometrically identical) plus one SphereInstance (transform +
     // PBRMaterial) per sphere -- see application.cpp's kSphere* constants
@@ -970,17 +1600,18 @@ private:
     EntityRegistry registry_;
     // Phase 14d: see the public selectedEntity() getter above for the full
     // ownership rationale. Each render() call reads this value FIRST (to
-    // build this frame's selection outline, from whatever was clicked as of
-    // last frame) and only afterward calls editorUI_.renderDockspaceShell()
-    // (which may overwrite it in place, if this frame's own Scene Hierarchy
-    // click changed it) -- so a newly-clicked selection's outline first
-    // appears the FOLLOWING frame, not the same one, the same one-frame
-    // latency viewportWidth_/viewportHeight_ already have and for the
-    // identical underlying reason (see editor_ui.hpp's own comment on those
-    // two): the outline's 3D projection math has to run before the one
-    // ImGui frame that could change the selection even exists yet, since
-    // Dear ImGui's immediate-mode API has no way to submit the Scene
-    // panel's widgets before the 3D pass whose output they might affect.
+    // build this frame's selection mask -- Phase 18d's renderSelectionMask()
+    // -- from whatever was clicked as of last frame) and only afterward
+    // calls editorUI_.renderDockspaceShell() (which may overwrite it in
+    // place, if this frame's own Scene Hierarchy click changed it) -- so a
+    // newly-clicked selection's outline first appears the FOLLOWING frame,
+    // not the same one, the same one-frame latency viewportWidth_/
+    // viewportHeight_ already have and for the identical underlying reason
+    // (see editor_ui.hpp's own comment on those two): the selection mask
+    // pass has to run before the one ImGui frame that could change the
+    // selection even exists yet, since Dear ImGui's immediate-mode API has
+    // no way to submit the Scene panel's widgets before the 3D pass whose
+    // output they might affect.
     std::optional<EntityId> selectedEntity_;
     // Phase 14e: set from ENGINE_DEBUG_FORCE_STATIC/ENGINE_DEBUG_FORCE_DYNAMIC
     // (see application.cpp's own comment on those two env vars and
@@ -993,6 +1624,171 @@ private:
     // selecting that entity in the Inspector, though a verification run can
     // set ENGINE_DEBUG_SELECT to the same name to see both at once.
     std::optional<EntityId> physicsVerifyEntity_;
+    // Phase 18e: set from ENGINE_DEBUG_GIZMO_DRAG (see that env var's own
+    // application.cpp comment) -- std::nullopt (the default) unless it
+    // resolved to a real entity at startup. update() drives a scripted
+    // synthetic gizmo drag against this entity over a small fixed frame
+    // window (kDebugGizmoDragStartFrame et al., application.cpp) when set,
+    // and logs its Transform::position() periodically while doing so --
+    // this is the one member that both SELECTS the debug feature (non-
+    // nullopt means "run the script") and NAMES its target, unlike
+    // physicsVerifyEntity_ above (which only ever logs; ENGINE_DEBUG_FORCE_
+    // STATIC/_DYNAMIC are what actually act).
+    std::optional<EntityId> debugGizmoDragEntity_;
+    // Phase 18e: `debugGizmoDragEntity_`'s own Transform::position() as of
+    // the scripted drag's grab frame (kDebugGizmoDragStartFrame,
+    // application.cpp) -- recorded once so every later scripted step's
+    // target world point is computed relative to a FIXED anchor, not the
+    // entity's own live position, which the drag itself moves frame to
+    // frame (the identical reason GizmoDragState::startEntityPosition,
+    // gizmo.hpp, is captured once at grab time rather than re-read every
+    // frame). Meaningless (left at its default) whenever
+    // debugGizmoDragEntity_ is std::nullopt.
+    glm::vec3 debugGizmoDragStartPosition_{0.0f};
+
+    // Phase 18j introduced this as which gizmo tool (translate/rotate) is
+    // currently active, set exactly once in the constructor from
+    // debugGizmoModeFromEnv() and never written again for the rest of that
+    // run -- a debug/test-only selection, not yet a live user-facing toggle
+    // (see GizmoMode's own gizmo.hpp header comment for the full history).
+    // Phase 18k makes this a REAL, runtime-mutable value: `setGizmoMode()`
+    // above is now the ONLY place this is ever assigned (both the
+    // constructor's own ENGINE_DEBUG_GIZMO_MODE application and run()'s new
+    // live W/E/R keyboard shortcut go through it, never a direct assignment
+    // here) -- see that method's own header comment for why a single call
+    // site matters now that this genuinely changes mid-run for the first
+    // time (the stale-drag-state landmine Phase 18j's own review left open
+    // for this phase to close).
+    GizmoMode gizmoMode_ = GizmoMode::kTranslate;
+    // Phase 18j: set from ENGINE_DEBUG_GIZMO_ROTATE_DRAG (see that env
+    // var's own application.cpp comment) -- std::nullopt (the default)
+    // unless it resolved to a real entity at startup. update() drives a
+    // scripted synthetic rotate-gizmo drag against this entity over a small
+    // fixed frame window (kDebugGizmoRotateDragStartFrame et al.,
+    // application.cpp) when set, and logs its Transform::rotation() (as
+    // Euler degrees, human-checkable) periodically while doing so -- the
+    // identical "one member both SELECTS the debug feature and NAMES its
+    // target" shape debugGizmoDragEntity_ above already establishes for the
+    // translate gizmo's own equivalent hook. Only actually does anything
+    // when gizmoMode_ == kRotate (a verification run also needs
+    // ENGINE_DEBUG_GIZMO_MODE=rotate AND ENGINE_DEBUG_SELECT set to the same
+    // entity, exactly the "also needs ENGINE_DEBUG_SELECT" caveat
+    // debugGizmoDragEntity_'s own comment already documents for the
+    // translate case).
+    std::optional<EntityId> debugGizmoRotateDragEntity_;
+
+    // Phase 18k: set from ENGINE_DEBUG_GIZMO_SCALE_DRAG (see that env var's
+    // own application.cpp comment) -- the identical "one member both SELECTS
+    // the debug feature and NAMES its target" shape debugGizmoDragEntity_/
+    // debugGizmoRotateDragEntity_ above already establish, just for the
+    // scale gizmo. Only actually does anything when gizmoMode_ == kScale (a
+    // verification run also needs ENGINE_DEBUG_GIZMO_MODE=scale AND
+    // ENGINE_DEBUG_SELECT set to the same entity, the identical "also needs
+    // ENGINE_DEBUG_SELECT" caveat both of those two comments already
+    // document).
+    std::optional<EntityId> debugGizmoScaleDragEntity_;
+    // `debugGizmoScaleDragEntity_`'s own Transform::scale() as of the
+    // scripted drag's grab frame (kDebugGizmoScaleDragStartFrame,
+    // application.cpp) -- recorded once so every later scripted step's
+    // target world point (along the fixed drag axis, at
+    // kDebugGizmoScaleDragTargetT[step] world units from the gizmo's own
+    // origin) is unambiguous regardless of the entity's own live scale,
+    // which the drag itself changes frame to frame. Unlike
+    // debugGizmoDragStartPosition_ above, this is used only for LOGGING
+    // clarity here (the actual grab-time anchor lives inside
+    // GizmoScaleDragState::startEntityScale, gizmo.hpp, captured by
+    // EditorUI::updateGizmoScale() itself) -- kept here purely so this
+    // block's own log lines can print "start -> current" without a second
+    // registry lookup. Meaningless (left at its default) whenever
+    // debugGizmoScaleDragEntity_ is std::nullopt.
+    glm::vec3 debugGizmoScaleDragStartScale_{1.0f};
+
+    // Phase 18k: set from ENGINE_DEBUG_GIZMO_MODE_SWITCH=<w|e|r>[,<w|e|r>...]
+    // (see that env var's own application.cpp comment) -- empty (the
+    // default) unless it resolved to one or more real target GizmoModes at
+    // startup. update() fires one scripted `setGizmoMode()` call per entry,
+    // each at its own fixed frame (kDebugGizmoModeSwitchFrame +
+    // kDebugGizmoModeSwitchFrameSpacing * index, application.cpp), the
+    // headless stand-in for a real W/E/R tap under Xvfb's own "no physical
+    // keyboard" constraint (the identical substitution shape
+    // ENGINE_DEBUG_SIMULATE_ESCAPE's own `forceEscapeDown` already
+    // establishes for Escape, adapted here to call `setGizmoMode()` directly
+    // rather than feeding a synthetic key STATE through
+    // window_.isKeyPressed()/InputActionMap -- W/E/R are read directly
+    // against `window_`, not through InputActionMap, so `setGizmoMode()`
+    // itself -- the one real production function a genuine keypress's own
+    // edge-triggered check in run() calls -- is the correct, minimal
+    // substitution point, not a second hand-rolled bypass of it). A
+    // `std::vector`, not a single `std::optional<GizmoMode>` (this member's
+    // own pre-review shape) -- the identical "one env var, several scripted
+    // steps in one run" upgrade `debugOpenSceneNames_` below already
+    // establishes for ENGINE_DEBUG_OPEN_SCENE, reused here for the same
+    // reason: proving `resetAllGizmoDragStates()` actually discriminates a
+    // regression requires switching AWAY from a tool mid-drag and then BACK
+    // to it while the mouse is still logically down, which one single
+    // scripted switch per run can never exercise (see
+    // debugGizmoModeSwitchTargetsFromEnv()'s own comment for the full
+    // "why a single switch alone couldn't catch this fix breaking" story).
+    std::vector<GizmoMode> debugGizmoModeSwitchTargets_;
+
+    // Phase 18h: ENGINE_DEBUG_UNDO=<count>/ENGINE_DEBUG_REDO=<count> -- see
+    // those two env vars' own application.cpp comments. 0 (the default)
+    // means "unset, do nothing"; update() consumes whichever is nonzero at
+    // its own fixed scripted frame (kDebugUndoFrame/kDebugRedoFrame,
+    // application.cpp), calling undo()/redo() that many times in a row and
+    // logging registry_'s resulting state after each call.
+    int debugUndoCount_ = 0;
+    int debugRedoCount_ = 0;
+    // Phase 18i: ENGINE_DEBUG_NEW_SCENE/ENGINE_DEBUG_SAVE_SCENE_AS/
+    // ENGINE_DEBUG_OPEN_SCENE's own parsed state -- see those three env
+    // vars' own application.cpp comments (debugNewSceneFromEnv()/
+    // debugSaveSceneAsFromEnv()/debugOpenSceneNamesFromEnv()) for the full
+    // design. update() consumes these at fixed scripted frames
+    // (kDebugSaveSceneAsFrame/kDebugNewSceneFrame/kDebugOpenSceneBaseFrame,
+    // application.cpp), the identical "parsed once at startup, consumed
+    // later at a fixed frame" shape debugUndoCount_/debugRedoCount_
+    // themselves already establish just above. debugSaveSceneAsName_ is
+    // already sanitizeSceneName()'d by the constructor (empty means unset,
+    // matching every other empty-string-means-absent ENGINE_DEBUG_* string
+    // var in this class); debugOpenSceneNames_ is consumed one entry per
+    // scripted frame, `kDebugOpenSceneFrameSpacing` frames apart, so a
+    // single run can chain more than one Open Scene action in sequence (see
+    // debugOpenSceneNamesFromEnv()'s own comment for why that needs a LIST,
+    // unlike every other single-value debug var here).
+    bool debugNewSceneRequested_ = false;
+    std::string debugSaveSceneAsName_;
+    std::vector<std::string> debugOpenSceneNames_;
+    // This engine's one actual rendered view -- still exactly what it was
+    // from Phase 3 onward: a free-fly camera driven each frame by real
+    // WASD/mouse input (or the scripted ENGINE_CAMERA_DEMO path), entirely
+    // independent of registry_. Phase 15c adds a CameraComponent ECS
+    // component (camera_component.hpp) and lets a user Create camera
+    // entities from the Scene panel, but deliberately does NOT touch this
+    // member or its own update path (see camera_.processMovement()/
+    // processMouseInput() calls in update()) -- there was no
+    // "activeCameraEntity_" member anywhere in this class through Phase
+    // 18e, unlike activeDirectionalLight_ below, because nothing read one.
+    //
+    // Phase 18g: still true for EDIT mode -- camera_ is what Edit mode
+    // renders from, unconditionally, whether or not a Camera entity exists,
+    // exactly as every phase before this one. Play mode is now the one
+    // exception: render() resolves which (if any) Camera entity is active
+    // FRESH every frame (camera_component.hpp's resolveActiveCamera(), no
+    // persisted "which one" member needed the way activeDirectionalLight_
+    // needs one -- see that function's own header comment for why a Camera
+    // entity's resolution rule doesn't need to remember anything ACROSS
+    // frames the way "most recently created" does) and, only while
+    // `physicsRunning_` is true AND one exists, builds a temporary Camera
+    // value from that entity's own resolved world pose + CameraComponent
+    // optics and renders from THAT instead of camera_ for that one frame --
+    // see render()'s own Phase 18g comment for the full mechanism. camera_
+    // itself is still updated every frame regardless (update() never gates
+    // camera_.processMovement()/processMouseInput() on this) -- only which
+    // Camera value render() actually reads FROM for that frame's view/
+    // projection matrices changes; free-fly input keeps accumulating into
+    // camera_ even while Play mode is rendering from a scene Camera entity
+    // instead, so Edit mode picks up exactly where free-fly flight left off
+    // the instant Play mode ends.
     Camera camera_;
     // Phase 8d: the data-driven key-binding table pollInputState() now
     // consults each frame (see input.hpp/input_action_map.hpp) -- owned
@@ -1081,6 +1877,314 @@ private:
     // SSR's own exact contribution -- same getenv-gated pattern as
     // ssaoDisabled_/ENGINE_SSAO_DISABLE. Default false (SSR on).
     bool ssrDisabled_ = false;
+
+    // Phase 15a: this Application's own edge-tracking state for
+    // collectPointLights()'s (light.hpp) overflow warning -- true once
+    // render() has seen collectPointLights() report an overflow for
+    // registry_ and not yet seen it clear. collectPointLights() itself is
+    // deliberately pure (see light.cpp's own header comment) and returns
+    // only a per-call bool, no memory of prior calls; it used to keep that
+    // memory in a function-local static, but a static is shared across
+    // every registry any caller might ever pass in, not scoped to this one
+    // Application's own registry_, so it lives here instead -- one bool per
+    // Application instance, which is exactly the "one registry_ for this
+    // instance's whole lifetime" granularity the warning needs. render()
+    // compares each frame's collectPointLights() return against this flag
+    // to log on the false->true edge only (warn once entering overflow,
+    // silent while it persists, warn again if it clears and re-triggers --
+    // see render()'s own call site for the exact comparison), then updates
+    // it to that frame's result. Default false (not overflowing), matching
+    // every other bool member in this class defaulting to "off/normal."
+    bool pointLightOverflowActive_ = false;
+
+    // Phase 15b: which ECS entity (if any) is the "active" directional
+    // light -- the one whose light.hpp DirectionalLight component's own
+    // direction/color actually feed the scene's single uLightDirection/
+    // uLightColor uniform pair and cascaded-shadow frustum this frame,
+    // INSTEAD OF kLightDirection/kLightColor (application.cpp), rather than
+    // alongside them the way ECS point lights add to kPointLights. std::
+    // nullopt (the default, matching selectedEntity_/physicsVerifyEntity_
+    // above) means no entity is active -- which is also the state of every
+    // scene before this phase and this engine's own default scene today, so
+    // resolveActiveDirectionalLight() (light.hpp) falls back to
+    // kLightDirection/kLightColor unchanged and every prior phase's own
+    // screenshot-verified lighting/shadow baseline holds exactly (see
+    // README.md's own Phase 15b Verify section).
+    //
+    // Set in exactly one place: spawnEntityFromCreateMenu()'s own Phase 15b
+    // case, to the entity it just created, unconditionally overwriting
+    // whatever this held before. That is this phase's whole "which entity is
+    // active" rule -- "the most recently Create'd Directional Light entity"
+    // -- deliberately the simplest one that still makes sense: this engine
+    // has no multi-select UI concept anywhere yet (the Scene Hierarchy is
+    // single-click-to-select, see scene_hierarchy.hpp), so there is no
+    // existing notion of "the user chose entity X out of several" for a
+    // richer rule (e.g. an explicit per-entity "Set Active" button) to build
+    // on -- adding one just for this would be exactly the kind of
+    // speculative UI surface this codebase's own established style avoids
+    // (see e.g. ecs.hpp's NameComponent comment for the same instinct
+    // applied elsewhere). A later phase that adds real multi-entity
+    // selection is the right place to revisit this into an explicit choice
+    // instead of an implicit "last created wins" one.
+    //
+    // Deliberately NEVER reset back to std::nullopt when the entity it names
+    // is deleted (there is no delete-time hook that could do so today -- the
+    // Inspector's "Delete Object" button, editor_ui.cpp, only clears
+    // selectedEntity_, which it already owns by reference) -- this is safe
+    // by construction, not an oversight: resolveActiveDirectionalLight()
+    // itself tolerates a stale id exactly the way registry_.getComponent<T>()
+    // already does everywhere else in this codebase (see ecs.hpp's own
+    // EntityId comment -- a destroyed entity's id just returns nullptr from
+    // getComponent() forever after, never UB), so a stale
+    // activeDirectionalLight_ silently and correctly falls back to
+    // kLightDirection/kLightColor the very next frame, with no explicit
+    // cleanup required.
+    std::optional<EntityId> activeDirectionalLight_;
+
+    // Phase 18i: the scene file this Application currently considers "the
+    // one Save Scene/Ctrl+S saves to" -- replacing the pre-Phase-18i
+    // assumption (kDefaultScenePath, application.cpp) that this was always
+    // one single, fixed file. Already-resolved (via resolveAssetPath(), the
+    // same form kDefaultScenePath itself is stored in, and the exact form
+    // saveScene()/loadScene() both take as their own `path` parameter --
+    // see scene_serialization.hpp) -- never the shorter "assets/scenes/
+    // foo.json" relative form sceneRelativePathForName() (scene_file_ops.hpp)
+    // produces, so saveCurrentScene() can pass this straight through with no
+    // further resolution at its own call site.
+    //
+    // Starts as kDefaultScenePath in the constructor -- byte-identical to
+    // this engine's entire pre-Phase-18i behavior, whether or not
+    // ENGINE_LEGACY_SCENE was set (see saveCurrentScene()'s own updated
+    // comment for why the legacy-scene path also targets kDefaultScenePath
+    // here, exactly as it silently already did before this phase). Changed
+    // in exactly three places, all of them real scene TRANSITIONS: newScene()
+    // (-> kUntitledScenePath), saveSceneAs() (-> the freshly chosen path),
+    // and openScene() (-> the path just loaded from). A plain Save Scene
+    // itself never touches this member -- saving to "the file already open"
+    // does not change which file that is.
+    std::string currentScenePath_;
+
+    // Phase 18h: this Application's own command-stack undo/redo history --
+    // see undo_stack.hpp's own header comment for the full design. Every
+    // real mutation this class pushes onto it goes through deleteEntity()/
+    // spawnEntityFromCreateMenu()'s own trailing push, or render()'s own
+    // transformEditCommitted handling -- see each's own comment.
+    //
+    // Phase 18i update: this member's own pre-18i comment named "a future
+    // phase that adds a real Scene > Open/Load UI" as the right place to
+    // decide whether undo history should survive a scene transition, and
+    // leaned toward clearing it there -- Phase 18i IS that phase, and
+    // confirms exactly that call: clearSceneForTransition() (this class,
+    // above) calls undoStack_.clear() as part of both newScene()'s and
+    // openScene()'s own cleanup, for precisely the reason already
+    // anticipated here -- an undo step referencing a SceneEntityRecord/
+    // EntityId from a scene that's no longer even loaded is meaningless at
+    // best, actively confusing at worst. UndoStack::clear() itself was added
+    // by Phase 18h specifically so this later call would have something
+    // ready to call (see undo_stack.hpp's own clear() comment).
+    UndoStack undoStack_;
+
+    // Phase 15e: edge-triggered state for the Ctrl+S "Save Scene" keyboard
+    // shortcut -- true whenever run()'s own most recent poll found BOTH a
+    // Ctrl key and S held down together (and ImGui didn't want the
+    // keyboard that poll -- see run()'s own post-15e-review comment on why
+    // this shortcut is gated on !ImGui::GetIO().WantCaptureKeyboard, unlike
+    // escapePressed/InputState's own fields, a separate pre-existing gap
+    // this member's own gating doesn't attempt to close). See run()'s own
+    // definition for why this check is a small, self-contained direct
+    // window_.isKeyPressed() read rather than routed through
+    // inputActionMap_/InputState the way every other keybinding in this
+    // class is (input_action_map.hpp's own bindings are an OR of alternate
+    // single keys for ONE action, not an AND of simultaneous keys -- a
+    // chord needs the latter, a shape nothing else in this engine needs
+    // yet). Compared against each new poll's own result so
+    // saveCurrentScene() fires exactly once per physical Ctrl+S press, not
+    // every frame the chord happens to still be held -- the identical
+    // edge-triggering reason InputActionMap::justPressed()/
+    // toggleDebugUIPressed already need for InputAction::ToggleDebugUI (see
+    // input.hpp's own comment), just implemented directly here instead of
+    // through that class.
+    bool ctrlSWasDown_ = false;
+
+    // Phase 18h: the identical edge-triggered-chord pattern ctrlSWasDown_
+    // above already establishes, now for Ctrl+Z (undo) and Ctrl+Y-or-
+    // Ctrl+Shift+Z (redo -- both supported, see run()'s own comment on why
+    // "trivial to support both" won out over picking just one). Two
+    // separate bools (not one shared "was any undo/redo chord down") since
+    // the two chords are checked and edge-detected independently -- a user
+    // releasing Ctrl+Z and, in the same physical gesture, pressing
+    // Ctrl+Shift+Z must register as a FRESH redo press, not be suppressed
+    // by undo's own edge-tracking.
+    bool ctrlZWasDown_ = false;
+    bool redoChordWasDown_ = false;
+
+    // Phase 18k: the identical edge-triggered-chord pattern ctrlSWasDown_/
+    // ctrlZWasDown_ above already establish, now for the real move/rotate/
+    // scale tool switcher's own W (translate) / E (rotate) / R (scale)
+    // single-key shortcuts (Unity's own convention -- deliberately NOT
+    // Blender's G/R/S, which would collide with ordinary typing into an
+    // Inspector text field the moment one exists; see run()'s own comment
+    // for the full reasoning). Single keys, not chords -- but still gated
+    // the identical !ImGui::GetIO().WantCaptureKeyboard way (don't fire
+    // while a field has keyboard focus) PLUS a new !cameraCaptured_ gate
+    // this project's other two shortcuts don't need: W and E specifically
+    // collide with InputActionMap's own MoveForward/MoveUp camera bindings
+    // (input_action_map.cpp), so this tool switcher only ever fires while
+    // the free-fly camera is NOT capturing WASD, which not coincidentally
+    // is also the only time a gizmo can be interacted with at all. Three
+    // separate bools (not one shared "was any tool-switch key down"), the
+    // identical reason ctrlZWasDown_/redoChordWasDown_ are two separate
+    // bools rather than one: releasing W and, in the same gesture, pressing
+    // E must register as a fresh switch to rotate, not be suppressed by
+    // translate's own edge-tracking.
+    bool wKeyWasDown_ = false;
+    bool eKeyWasDown_ = false;
+    bool rKeyWasDown_ = false;
+
+    // Phase 16: true exactly while the free-fly camera is "captured" --
+    // the OS cursor hidden, WASD/mouse-look actually feeding camera_ (see
+    // update()'s own Phase 16 comment). False (the default) means camera
+    // input is INACTIVE, fixing the real bug this whole phase exists for --
+    // camera_.processMovement()/processMouseInput() used to run
+    // unconditionally every frame, moving the camera from a stray click or
+    // mouse pass-over the user never intended as camera input at all. Never
+    // written directly -- every real transition (a Viewport double-click,
+    // Escape's own precedence check, ENGINE_DEBUG_FORCE_CAMERA_CAPTURE) goes
+    // through setCameraCaptured() above, the one place that also applies
+    // window_.setCursorCaptured()/camera_.resetMouseTracking() so this flag
+    // can never drift out of sync with the OS cursor's own actual
+    // hidden/visible state.
+    bool cameraCaptured_ = false;
+
+    // Phase 16: this frame's Viewport double-click, if any, detected inside
+    // render() (editorUI_.renderDockspaceShell()'s own new
+    // `cameraCaptureRequested` out-parameter) but not consumed until the
+    // TOP of the NEXT frame's run() loop, alongside that frame's own fresh
+    // escapeJustPressed -- see run()'s own Phase 16 comment for exactly why
+    // both of this whole feature's two triggers (Escape and a double-click)
+    // are folded into ONE decideCameraCapture() call per frame rather than
+    // applied at the two separate points in the pipeline where each is
+    // actually detected: Escape is known at the very top of run(), before
+    // update()/render() run, but a Viewport double-click can only be
+    // detected from INSIDE render()'s own ImGui pass, one whole
+    // update()+render() call later than Escape's own check point. Reset to
+    // false the instant it's consumed (the top of the next run() loop
+    // iteration), the same "one-shot signal, cleared once acted on" shape
+    // saveSceneRequested/textureAssignRequested/assetDropRequested already
+    // establish, just carried across the run()/render() boundary via a
+    // member instead of a same-call out-parameter, since those two calls
+    // don't happen back-to-back the way EditorUI's own out-parameters and
+    // their Application-side handling do. This adds exactly one frame of
+    // latency between the double-click and the camera actually starting to
+    // respond -- the same one-frame "detected in render(), acted on
+    // starting next frame" latency this class already documents for a
+    // freshly created entity (spawnEntityFromCreateMenu()'s own comment) and
+    // a freshly changed selectedEntity_ (this header's own Phase 14d
+    // comment), not a new kind of lag this phase introduces.
+    bool cameraCaptureRequestPending_ = false;
+
+    // Phase 16: set from ENGINE_DEBUG_SIMULATE_ESCAPE -- see that env var's
+    // own application.cpp comment for why this exists (Xvfb has no real
+    // keyboard, so a real Escape press can never reach window_.isKeyPressed()
+    // under headless verification) and kDebugSimulateEscapeFrame/
+    // kDebugSimulateEscapeHoldFrames for exactly which frames it holds the
+    // synthetic press down for. Read-only after construction, consulted once
+    // per frame from run() (see that method's own Phase 16 comment) to
+    // compute `forceEscapeDown` -- fed into pollInputState() itself (see
+    // input.hpp), not applied as a post-hoc InputState override -- for
+    // several CONSECUTIVE frames, not just one.
+    //
+    // Post-review bug fix: originally consumed at a SINGLE frame number,
+    // which behaved like an edge-triggered press by construction and
+    // therefore could never catch a real held-key regression -- see
+    // kDebugSimulateEscapeHoldFrames' own application.cpp comment for the
+    // full incident writeup. Same getenv-gated-behavior pattern as every
+    // other bool flag in this class either way, just consumed across a small
+    // fixed frame RANGE now rather than either a single frame number or
+    // continuously the way cameraDemoMode_/frustumCullDemoMode_ are.
+    bool debugSimulateEscape_ = false;
+
+    // Phase 18b: the real Edit/Play mode flag -- true means physics
+    // simulation (update()'s own stepPhysics() call) actually advances this
+    // frame; false (the default) means it doesn't run at all, so every
+    // entity's Transform stays exactly where it was left -- see that call
+    // site's own header comment for the full "why gate this at all" story
+    // (the project owner's own complaint: fighting live gravity while just
+    // trying to select/inspect an entity). Default false (Edit mode, physics
+    // paused) rather than true -- the correct default for an editor (nothing
+    // should move until the user explicitly asks it to, by clicking Play),
+    // and matches the Viewport toolbar's own Pause button being the one
+    // shown highlighted/active by default (see editor_ui.cpp's own Phase
+    // 18b renderViewportToolbar() comment).
+    //
+    // Deliberately a single bool, not a bigger enum/state-machine type: this
+    // phase's own brief is explicit that ONLY the physics step itself gates
+    // on this (no scene-state snapshot/restore around Play->Stop, no
+    // separate "paused-while-playing" third state) -- a plain on/off flag is
+    // the whole truth of what this project needs today, the same
+    // "simplest-shape-that's-actually-correct, no speculative abstraction"
+    // discipline ssaoDisabled_/ssaoDebugMode_ above already follow for their
+    // own two-state toggles. Mutated in exactly two places: directly by
+    // EditorUI's own renderDockspaceShell() call (a Play/Pause button click
+    // -- see that method's own Phase 18b editor_ui.hpp comment for why this
+    // one, like ssaoDisabled_/ssaoDebugMode_, is passed through and mutated
+    // by reference rather than routed via a separate out-flag), and by this
+    // constructor below (ENGINE_DEBUG_FORCE_PLAY_MODE, for headless
+    // verification -- see debugForcePlayModeFromEnv()'s own application.cpp
+    // comment).
+    bool physicsRunning_ = false;
+
+    // Phase 18g: which shading mode EDIT mode is currently set to --
+    // mutated ONLY by a real toolbar button click (EditorUI's own
+    // renderDockspaceShell(), the same "passed through and mutated by
+    // reference" shape ssaoDisabled_/ssaoDebugMode_/physicsRunning_ above
+    // already use), NEVER by entering or leaving Play mode. render() never
+    // reads this directly -- it reads effectiveShadingMode(physicsRunning_,
+    // editShadingMode_) (shading_mode.hpp) instead, which is `editShadingMode_`
+    // itself in Edit mode and unconditionally ShadingMode::kRendered in Play
+    // mode. That single formula is this whole feature's "Play mode always
+    // looks Rendered; returning to Edit mode restores whatever was selected
+    // before, with no explicit save/restore step anywhere" behavior -- since
+    // this member is simply never touched by the Play/Pause buttons, there
+    // is nothing FOR Play mode to have overwritten in the first place, so
+    // there is nothing to restore either. Default ShadingMode::kRendered --
+    // today's only behavior before this phase, unchanged for a scene that
+    // never touches the toolbar's repurposed lighting/texture-mode buttons.
+    ShadingMode editShadingMode_ = ShadingMode::kRendered;
+
+    // Phase 18g: edge-tracking state for resolveActiveCamera()'s own
+    // `ignoredCount` (camera_component.hpp) -- true once render() has seen
+    // more than one Camera entity exist in registry_ (a hand-edited/loaded
+    // scene JSON, since the Create menu's own UI-level restriction prevents
+    // this through ordinary use) and not yet seen that clear. The identical
+    // "warn on the false->true edge only, stay silent while it persists,
+    // warn again if it clears and later re-triggers" discipline
+    // pointLightOverflowActive_ above already establishes for its own,
+    // structurally similar "more than this engine's single-slot capacity
+    // actually supports" warning -- see render()'s own Phase 18g comment for
+    // the exact comparison. Default false (no extra Camera entities),
+    // matching every other bool member in this class defaulting to
+    // "off/normal."
+    bool cameraOverflowActive_ = false;
+
+    // Phase 18g: edge-tracking state for a LOG_INFO line proving the Create
+    // menu's "Camera" item is genuinely disabled -- true once render() has
+    // seen `resolveActiveCamera(registry_).active.valid()` (i.e.
+    // `hasActiveCamera`, the value passed to EditorUI::renderDockspaceShell())
+    // become true and not yet seen it go back to false. Exists specifically
+    // because a Dear ImGui BeginDisabled()'d popup MenuItem() has no other
+    // externally-observable signal under this project's headless Xvfb
+    // verification (the popup itself only opens on a real mouse click this
+    // environment has no device to send -- see camera_capture.hpp's own
+    // header comment on this same Xvfb limitation for a different feature) --
+    // a log line naming the exact moment the condition BeginDisabled() reads
+    // becomes true is the "debug-log line proving the disabled state"
+    // alternative this phase's own verification brief explicitly allows for
+    // exactly this reason. Same edge-triggered "log on the false->true/
+    // true->false transition, stay silent while the state persists"
+    // discipline pointLightOverflowActive_/cameraOverflowActive_ above
+    // already establish, not a fresh idea introduced only for this.
+    bool createMenuCameraItemDisabled_ = false;
 };
 
 }  // namespace engine

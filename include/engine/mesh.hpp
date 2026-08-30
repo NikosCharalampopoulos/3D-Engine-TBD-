@@ -204,6 +204,102 @@ Mesh makeFullscreenQuad();
 // numerically fitted" tangent convention).
 Mesh makeUVSphere(int latSegments = 32, int lonSegments = 32, float radius = 1.0f);
 
+// Phase 18e: a simple procedural arrow -- a thin cylindrical shaft plus a
+// conical tip -- pointing along local +X from the origin, unit length by
+// default (shaftLength + tipLength = 1.0). Used by the translate gizmo's
+// three axis handles (see gizmo.hpp/application.cpp's renderGizmo()): one
+// shared instance of this mesh is reused for all three axes, each drawn with
+// its own model matrix that rotates local +X to point along the world axis
+// that handle represents (gizmo.hpp's gizmoAxisDirection()) and scales it by
+// that frame's own gizmoAxisLength() (gizmo.hpp), so the caller controls
+// both orientation and on-screen size without rebuilding this geometry.
+// Deliberately solid triangles (Mesh::draw() only ever issues GL_TRIANGLES,
+// see this class's own comment above), not a bare GL_LINES segment -- a
+// solid arrow is both easier to see and, since it has real surface area
+// rather than a single-pixel-wide line, an easier target for this project's
+// own gizmo.hpp hit-testing math to reason about matching what's actually
+// rendered. Not meant to be lit (see gizmo.frag's own comment on why the
+// pass drawing this is flat/unlit, matching every real DCC tool's own
+// manipulation-gizmo convention) -- normals are only approximate (outward-
+// radial, ignoring the cone's own slant) and texCoord/tangent are unused
+// placeholders (gizmo.vert never reads either), the same "unused attributes
+// get an arbitrary placeholder value" precedent makeFullscreenQuad() already
+// establishes.
+Mesh makeGizmoArrow(float shaftLength = 0.72f, float shaftRadius = 0.018f, float tipLength = 0.28f,
+                     float tipRadius = 0.06f, int segments = 10);
+
+// Phase 18j: a simple procedural ring -- a thin flat annulus (a disk with a
+// concentric hole through its middle, "washer"-shaped), lying in the local
+// Y-Z plane, centered on the origin. Used by the rotate gizmo's three axis
+// handles (see gizmo.hpp/application.cpp's renderGizmo()): one shared
+// instance of this mesh is reused for all three axes, each drawn with its
+// own model matrix that rotates local +X (this ring's own NORMAL -- it lies
+// perpendicular to +X by construction) to point along the world axis that
+// handle represents (gizmo.hpp's gizmoAxisDirection()), and scales it by
+// that frame's own gizmoAxisLength() (gizmo.hpp) -- the exact same rotation/
+// scale convention makeGizmoArrow() above already establishes, deliberately
+// reused verbatim (not a second one invented) so Application::renderGizmo()
+// can draw either tool's geometry through the identical per-axis model-
+// matrix loop.
+//
+// Built as a flat ribbon of quads between two concentric circles (radius -
+// thickness/2 and radius + thickness/2), the simplest "keep it simple"
+// choice this project's own gizmo geometry already prefers (makeGizmoArrow()
+// above isn't a fancy shape either) -- a real 3D torus (a tube extruded
+// around the big circle) would need a second, nested ring of segments and
+// isn't needed here: like makeGizmoArrow(), this mesh is deliberately solid
+// triangles (Mesh::draw() only ever issues GL_TRIANGLES), and like every
+// other mesh in this engine, GL_CULL_FACE is never enabled (see makeCube()'s
+// own comment), so a single flat ribbon renders correctly from either side
+// with no winding-direction concern. Not meant to be lit (gizmo.frag is
+// flat/unlit, the identical convention makeGizmoArrow()'s own comment
+// documents) -- normal/texCoord/tangent are unused placeholders (gizmo.vert
+// only ever reads aPos), the same "unused attributes get an arbitrary
+// placeholder value" precedent makeFullscreenQuad()/makeGizmoArrow() already
+// establish. `radius` defaults to 1.0 (matching makeGizmoArrow()'s own unit-
+// length default) so the identical gizmoAxisLength()-based uniform scale
+// that sizes the translate gizmo's arrows sizes this ring's own visible
+// radius too.
+Mesh makeGizmoRing(float radius = 1.0f, float thickness = 0.035f, int segments = 48);
+
+// Phase 18k: a simple procedural scale-gizmo handle -- a thin cylindrical
+// shaft (identical shape/construction to makeGizmoArrow()'s own shaft above)
+// plus a small solid CUBE tip in place of that arrow's cone, pointing along
+// local +X from the origin, unit length by default (shaftLength + tipSize =
+// 1.0, the identical unit-length convention makeGizmoArrow()/makeGizmoRing()
+// both already establish) -- a cube tip rather than a cone is the standard
+// DCC-tool visual distinction between a move handle and a scale handle (3ds
+// Max/Maya/Blender/Unity/Unreal all draw scale handles this way), so a user
+// can tell at a glance which tool is active without reading a toolbar label.
+// Used by the scale gizmo's three axis handles (see gizmo.hpp/
+// application.cpp's renderGizmo()): one shared instance, reused for all
+// three axes exactly like gizmoArrowMesh_/gizmoRingMesh_ already are, each
+// drawn with its own model matrix that rotates local +X to point along the
+// world axis that handle represents (gizmo.hpp's gizmoAxisDirection()) and
+// scales it by that frame's own gizmoAxisLength() (gizmo.hpp) -- the
+// IDENTICAL rotation table and distance-based scale makeGizmoArrow() already
+// establishes, deliberately reused verbatim (not a second one invented) so
+// Application::renderGizmo() draws all three tools' geometry through the
+// exact same per-axis model-matrix loop.
+//
+// The cube tip is centered on local +X at x = shaftLength + tipSize/2, with
+// side length `tipSize` along all three local axes (a real cube, not a
+// squashed box) -- built the same "4 vertices per face, each with that
+// face's own outward normal" way makeCube() builds its own faces, just
+// offset along +X rather than centered on the origin. Like
+// makeGizmoArrow()/makeGizmoRing(), this mesh is deliberately solid
+// triangles (Mesh::draw() only ever issues GL_TRIANGLES), not meant to be
+// lit (gizmo.frag is flat/unlit, the identical convention both of those
+// files' own comments already document) -- texCoord/tangent are unused
+// placeholders, the same "unused attributes get an arbitrary placeholder
+// value" precedent makeFullscreenQuad()/makeGizmoArrow()/makeGizmoRing()
+// already establish. `hitTestGizmoAxes()` (gizmo.hpp) is reused UNMODIFIED
+// for this handle's own picking -- see that reuse's own gizmo.hpp comment
+// for why a cube-tipped handle is geometrically identical to a cone-tipped
+// one for line-segment hit-testing purposes (only the drawn SHAPE differs).
+Mesh makeGizmoScaleHandle(float shaftLength = 0.82f, float shaftRadius = 0.018f, float tipSize = 0.18f,
+                           int segments = 10);
+
 }  // namespace engine
 
 #endif  // ENGINE_MESH_HPP
