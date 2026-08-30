@@ -2584,18 +2584,46 @@ CreateEntityKind EditorUI::renderDockspaceShell(unsigned int viewportColorTextur
         // (see `gizmoActiveThisFrame`'s own use there). See updateGizmo()'s
         // own header comment above for the full design.
         //
-        // Phase 18j: `gizmoMode` picks exactly ONE of updateGizmo()
-        // (translate) / updateGizmoRotate() (rotate) to actually run this
-        // frame -- never both, so the two tools' own persistent drag state
-        // (gizmoDragState_/gizmoRotateDragState_) can never both be
-        // in-progress at once. See GizmoMode's own gizmo.hpp header comment
-        // for why this is a debug/test-only selection for now.
-        const bool gizmoActiveThisFrame =
-            gizmoMode == GizmoMode::kRotate
-                ? updateGizmoRotate(registry, selectedEntity, cameraPosition, cameraView, cameraProjection,
-                                     panelScreenPos, contentRegion, toolbarBgMin, toolbarBgMax, transformEditCommitted)
-                : updateGizmo(registry, selectedEntity, cameraPosition, cameraView, cameraProjection, panelScreenPos,
-                               contentRegion, toolbarBgMin, toolbarBgMax, transformEditCommitted);
+        // Phase 18j introduced `gizmoMode` picking exactly ONE of
+        // updateGizmo() (translate) / updateGizmoRotate() (rotate) to
+        // actually run this frame -- never both, so the two tools' own
+        // persistent drag state (gizmoDragState_/gizmoRotateDragState_)
+        // could never both be in-progress at once. Phase 18k adds
+        // updateGizmoScale() as the third option (never more than one of
+        // the three runs in a single frame, the identical mutual-exclusion
+        // guarantee, now three-way) -- and, for the FIRST time, `gizmoMode`
+        // can genuinely differ from one frame to the next (Application::
+        // setGizmoMode(), live W/E/R), not just from one whole run to
+        // another the way ENGINE_DEBUG_GIZMO_MODE alone could. That's
+        // exactly why resetAllGizmoDragStates() (this class's own new public
+        // method) exists and is called from setGizmoMode() itself: whichever
+        // of the three tools DOESN'T run this frame keeps its own drag state
+        // completely untouched by this dispatch alone (this switch has no
+        // "reset the ones I'm not calling" logic of its own, deliberately --
+        // see resetAllGizmoDragStates()'s own header comment for why the
+        // single reset call site is on the MODE-CHANGE edge instead, not
+        // here on every frame's dispatch).
+        bool gizmoActiveThisFrame = false;
+        switch (gizmoMode) {
+            case GizmoMode::kRotate:
+                gizmoActiveThisFrame =
+                    updateGizmoRotate(registry, selectedEntity, cameraPosition, cameraView, cameraProjection,
+                                       panelScreenPos, contentRegion, toolbarBgMin, toolbarBgMax,
+                                       transformEditCommitted);
+                break;
+            case GizmoMode::kScale:
+                gizmoActiveThisFrame =
+                    updateGizmoScale(registry, selectedEntity, cameraPosition, cameraView, cameraProjection,
+                                      panelScreenPos, contentRegion, toolbarBgMin, toolbarBgMax,
+                                      transformEditCommitted);
+                break;
+            case GizmoMode::kTranslate:
+            default:
+                gizmoActiveThisFrame =
+                    updateGizmo(registry, selectedEntity, cameraPosition, cameraView, cameraProjection,
+                                panelScreenPos, contentRegion, toolbarBgMin, toolbarBgMax, transformEditCommitted);
+                break;
+        }
 
         // Phase 16: the camera-capture trigger -- a double-click anywhere in
         // this panel's own content region, gated to only fire while NOT
@@ -2947,6 +2975,130 @@ bool EditorUI::updateGizmoRotate(EntityRegistry& registry, std::optional<EntityI
     gizmoRotateDragState_ = result.state;
 
     return hoverAxis != GizmoAxis::kNone || gizmoRotateDragState_.axis != GizmoAxis::kNone;
+}
+
+bool EditorUI::updateGizmoScale(EntityRegistry& registry, std::optional<EntityId> selectedEntity,
+                                 const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                                 const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
+                                 const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
+                                 std::optional<Command>& transformEditCommitted) {
+    if (!selectedEntity.has_value()) {
+        // Nothing selected -- no gizmo, no interaction. Also drops any
+        // stale in-progress drag, the identical reset updateGizmo()'s/
+        // updateGizmoRotate()'s own equivalent early-returns already apply
+        // to gizmoDragState_/gizmoRotateDragState_.
+        gizmoScaleDragState_ = GizmoScaleDragState{};
+        return false;
+    }
+    Transform* transform = registry.getComponent<Transform>(*selectedEntity);
+    if (transform == nullptr) {
+        gizmoScaleDragState_ = GizmoScaleDragState{};
+        return false;
+    }
+
+    // World-space gizmo origin -- mirrors Application::renderGizmo()'s own
+    // resolveWorldMatrix()-based placement exactly, the identical reasoning
+    // updateGizmo()'s/updateGizmoRotate()'s own comments above both already
+    // give.
+    const glm::mat4 worldMatrix = resolveWorldMatrix(registry, *selectedEntity);
+    const glm::vec3 gizmoOrigin = glm::vec3(worldMatrix[3]);
+    const float distanceToCamera = glm::length(cameraPosition - gizmoOrigin);
+    // Reuses gizmoAxisLength()/gizmoPickTolerance() verbatim -- the exact
+    // same distance-based scaling function BOTH other tools' own handles
+    // already use, per this phase's own "don't invent a second scaling
+    // scheme" brief.
+    const float axisLength = gizmoAxisLength(distanceToCamera);
+    const float pickTolerance = gizmoPickTolerance(axisLength);
+
+    // This frame's mouse state -- the identical real-ImGui-vs-debug-override
+    // shape updateGizmo()/updateGizmoRotate() above both establish, just
+    // also consumed by ENGINE_DEBUG_GIZMO_SCALE_DRAG (application.cpp) via
+    // the SAME setDebugMouseOverride() entry point (only one of the three
+    // debug drags is ever actually scripted in a single run, gated by
+    // gizmoMode_, but the override plumbing itself is shared unmodified).
+    glm::vec2 mouseScreenPos;
+    bool mouseDown = false;
+    bool mousePressedThisFrame = false;
+    bool mouseInViewportImage = false;
+    if (debugMouseScreenPosOverride_.has_value()) {
+        mouseScreenPos = *debugMouseScreenPosOverride_;
+        mouseDown = debugMouseDownOverride_;
+        mousePressedThisFrame = debugMousePressedOverride_;
+        mouseInViewportImage = true;
+    } else {
+        const ImVec2 mousePos = ImGui::GetIO().MousePos;
+        mouseScreenPos = glm::vec2(mousePos.x - panelScreenPos.x, mousePos.y - panelScreenPos.y);
+        mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        mousePressedThisFrame = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        mouseInViewportImage = ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+                                !ImGui::IsMouseHoveringRect(toolbarBgMin, toolbarBgMax);
+    }
+
+    const Ray ray = screenPointToWorldRay(mouseScreenPos.x, mouseScreenPos.y, contentRegion.x, contentRegion.y,
+                                           cameraView, cameraProjection);
+
+    // Reuses hitTestGizmoAxes() UNMODIFIED -- a scale handle's own pickable
+    // geometry is the exact same finite axis segment the translate gizmo's
+    // arrows already use (only the DRAWN tip shape differs, cube vs cone);
+    // see gizmo.hpp's own header comment on this reuse for the full
+    // reasoning. Same "only gate a NEW grab on mouseInViewportImage, an
+    // in-progress drag keeps tracking regardless of hover" rule
+    // updateGizmo()'s own comment above documents in full.
+    const GizmoAxis hoverAxis =
+        mouseInViewportImage ? hitTestGizmoAxes(ray, gizmoOrigin, axisLength, pickTolerance).axis : GizmoAxis::kNone;
+
+    const bool wasDragging = gizmoScaleDragState_.axis != GizmoAxis::kNone;
+    const GizmoScaleDragResult result = updateGizmoScaleDrag(gizmoScaleDragState_, mouseDown, mousePressedThisFrame,
+                                                              hoverAxis, ray, gizmoOrigin, transform->scale());
+
+    if (!wasDragging && result.state.axis != GizmoAxis::kNone) {
+        // Just grabbed this frame -- remember the entity's own current
+        // scale, purely for the undo Command's own `before` snapshot on
+        // release (the identical role gizmoRotateDragStartRotation_ plays
+        // for the rotate gizmo -- NOT a re-applied anchor the way
+        // gizmoDragStartLocalPosition_ is for translate, since
+        // updateGizmoScaleDrag() itself already hands back an ABSOLUTE new
+        // scale every frame, computed from its OWN frozen
+        // GizmoScaleDragState::startEntityScale anchor, not from anything
+        // this caller re-applies).
+        gizmoScaleDragStartScale_ = transform->scale();
+    }
+
+    if (result.newScale.has_value()) {
+        // Assigns the entity's LIVE scale directly to this frame's absolute
+        // result -- the identical "setPosition()-shaped" application
+        // updateGizmo() itself already uses for translate (contrast
+        // updateGizmoRotate()'s own transform->rotate(), which composes an
+        // INCREMENTAL delta instead -- scale, like translate, is computed
+        // fresh from a single fixed anchor every frame, not composed
+        // step-over-step).
+        transform->setScale(*result.newScale);
+    }
+
+    // The drag's own RELEASE transition -- the identical "one Command per
+    // completed drag, right here, never one per frame" shape updateGizmo()'s
+    // own Phase 18h comment already documents, guarded by
+    // transformSnapshotsEqual() the same way.
+    if (wasDragging && result.state.axis == GizmoAxis::kNone) {
+        const TransformSnapshot before{transform->position(), transform->rotation(), gizmoScaleDragStartScale_};
+        const TransformSnapshot after{transform->position(), transform->rotation(), transform->scale()};
+        if (!transformSnapshotsEqual(before, after)) {
+            transformEditCommitted = makeTransformEditCommand(*selectedEntity, before, after);
+        }
+    }
+
+    gizmoScaleDragState_ = result.state;
+
+    return hoverAxis != GizmoAxis::kNone || gizmoScaleDragState_.axis != GizmoAxis::kNone;
+}
+
+void EditorUI::resetAllGizmoDragStates() {
+    // See this method's own editor_ui.hpp header comment for the full
+    // design/why -- unconditional, all three, regardless of which (if any)
+    // was actually mid-drag.
+    gizmoDragState_ = GizmoDragState{};
+    gizmoRotateDragState_ = GizmoRotateDragState{};
+    gizmoScaleDragState_ = GizmoScaleDragState{};
 }
 
 void EditorUI::render() {

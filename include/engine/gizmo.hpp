@@ -316,20 +316,29 @@ struct GizmoDragResult {
 GizmoDragResult updateGizmoDrag(const GizmoDragState& current, bool mouseDown, bool mousePressedThisFrame,
                                  GizmoAxis hoverAxis, const Ray& ray, const glm::vec3& entityPosition);
 
-// Phase 18j: which of the two gizmo tools built so far is currently active
-// -- NOT yet a real, user-facing move/rotate/scale switcher (that's
-// explicitly Phase 18k's own job, once scale exists too and all three tools
-// can be switched between with one W/E/R-style mechanism built once rather
-// than revised twice) -- this phase reaches kRotate only via a new
-// debug-only env var (ENGINE_DEBUG_GIZMO_MODE, application.cpp), defaulting
-// to kTranslate so every pre-18j screenshot/test/behavior is completely
-// unaffected. Lives in this pure header (not editor_ui.hpp/application.hpp)
-// because both EditorUI's interaction code and Application's rendering code
-// need to agree on it, the same "shared pure vocabulary both GL/ImGui-facing
-// halves consume" role GizmoAxis above already plays.
+// Phase 18j introduced this as which of the two gizmo tools built so far is
+// currently active -- NOT yet a real, user-facing move/rotate/scale switcher
+// (that was explicitly deferred to Phase 18k, once scale existed too and all
+// three tools could be switched between with one W/E/R-style mechanism built
+// once rather than revised twice). Phase 18k is that phase: kScale is new
+// below, and `gizmoMode_` (application.hpp) is now a REAL runtime-mutable
+// value, flipped live by W/E/R (Application::run(), gated the same
+// `!ImGui::GetIO().WantCaptureKeyboard`-and-edge-triggered way this project's
+// existing Ctrl+S/Ctrl+Z chords already are, plus a new `!cameraCaptured_`
+// gate -- W and E collide with this engine's own free-fly camera bindings,
+// InputActionMap::MoveForward/MoveUp, input_action_map.cpp -- so the tool
+// switcher only ever fires while the camera is NOT captured, exactly when a
+// gizmo can be interacted with in the first place). ENGINE_DEBUG_GIZMO_MODE
+// (application.cpp) still exists, now just as the STARTING mode for a
+// headless run rather than the only way to reach a non-translate tool.
+// Lives in this pure header (not editor_ui.hpp/application.hpp) because both
+// EditorUI's interaction code and Application's rendering code need to agree
+// on it, the same "shared pure vocabulary both GL/ImGui-facing halves
+// consume" role GizmoAxis above already plays.
 enum class GizmoMode {
     kTranslate,
     kRotate,
+    kScale,
 };
 
 // ===========================================================================
@@ -541,6 +550,188 @@ struct GizmoRotateDragResult {
 GizmoRotateDragResult updateGizmoRotateDrag(const GizmoRotateDragState& current, bool mouseDown,
                                              bool mousePressedThisFrame, GizmoAxis hoverAxis, const Ray& ray,
                                              const glm::vec3& gizmoOrigin);
+
+// ===========================================================================
+// Phase 18k: the scale gizmo's own additions below -- three colored handles
+// (X=red/Y=green/Z=blue, the identical axis-color convention the translate
+// gizmo's arrows and the rotate gizmo's rings both already establish),
+// visually a thin shaft with a CUBE tip instead of the translate gizmo's
+// cone tip (mesh.hpp's makeGizmoScaleHandle()) -- the standard DCC-tool
+// visual distinction between move and scale handles -- click-dragged to
+// scale the selected entity along that one axis (non-uniform scale: only the
+// dragged axis's own Transform::scale() component changes).
+//
+// Reuses hitTestGizmoAxes() UNMODIFIED for hit-testing -- a scale handle is
+// geometrically the exact same thing a translate handle already is for
+// picking purposes (a straight finite segment from `gizmoOrigin` outward
+// along one world axis; the cube-vs-cone tip shape only affects what's
+// DRAWN, not the pickable line-segment geometry hitTestGizmoAxes() already
+// tests against), so a second, near-duplicate hit-test function would be
+// pure, unjustified duplication.
+//
+// closestPointsBetweenLines() (already used by updateGizmoDrag() above) is
+// also reused unmodified for the drag math itself -- a scale drag is
+// mathematically almost identical to a translate drag (both measure where
+// along a fixed world-space axis line the mouse ray currently projects), the
+// two differ only in what they DO with that measurement: updateGizmoDrag()
+// hands back an absolute new position; updateGizmoScaleDrag() below instead
+// converts "how far along the axis, now, versus at grab time" into a scale
+// RATIO, applied by multiplying it onto whatever scale the entity already
+// had along that one axis at grab time.
+// ===========================================================================
+
+// The scale drag's own "world distance along the axis, at grab time, is too
+// close to zero to divide by" floor -- see updateGizmoScaleDrag()'s own
+// comment for exactly where this is used. A grab landing closer to
+// `gizmoOrigin` than this (world units) is declined outright (the same
+// "decline rather than produce garbage" instinct closestPointsBetweenLines()'s
+// own near-parallel case and intersectRayWithPlane()'s own grazing case both
+// already apply, just for a different degeneracy: here, a near-zero
+// DENOMINATOR in a ratio, rather than a near-zero determinant/near-zero
+// dot product) -- a click landing within a hundredth of a world unit of the
+// gizmo's own origin, where all three axis handles nearly converge, is not a
+// deliberate aim at any one axis's own handle anyway (see hitTestGizmoAxes()'s
+// own AxisHitTestResult -- a real handle is drawn/picked out at
+// gizmoAxisLength()'s own distance away, never at distance ~0).
+constexpr float kGizmoScaleMinGrabDistance = 0.01f;
+
+// The scale drag's own floor on the RESULTING scale component -- never lets
+// a drag push any one axis's Transform::scale() component to exactly zero or
+// negative. See transform.hpp's Transform::getModelMatrix(): a zero scale
+// component collapses the model matrix along that axis to a singular
+// (non-invertible) matrix -- degenerate for anything downstream that needs
+// to invert it (e.g. a normal matrix built as
+// transpose(inverse(mat3(model))), the standard technique this engine's own
+// lit shaders use) -- and a NEGATIVE scale component mirrors the mesh along
+// that axis without correspondingly flipping its triangle winding, which
+// real GL rendering does not correct for on its own: the mesh would render
+// visually inside-out/inverted (and, combined with the same uninverted
+// normal-matrix concern above, wrong-signed lighting normals too) rather
+// than the "flip in place" a user dragging a scale handle would actually
+// expect. 0.01 (not exactly 0.0) leaves the entity still visibly present
+// (a barely-visible sliver, not literally invisible) and keeps every
+// downstream matrix operation well-conditioned, the same "floored, not
+// zeroed" instinct gizmoAxisLength()'s own kGizmoMinAxisLength already
+// applies to a different quantity for a related "never let this collapse to
+// an unusable value" reason.
+constexpr float kGizmoMinScaleComponent = 0.01f;
+
+// The scale gizmo's own persistent cross-frame drag state -- the same
+// "not dragging / dragging-axis-X/Y/Z" shape GizmoDragState establishes for
+// translate, adapted for a RATIO-based drag instead of a position-delta one.
+//
+// `axis == kNone` means "not currently dragging" (the other three fields are
+// meaningless in that state, left at their defaults). `startAxisT` is the
+// (unclamped) world-space distance along the grabbed axis, from
+// `startGizmoOrigin`, that the ray's closest approach landed at on the grab
+// frame -- this is the RATIO's own denominator every later frame's fresh
+// measurement is divided by (see updateGizmoScaleDrag()'s own comment for
+// exactly how), so it is captured once at grab time and never recomputed,
+// the identical "anchor frozen at grab time" discipline
+// GizmoDragState::startAxisT already establishes for translate (and for the
+// identical reason: the axis LINE this ratio is measured against has to stay
+// fixed in space for the whole gesture, not slide out from under the drag as
+// the entity's own scale -- and therefore the gizmo handle's own on-screen
+// length -- visibly grows or shrinks while dragging). `startEntityScale` is
+// the entity's full Transform::scale() as of the grab frame -- every later
+// frame's reported scale multiplies ONLY the dragged axis's own component of
+// THIS frozen value by that frame's fresh ratio, leaving the other two
+// components exactly as they were at grab time (not re-multiplied frame over
+// frame, which would compound rounding error and also fight a live Inspector
+// edit to another axis mid-drag). `startGizmoOrigin` is the world-space
+// gizmo origin (the selected entity's resolved world position) as of the
+// grab frame, frozen for the identical "the line has to stay fixed" reason
+// `startAxisT` is.
+struct GizmoScaleDragState {
+    GizmoAxis axis = GizmoAxis::kNone;
+    float startAxisT = 0.0f;
+    glm::vec3 startEntityScale{1.0f, 1.0f, 1.0f};
+    glm::vec3 startGizmoOrigin{0.0f};
+};
+
+// GizmoScaleDragResult::newScale is set (to `startEntityScale` with only the
+// dragged axis's own component replaced by `startEntityScale[axis] * ratio`,
+// clamped to never go below kGizmoMinScaleComponent -- see below for exactly
+// how `ratio` is computed) on every frame an in-progress drag actually has a
+// fresh measurement to report; std::nullopt on every other frame (not
+// dragging at all; the frame a drag starts, which only anchors the drag
+// without scaling anything yet; the frame it ends; or a frame where the ray
+// happened to be too parallel to the drag axis to compute a meaningful
+// update -- see closestPointsBetweenLines()'s own comment). The caller
+// (EditorUI::updateGizmoScale()) is what actually applies this via
+// `transform->setScale(*newScale)` -- this file has no idea what a Transform
+// is, the identical separation GizmoDragResult's/GizmoRotateDragResult's own
+// header comments already document for the other two tools.
+struct GizmoScaleDragResult {
+    GizmoScaleDragState state;
+    std::optional<glm::vec3> newScale;
+};
+
+// The scale drag's whole state machine, in one pure function -- the same
+// "current state + this frame's inputs -> next state (+ derived output)"
+// shape updateGizmoDrag()/updateGizmoRotateDrag() above both already
+// establish:
+//
+//   - current.axis == kNone (not dragging):
+//       - mousePressedThisFrame && hoverAxis != kNone: GRABS that axis --
+//         computes this frame's closest point on the (infinite) line through
+//         `gizmoOrigin` in hoverAxis's own direction
+//         (closestPointsBetweenLines(), reused unmodified from the translate
+//         gizmo). If that succeeds AND the resulting distance
+//         (|closest->lineT|) is at least kGizmoScaleMinGrabDistance away
+//         from the origin (see that constant's own comment for why a grab
+//         any closer is declined rather than anchored to a near-zero
+//         denominator), starts dragging: next state has axis=hoverAxis,
+//         startAxisT=closest->lineT, startEntityScale=`entityScale`,
+//         startGizmoOrigin=`gizmoOrigin`. newScale is std::nullopt this same
+//         frame -- a grab only anchors the drag, the identical "the grab
+//         frame produces no update" contract updateGizmoDrag()'s own header
+//         comment documents. Declined (stays kNone) if the plane/line
+//         intersection fails (ray nearly parallel to the axis) OR the
+//         distance-floor check above fails.
+//       - anything else: stays kNone, newScale=std::nullopt -- the identical
+//         edge-triggering contract (a held-but-not-freshly-pressed button
+//         must not retroactively start a drag) updateGizmoDrag()'s own
+//         header comment already documents in full.
+//   - current.axis != kNone (dragging):
+//       - !mouseDown: released -- RETURNS to kNone (every field reset to its
+//         default), newScale=std::nullopt.
+//       - mouseDown (still held): re-projects `ray` onto the SAME fixed axis
+//         line this drag grabbed (anchored at current.startGizmoOrigin,
+//         never re-read from `gizmoOrigin` -- identical reasoning
+//         GizmoDragState's own header comment gives for why translate's own
+//         anchor is frozen, since the entity's own scale -- and therefore
+//         this handle's own drawn length -- is exactly what this drag is
+//         changing). If that succeeds, `ratio = closest->lineT /
+//         current.startAxisT` (both measured along the SAME frozen line, so
+//         this is exactly "how far along the axis now, versus at grab time"
+//         -- dragging further from the origin than the grab point gives
+//         ratio > 1 (scale up), dragging back toward (or past) the origin
+//         gives ratio < 1 or even negative (scale down, then flip) --
+//         negative/near-zero results are exactly what
+//         kGizmoMinScaleComponent's own floor below catches);
+//         `newScale = current.startEntityScale` with the dragged axis's own
+//         component replaced by
+//         `max(current.startEntityScale[axis] * ratio,
+//         kGizmoMinScaleComponent)`. state is otherwise UNCHANGED (the same
+//         "only the derived output varies frame to frame, not the anchor
+//         itself" contract updateGizmoDrag() already documents). If it fails
+//         (ray briefly parallel to the axis mid-drag), state stays unchanged
+//         and newScale is std::nullopt for just this one frame -- the entity
+//         simply holds its last scale rather than jumping to a garbage one,
+//         resuming cleanly from the same anchor the next non-degenerate
+//         frame, the identical guarantee updateGizmoDrag()'s own header
+//         comment documents for its own briefly-parallel case.
+//
+// `gizmoOrigin`/`entityScale` are only ever consulted in the "grab" branch
+// above (to seed startGizmoOrigin/startEntityScale) -- a caller mid-drag is
+// free to pass whatever it has on hand (even stale values), since both are
+// ignored while current.axis != kNone, the identical contract
+// updateGizmoDrag()'s own header comment documents for its own
+// `entityPosition` parameter.
+GizmoScaleDragResult updateGizmoScaleDrag(const GizmoScaleDragState& current, bool mouseDown,
+                                           bool mousePressedThisFrame, GizmoAxis hoverAxis, const Ray& ray,
+                                           const glm::vec3& gizmoOrigin, const glm::vec3& entityScale);
 
 }  // namespace engine
 

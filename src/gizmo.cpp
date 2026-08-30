@@ -303,6 +303,110 @@ GizmoRotateDragResult updateGizmoRotateDrag(const GizmoRotateDragState& current,
     return result;
 }
 
+namespace {
+
+// Phase 18k: helper used only by updateGizmoScaleDrag() below -- replaces
+// just the `axis` component of `scale` with `value`, leaving the other two
+// components untouched. A plain switch (not e.g. `scale[axisIndex] = value`
+// via some GizmoAxis->int mapping) to match this file's own established
+// per-axis-enum idiom (gizmoAxisDirection()/gizmoRingPlaneBasis() above both
+// switch on GizmoAxis directly rather than indexing through an integer
+// conversion). kNone leaves `scale` completely unchanged -- never meant to
+// be reached (updateGizmoScaleDrag() only ever calls this with a real grabbed
+// axis), but a well-defined no-op rather than undefined behavior, the same
+// "no unreachable/undefined case for the enum's own default member" instinct
+// gizmoAxisDirection() itself already documents.
+glm::vec3 withAxisComponent(const glm::vec3& scale, GizmoAxis axis, float value) {
+    glm::vec3 result = scale;
+    switch (axis) {
+        case GizmoAxis::kX:
+            result.x = value;
+            break;
+        case GizmoAxis::kY:
+            result.y = value;
+            break;
+        case GizmoAxis::kZ:
+            result.z = value;
+            break;
+        case GizmoAxis::kNone:
+        default:
+            break;
+    }
+    return result;
+}
+
+float axisComponent(const glm::vec3& v, GizmoAxis axis) {
+    switch (axis) {
+        case GizmoAxis::kX:
+            return v.x;
+        case GizmoAxis::kY:
+            return v.y;
+        case GizmoAxis::kZ:
+            return v.z;
+        case GizmoAxis::kNone:
+        default:
+            return 0.0f;
+    }
+}
+
+}  // namespace
+
+GizmoScaleDragResult updateGizmoScaleDrag(const GizmoScaleDragState& current, bool mouseDown,
+                                           bool mousePressedThisFrame, GizmoAxis hoverAxis, const Ray& ray,
+                                           const glm::vec3& gizmoOrigin, const glm::vec3& entityScale) {
+    GizmoScaleDragResult result;
+
+    if (current.axis == GizmoAxis::kNone) {
+        // Not currently dragging -- only a fresh press directly on a handle
+        // starts one (the identical edge-triggering contract
+        // updateGizmoDrag() already documents).
+        if (mousePressedThisFrame && hoverAxis != GizmoAxis::kNone) {
+            const glm::vec3 direction = gizmoAxisDirection(hoverAxis);
+            const std::optional<LineClosestPoint> closest = closestPointsBetweenLines(ray, gizmoOrigin, direction);
+            if (closest.has_value() && std::fabs(closest->lineT) >= kGizmoScaleMinGrabDistance) {
+                result.state.axis = hoverAxis;
+                result.state.startAxisT = closest->lineT;
+                result.state.startEntityScale = entityScale;
+                result.state.startGizmoOrigin = gizmoOrigin;
+            }
+            // else: ray nearly parallel to the axis being grabbed, or the
+            // grab landed too close to the gizmo's own origin to divide by
+            // (kGizmoScaleMinGrabDistance's own comment) -- decline the
+            // grab, result.state stays default-constructed (kNone).
+        }
+        // else: result.state stays default-constructed (kNone).
+        return result;
+    }
+
+    // Currently dragging.
+    if (!mouseDown) {
+        // Released -- back to kNone (default-constructed), no further
+        // scaling this frame.
+        return result;
+    }
+
+    // Still held -- re-project onto the SAME fixed axis line this drag
+    // grabbed (anchored at current.startGizmoOrigin, never re-read from
+    // `gizmoOrigin` -- see GizmoScaleDragState's own header comment).
+    result.state = current;
+    const glm::vec3 direction = gizmoAxisDirection(current.axis);
+    const std::optional<LineClosestPoint> closest =
+        closestPointsBetweenLines(ray, current.startGizmoOrigin, direction);
+    if (closest.has_value()) {
+        // startAxisT is guaranteed non-near-zero by the grab-time floor
+        // above (kGizmoScaleMinGrabDistance), so this division is always
+        // well-conditioned for the lifetime of a single drag.
+        const float ratio = closest->lineT / current.startAxisT;
+        const float rawComponent = axisComponent(current.startEntityScale, current.axis) * ratio;
+        const float clampedComponent = std::max(rawComponent, kGizmoMinScaleComponent);
+        result.newScale = withAxisComponent(current.startEntityScale, current.axis, clampedComponent);
+    }
+    // else: briefly parallel this one frame -- result.newScale stays
+    // std::nullopt, state (the anchor) is unchanged, so tracking resumes
+    // cleanly from the same anchor the next non-degenerate frame.
+    return result;
+}
+
 GizmoDragResult updateGizmoDrag(const GizmoDragState& current, bool mouseDown, bool mousePressedThisFrame,
                                  GizmoAxis hoverAxis, const Ray& ray, const glm::vec3& entityPosition) {
     GizmoDragResult result;

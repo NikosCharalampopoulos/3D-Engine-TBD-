@@ -440,4 +440,102 @@ Mesh makeGizmoRing(float radius, float thickness, int segments) {
     return Mesh(vertices, indices);
 }
 
+Mesh makeGizmoScaleHandle(float shaftLength, float shaftRadius, float tipSize, int segments) {
+    // Same defensive floor makeGizmoArrow()/makeGizmoRing()/makeUVSphere()
+    // already apply to their own segment counts.
+    segments = std::max(segments, 3);
+
+    constexpr float kTwoPi = 2.0f * 3.14159265358979323846f;
+
+    std::vector<Vertex> vertices;
+    std::vector<unsigned int> indices;
+
+    // --- Shaft: byte-for-byte the same cylinder-from-the-origin
+    // construction makeGizmoArrow()'s own shaft above uses (see that
+    // function's own comments for the "+1 repeats angle=0 as angle=2*pi"
+    // seam-vertex reasoning) -- deliberately duplicated rather than shared
+    // via a helper, matching this file's own existing precedent of each
+    // makeGizmoXyz() function being a fully self-contained, independently
+    // readable procedural builder (makeGizmoRing() above doesn't call into
+    // makeGizmoArrow() either, despite both being "gizmo geometry").
+    const auto ringNormal = [](float angle) { return glm::vec3(0.0f, std::cos(angle), std::sin(angle)); };
+
+    const unsigned int shaftNearBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        const glm::vec3 normal = ringNormal(angle);
+        vertices.push_back({{0.0f, shaftRadius * normal.y, shaftRadius * normal.z}, normal, {0.0f, 0.0f}});
+    }
+    const unsigned int shaftFarBase = static_cast<unsigned int>(vertices.size());
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(segments);
+        const glm::vec3 normal = ringNormal(angle);
+        vertices.push_back({{shaftLength, shaftRadius * normal.y, shaftRadius * normal.z}, normal, {0.0f, 1.0f}});
+    }
+    for (int i = 0; i < segments; ++i) {
+        const unsigned int a = shaftNearBase + static_cast<unsigned int>(i);
+        const unsigned int b = a + 1;
+        const unsigned int c = shaftFarBase + static_cast<unsigned int>(i);
+        const unsigned int d = c + 1;
+        indices.insert(indices.end(), {a, b, d, d, c, a});
+    }
+
+    // --- Cube tip: a real cube (side length `tipSize` along all three local
+    // axes), centered on the shaft's own local +X line at
+    // x = shaftLength + tipSize/2 -- i.e. spanning
+    // x in [shaftLength, shaftLength + tipSize], y/z each in
+    // [-tipSize/2, tipSize/2]. Built the identical "4 vertices per face,
+    // each with that face's own outward normal, 2 triangles per face" way
+    // makeCube() builds its own 6 faces (see that function's own comment for
+    // why 4-per-face rather than 8 shared corners: normals differ by face,
+    // so corners can't actually be shared once normals are real per-vertex
+    // data) -- just translated along +X instead of centered on the origin,
+    // and with no texCoord/tangent data that matters (gizmo.vert never reads
+    // either, the identical "unused attributes get an arbitrary placeholder"
+    // precedent this function's own header comment documents).
+    const float cubeCenterX = shaftLength + tipSize * 0.5f;
+    const float h = tipSize * 0.5f;
+    const std::vector<Vertex> cubeVertices = {
+        // +X (far face, away from the shaft)
+        {{cubeCenterX + h, -h, -h}, {1, 0, 0}, {0, 0}},
+        {{cubeCenterX + h, h, -h}, {1, 0, 0}, {1, 0}},
+        {{cubeCenterX + h, h, h}, {1, 0, 0}, {1, 1}},
+        {{cubeCenterX + h, -h, h}, {1, 0, 0}, {0, 1}},
+        // -X (near face, joining the shaft)
+        {{cubeCenterX - h, -h, h}, {-1, 0, 0}, {0, 0}},
+        {{cubeCenterX - h, h, h}, {-1, 0, 0}, {1, 0}},
+        {{cubeCenterX - h, h, -h}, {-1, 0, 0}, {1, 1}},
+        {{cubeCenterX - h, -h, -h}, {-1, 0, 0}, {0, 1}},
+        // +Y (top)
+        {{cubeCenterX - h, h, -h}, {0, 1, 0}, {0, 0}},
+        {{cubeCenterX + h, h, -h}, {0, 1, 0}, {1, 0}},
+        {{cubeCenterX + h, h, h}, {0, 1, 0}, {1, 1}},
+        {{cubeCenterX - h, h, h}, {0, 1, 0}, {0, 1}},
+        // -Y (bottom)
+        {{cubeCenterX - h, -h, h}, {0, -1, 0}, {0, 0}},
+        {{cubeCenterX + h, -h, h}, {0, -1, 0}, {1, 0}},
+        {{cubeCenterX + h, -h, -h}, {0, -1, 0}, {1, 1}},
+        {{cubeCenterX - h, -h, -h}, {0, -1, 0}, {0, 1}},
+        // +Z
+        {{cubeCenterX - h, -h, h}, {0, 0, 1}, {0, 0}},
+        {{cubeCenterX + h, -h, h}, {0, 0, 1}, {1, 0}},
+        {{cubeCenterX + h, h, h}, {0, 0, 1}, {1, 1}},
+        {{cubeCenterX - h, h, h}, {0, 0, 1}, {0, 1}},
+        // -Z
+        {{cubeCenterX + h, -h, -h}, {0, 0, -1}, {0, 0}},
+        {{cubeCenterX - h, -h, -h}, {0, 0, -1}, {1, 0}},
+        {{cubeCenterX - h, h, -h}, {0, 0, -1}, {1, 1}},
+        {{cubeCenterX + h, h, -h}, {0, 0, -1}, {0, 1}},
+    };
+
+    const unsigned int cubeBase = static_cast<unsigned int>(vertices.size());
+    vertices.insert(vertices.end(), cubeVertices.begin(), cubeVertices.end());
+    for (unsigned int face = 0; face < 6; ++face) {
+        const unsigned int base = cubeBase + face * 4;
+        indices.insert(indices.end(), {base + 0, base + 1, base + 2, base + 2, base + 3, base + 0});
+    }
+
+    return Mesh(vertices, indices);
+}
+
 }  // namespace engine

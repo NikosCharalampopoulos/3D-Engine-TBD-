@@ -1345,13 +1345,15 @@ std::string debugGizmoDragEntityNameFromEnv() {
     return value != nullptr ? std::string(value) : std::string();
 }
 
-// Phase 18j: ENGINE_DEBUG_GIZMO_MODE=<translate|rotate>, unset (or
-// "translate") by default -- the debug/test-only mechanism this phase's own
-// brief calls for to reach the new rotate gizmo at all, standing in for the
-// real move/rotate/scale UI switcher explicitly deferred to Phase 18k (once
-// scale exists too, so it can be built once for all three tools). See
-// GizmoMode's own gizmo.hpp header comment for the full "why debug-only for
-// now" reasoning. An unrecognized non-empty value is logged as a warning and
+// Phase 18j introduced ENGINE_DEBUG_GIZMO_MODE=<translate|rotate>, unset (or
+// "translate") by default, as the ONLY way to reach the new rotate gizmo at
+// all -- standing in for the real move/rotate/scale UI switcher explicitly
+// deferred to Phase 18k. Phase 18k built that real switcher (W/E/R, run()'s
+// own new keyboard handling, via Application::setGizmoMode()) -- this env
+// var still exists, now just as the STARTING mode for a headless run (real
+// interactive/scripted use is expected to switch live from there), and now
+// also accepts "scale". See GizmoMode's own gizmo.hpp header comment for the
+// full history. An unrecognized non-empty value is logged as a warning and
 // treated as "translate" -- the same "don't silently misbehave on a typo'd
 // env var" treatment debugUndoOrRedoCountFromEnv() above already gives a
 // different malformed value.
@@ -1367,8 +1369,29 @@ GizmoMode debugGizmoModeFromEnv() {
     if (raw == "rotate") {
         return GizmoMode::kRotate;
     }
-    LOG_WARN("ENGINE_DEBUG_GIZMO_MODE=\"" + raw + "\" is not \"translate\" or \"rotate\"; defaulting to translate");
+    if (raw == "scale") {
+        return GizmoMode::kScale;
+    }
+    LOG_WARN("ENGINE_DEBUG_GIZMO_MODE=\"" + raw +
+              "\" is not \"translate\", \"rotate\", or \"scale\"; defaulting to translate");
     return GizmoMode::kTranslate;
+}
+
+// Phase 18k: a short, human-readable name for `mode`, used only for log
+// lines (setGizmoMode()'s own log, and the ENGINE_DEBUG_GIZMO_MODE_SWITCH
+// block below) -- never fed back into debugGizmoModeFromEnv() or any other
+// parsing path, so it doesn't need to round-trip exactly with that
+// function's own accepted spellings (it does anyway, but that's incidental).
+std::string gizmoModeName(GizmoMode mode) {
+    switch (mode) {
+        case GizmoMode::kTranslate:
+            return "translate";
+        case GizmoMode::kRotate:
+            return "rotate";
+        case GizmoMode::kScale:
+            return "scale";
+    }
+    return "unknown";
 }
 
 // Phase 18j: ENGINE_DEBUG_GIZMO_ROTATE_DRAG=<entity name>, unset by
@@ -1384,6 +1407,97 @@ GizmoMode debugGizmoModeFromEnv() {
 std::string debugGizmoRotateDragEntityNameFromEnv() {
     const char* value = std::getenv("ENGINE_DEBUG_GIZMO_ROTATE_DRAG");
     return value != nullptr ? std::string(value) : std::string();
+}
+
+// Phase 18k: ENGINE_DEBUG_GIZMO_SCALE_DRAG=<entity name>, unset by
+// default -- the scale gizmo's own headless verification hook, the identical
+// shape debugGizmoDragEntityNameFromEnv()/debugGizmoRotateDragEntityNameFromEnv()
+// above already establish, reused here unmodified for scale. Only has any
+// effect when gizmoMode_ is ALSO kScale (ENGINE_DEBUG_GIZMO_MODE=scale) --
+// see debugGizmoScaleDragEntity_'s own application.hpp comment for the full
+// "also needs ENGINE_DEBUG_SELECT" caveat.
+std::string debugGizmoScaleDragEntityNameFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_GIZMO_SCALE_DRAG");
+    return value != nullptr ? std::string(value) : std::string();
+}
+
+// Phase 18k: ENGINE_DEBUG_GIZMO_MODE_SWITCH=<w|e|r>[,<w|e|r>...], unset by
+// default -- the real live W/E/R tool switcher's own headless verification
+// hook. Xvfb has no physical keyboard (the identical constraint
+// ENGINE_DEBUG_SIMULATE_ESCAPE's own comment already documents for the
+// mouse-equivalent case), so each entry resolves directly to the GizmoMode a
+// real tap of that one key would request (w->kTranslate, e->kRotate,
+// r->kScale -- the exact mapping run()'s own new keyboard handling uses)
+// rather than to a raw key code; update() then fires one scripted
+// `setGizmoMode()` call per entry, each at its own fixed frame
+// (kDebugGizmoModeSwitchFrame + kDebugGizmoModeSwitchFrameSpacing * index,
+// below) -- see that call site's own comment for why calling
+// `setGizmoMode()` directly, rather than simulating a raw key STATE the way
+// `forceEscapeDown` does for Escape, is the correct substitution point here
+// (W/E/R are read directly against `window_`, not through InputActionMap's
+// own edge-detection machinery, so there is no shared "real machinery" for a
+// synthetic key state to feed into the way `forceEscapeDown` feeds
+// pollInputState()).
+//
+// A COMMA-SEPARATED LIST, not a single value -- the identical upgrade
+// ENGINE_DEBUG_OPEN_SCENE's own debugOpenSceneNamesFromEnv() comment already
+// documents for chaining more than one scripted action into a single run,
+// reused here for a sharper reason than convenience: an independent review
+// of the original single-switch version of this hook (Phase 18k's own first
+// cut) confirmed it could never actually catch a regression in
+// `resetAllGizmoDragStates()` -- the ONE fix this whole env var exists to
+// verify. A single switch can prove a drag STOPS advancing the instant the
+// mode changes (renderDockspaceShell()'s own dispatch `switch` alone already
+// guarantees that, nothing to do with the reset), and it can prove the
+// newly-entered tool doesn't spuriously start dragging -- but that second
+// proof is trivially true on a run's FIRST entry into a tool regardless of
+// whether the reset ran, since that tool's own drag state was already
+// sitting at its default-constructed idle value from construction, never
+// touched by anything yet. Neither half ever exercises the actual failure
+// mode the fix guards against: switching AWAY from a tool mid-drag and then
+// BACK to it while the mouse is still logically held, which is the one
+// sequence that can resume a STALE anchor if `resetAllGizmoDragStates()`
+// were ever deleted or broken. That needs a SECOND switch, back to the
+// original tool, later in the SAME run, while the first scripted drag's own
+// mouse-still-down input is still being fed -- which is exactly what this
+// list makes possible. See README.md's own Phase 18k Verify section for the
+// resulting scenario and its non-vacuous confirmation (temporarily
+// neutering the reset and observing this exact proof fail before restoring
+// it).
+//
+// Each entry is validated independently, the identical "don't silently
+// misbehave on a typo'd env var" treatment debugGizmoModeFromEnv() above
+// already gives its own single malformed value -- an unrecognized token logs
+// a warning and is simply skipped (not treated as fatal to the rest of the
+// list), so e.g. "e,bogus,w" still yields the two real switches rather than
+// discarding the whole env var over one bad entry.
+std::vector<GizmoMode> debugGizmoModeSwitchTargetsFromEnv() {
+    const char* value = std::getenv("ENGINE_DEBUG_GIZMO_MODE_SWITCH");
+    std::vector<GizmoMode> targets;
+    if (value == nullptr || *value == '\0') {
+        return targets;
+    }
+    const std::string raw(value);
+    std::size_t start = 0;
+    while (start <= raw.size()) {
+        const std::size_t comma = raw.find(',', start);
+        const std::string entry = raw.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (entry == "w") {
+            targets.push_back(GizmoMode::kTranslate);
+        } else if (entry == "e") {
+            targets.push_back(GizmoMode::kRotate);
+        } else if (entry == "r") {
+            targets.push_back(GizmoMode::kScale);
+        } else if (!entry.empty()) {
+            LOG_WARN("ENGINE_DEBUG_GIZMO_MODE_SWITCH=\"" + raw + "\": entry \"" + entry +
+                      "\" is not \"w\", \"e\", or \"r\"; skipping it");
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return targets;
 }
 
 // Phase 18h: ENGINE_DEBUG_UNDO=<count>/ENGINE_DEBUG_REDO=<count>, unset (0)
@@ -1955,6 +2069,135 @@ constexpr std::size_t kDebugGizmoRotateDragStepCount =
 // fully axis-generic (see tests/gizmo_test.cpp, which exercises all three).
 constexpr GizmoAxis kDebugGizmoRotateDragAxis = GizmoAxis::kX;
 
+// Phase 18k: ENGINE_DEBUG_GIZMO_SCALE_DRAG's own scripted frame schedule --
+// see debugGizmoScaleDragEntityNameFromEnv()'s own comment for the full
+// design. Reuses frame 15, the same starting frame
+// kDebugGizmoDragStartFrame/kDebugGizmoRotateDragStartFrame above both use --
+// the identical "no timeline-overlap concern, a verification run tests one
+// gizmo mode at a time" reasoning kDebugGizmoRotateDragStartFrame's own
+// comment already gives.
+constexpr std::uint64_t kDebugGizmoScaleDragStartFrame = 15;
+
+// The ABSOLUTE world-space distance from the gizmo's own origin, along the
+// fixed drag axis (kDebugGizmoScaleDragAxis below), targeted at each
+// successive scripted frame -- the identical "absolute target position,
+// updateGizmoScaleDrag() itself converts consecutive targets into a RATIO
+// against the grab-frame value" shape kDebugGizmoDragOffsets establishes for
+// translate (contrast kDebugGizmoRotateDragAngleOffsets' own INCREMENTAL
+// angle-delta shape, which doesn't apply here -- scale, like translate, is
+// computed from a single fixed anchor every frame, not composed
+// incrementally). Five entries (grab + four scale steps):
+//   - index 0 (0.4): the grab itself -- becomes GizmoScaleDragState::
+//     startAxisT, the ratio's own denominator for every later step. Produces
+//     no scale change yet, matching updateGizmoScaleDrag()'s own documented
+//     "the grab frame produces no update" contract. 0.4, not further out --
+//     see this constant's own "starts at 0.4" paragraph below for why the
+//     GRAB step specifically (unlike every later step) is constrained to a
+//     conservative distance.
+//   - index 1 (0.8): ratio 0.8/0.4 = 2x -- the dragged axis's own starting
+//     scale component doubles.
+//   - index 2 (1.2): ratio 1.2/0.4 = 3x -- continues scaling UP, proving a
+//     multi-step drag (not just a single grab-to-release jump).
+//   - index 3 (0.4): ratio 0.4/0.4 = 1x -- back to the entity's own starting
+//     scale exactly, proving the ratio is computed fresh against the FIXED
+//     grab-time anchor every frame, not compounded step-over-step (a
+//     compounding implementation would instead land at 3x * (1/3) = 1x too
+//     by coincidence here, which is exactly why the NEXT step below is what
+//     actually distinguishes the two).
+//   - index 4 (0.16): ratio 0.16/0.4 = 0.4x -- scales DOWN past the entity's
+//     own original scale, the "scale-down-past-original" case this phase's
+//     own brief explicitly calls for proof of, headlessly and not just in
+//     tests/gizmo_test.cpp.
+// Starts at 0.4 (reusing kDebugGizmoDragOffsets' own proven-safe first
+// value verbatim, not a fresh guess) rather than exactly 0.0 -- the
+// identical "a grab landing exactly on the gizmo's own origin is
+// geometrically ambiguous between all three axis handles" reasoning
+// kDebugGizmoDragOffsets' own comment already documents, PLUS (uniquely to
+// scale) kGizmoScaleMinGrabDistance's own near-zero-denominator floor
+// (gizmo.hpp) -- 0.4 is comfortably clear of both.
+//
+// Unlike kDebugGizmoDragOffsets (which only has to clear those TWO floors),
+// the scale grab has a THIRD, tighter constraint the translate grab does
+// not: it must also land WITHIN the gizmo's own actually-drawn, actually-
+// pickable handle length (gizmoAxisLength(), clamped in
+// hitTestGizmoAxes()) -- a fresh GRAB (unlike every later step, which
+// re-projects onto the INFINITE line with no clamping at all, see
+// updateGizmoScaleDrag()'s own "currently dragging" branch) is a real
+// hit-test against a FINITE, camera-distance-scaled segment. An earlier
+// version of this script started its grab at world distance 1.0, which
+// silently missed that handle entirely for this demo scene's own default
+// camera distance (the ray aimed at a point beyond the handle's own clamped
+// tip lands nowhere near the CLAMPED pick point hitTestGizmoAxes() actually
+// tests against) -- confirmed directly: every frame logged the SAME
+// unchanged starting scale, never advancing, because the grab itself never
+// registered in the first place. 0.4 (kDebugGizmoDragOffsets' own already-
+// proven value, at this same demo scene's own default camera distance) is
+// the fix; every LATER step is free to reach further out along the same
+// fixed axis LINE (proportionally, up to 1.2, still less than translate's
+// own proven-safe 2.4) since only the grab step is ever hit-tested against
+// the handle's own finite drawn length.
+constexpr float kDebugGizmoScaleDragTargetT[] = {0.4f, 0.8f, 1.2f, 0.4f, 0.16f};
+constexpr std::size_t kDebugGizmoScaleDragStepCount =
+    sizeof(kDebugGizmoScaleDragTargetT) / sizeof(kDebugGizmoScaleDragTargetT[0]);
+
+// This debug script always drags the X handle -- the identical "fixed one
+// axis, keep the script's own expected result trivial to state and verify by
+// hand" scope choice kDebugGizmoDragAxis/kDebugGizmoRotateDragAxis above
+// both already document; the underlying updateGizmoScaleDrag()/
+// hitTestGizmoAxes() machinery itself is fully axis-generic (see
+// tests/gizmo_test.cpp, which exercises all three).
+constexpr GizmoAxis kDebugGizmoScaleDragAxis = GizmoAxis::kX;
+
+// Phase 18k: the fixed base frame ENGINE_DEBUG_GIZMO_MODE_SWITCH's own
+// scripted setGizmoMode() calls fire at -- see
+// debugGizmoModeSwitchTargetsFromEnv()'s own comment for the full design.
+// 17, deliberately landing INSIDE kDebugGizmoDragStartFrame's own scripted
+// translate-drag window ([15, 20), see that constant's own comment) at its
+// third step (index 2), so a verification run combining
+// ENGINE_DEBUG_GIZMO_DRAG with ENGINE_DEBUG_GIZMO_MODE_SWITCH=e (a single
+// switch, translate -> rotate) shows the translate drag's own logged
+// position visibly stop advancing the instant the switch happens
+// (updateGizmo() stops being called at all once gizmoMode_ != kTranslate --
+// this alone is `renderDockspaceShell()`'s own dispatch `switch`, nothing to
+// do with `resetAllGizmoDragStates()`).
+//
+// kDebugGizmoModeSwitchFrameSpacing (below) is what turns that single proof
+// into the discriminating one: ENGINE_DEBUG_GIZMO_MODE_SWITCH=e,w schedules
+// a SECOND switch, back to translate, at frame 17 + spacing. Spacing 2 lands
+// that second switch at frame 19 -- still inside the SAME [15, 20) drag
+// window, at its LAST scripted step (index 4, offset 2.4 -- as far from the
+// frame-16 anchor as the script ever gets, so a resumed-stale-anchor
+// regression would produce the largest, most unmistakable position jump the
+// existing script's own offsets can produce), one frame before the script's
+// own release at frame 20. With `resetAllGizmoDragStates()` intact,
+// switching back to translate at frame 19 finds `gizmoDragState_` idle
+// (reset by the FIRST switch at frame 17): the drag script's own
+// mouse-still-down input at frame 19 has no fresh press to grab with
+// (mousePressedThisFrame is false for every step but the very first), so
+// nothing moves -- the position stays frozen at its frame-16 value all the
+// way through release. With that reset deleted or broken, `gizmoDragState_`
+// instead sits exactly where frame 16 left it (axis == kX, anchored at the
+// entity's ORIGINAL position) all through frames 17-18, so switching back to
+// translate at frame 19 finds `axis != kNone` -- "currently dragging" per
+// updateGizmoDrag()'s own state machine, which resumes unconditionally on
+// any held mouse regardless of `mousePressedThisFrame` -- and re-projects
+// onto that stale anchor using frame 19's own mouse position, teleporting
+// the entity to roughly the frame-19 offset instead of leaving it frozen.
+// See README.md's own Phase 18k Verify section for the exact logged
+// before/after values this produces, both with the fix intact and with it
+// deliberately neutered to confirm the proof actually discriminates.
+constexpr std::uint64_t kDebugGizmoModeSwitchFrame = 17;
+// See kDebugGizmoModeSwitchFrame's own comment immediately above for why 2
+// (landing the second scripted switch, when present, on the drag script's
+// own LAST step) is the deliberate choice here, not just "the next available
+// gap" -- unlike kDebugOpenSceneFrameSpacing's own 10-frame gap (chosen so
+// each step's heavier scene-load work has room to settle before the next),
+// this hook's own steps do no real work of their own (just a `gizmoMode_`
+// assignment + a drag-state reset), so there is no settling concern driving
+// this number -- only which exact drag-script step the second switch lands
+// on.
+constexpr std::uint64_t kDebugGizmoModeSwitchFrameSpacing = 2;
+
 // Phase 18h: ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO's own scripted frames --
 // see debugUndoOrRedoCountFromEnv()'s own comment for the full design. Both
 // well after kDebugGizmoDragStartFrame's own scripted drag has fully
@@ -2152,6 +2395,12 @@ Application::Application(int width, int height, const std::string& title, std::u
       // per-axis rotate/scale model-matrix loop gizmoArrowMesh_ above
       // already uses -- see renderGizmo()'s own updated comment.
       gizmoRingMesh_(makeGizmoRing()),
+      // Phase 18k: the scale gizmo's shared cube-tipped handle mesh -- see
+      // mesh.hpp's makeGizmoScaleHandle() and this class's own renderGizmo()
+      // header comment. Reuses gizmoShader_ and the identical per-axis
+      // rotate/scale model-matrix loop gizmoArrowMesh_/gizmoRingMesh_ above
+      // already use.
+      gizmoScaleMesh_(makeGizmoScaleHandle()),
       // Phase 9: the PBR sphere grid's shared geometry -- one Mesh, reused
       // (with a different PBRMaterial + Transform) by every sphere in
       // sphereInstances_ (built below, in the constructor body, since it
@@ -2464,20 +2713,19 @@ Application::Application(int width, int height, const std::string& title, std::u
         }
     }
 
-    // Phase 18j: ENGINE_DEBUG_GIZMO_MODE -- see debugGizmoModeFromEnv()'s
-    // own comment above for the full design. Applied here, in the
-    // constructor body (not gizmoMode_'s own in-class default), the same
-    // "apply a debug env-var override in the body" placement every other
-    // constructor-time debug flag in this class already follows (see e.g.
-    // debugForcePlayModeFromEnv()'s own call site comment for why). Only
-    // logged when it actually changes anything from the default -- an unset/
-    // "translate" run (every pre-18j behavior) stays silent here, matching
-    // this class's own "don't log a no-op" instinct elsewhere.
-    gizmoMode_ = debugGizmoModeFromEnv();
-    if (gizmoMode_ == GizmoMode::kRotate) {
-        LOG_INFO("ENGINE_DEBUG_GIZMO_MODE=rotate: the rotate gizmo (not the translate gizmo) is now the active "
-                  "gizmo tool");
-    }
+    // Phase 18j introduced ENGINE_DEBUG_GIZMO_MODE, applied as a direct
+    // `gizmoMode_ = ...` assignment here in the constructor body -- see
+    // debugGizmoModeFromEnv()'s own comment above for the full design/
+    // history. Phase 18k routes this through `setGizmoMode()` instead (the
+    // one place `gizmoMode_` is ever allowed to change, now that it's a
+    // real runtime-mutable value -- see that method's own application.hpp
+    // comment): a no-op here for the common unset/"translate" case (matches
+    // the in-class default, so setGizmoMode() itself declines to log or
+    // reset anything), and for a non-default starting mode, both the log
+    // line and (harmlessly, since nothing has dragged yet at construction
+    // time) the drag-state reset happen inside setGizmoMode() itself rather
+    // than duplicated here.
+    setGizmoMode(debugGizmoModeFromEnv());
 
     // Phase 18j: ENGINE_DEBUG_GIZMO_ROTATE_DRAG -- the identical resolve-
     // once-at-startup shape the ENGINE_DEBUG_GIZMO_DRAG block immediately
@@ -2501,6 +2749,48 @@ Application::Application(int width, int height, const std::string& title, std::u
                 LOG_WARN("ENGINE_DEBUG_GIZMO_ROTATE_DRAG=\"" + gizmoRotateDragName +
                           "\" does not match any entity's name");
             }
+        }
+    }
+
+    // Phase 18k: ENGINE_DEBUG_GIZMO_SCALE_DRAG -- the identical resolve-
+    // once-at-startup shape the ENGINE_DEBUG_GIZMO_DRAG/_ROTATE_DRAG blocks
+    // above both already establish, just for the scale gizmo's own scripted
+    // drag. See debugGizmoScaleDragEntityNameFromEnv()'s own comment for why
+    // this alone does nothing without ALSO setting ENGINE_DEBUG_GIZMO_MODE=
+    // scale (and ENGINE_DEBUG_SELECT).
+    {
+        const std::string gizmoScaleDragName = debugGizmoScaleDragEntityNameFromEnv();
+        if (!gizmoScaleDragName.empty()) {
+            const EntityId found = findEntityByName(registry_, gizmoScaleDragName);
+            if (found.valid()) {
+                debugGizmoScaleDragEntity_ = found;
+                LOG_INFO("ENGINE_DEBUG_GIZMO_SCALE_DRAG=\"" + gizmoScaleDragName +
+                          "\": will script a synthetic scale-gizmo drag against entity " +
+                          std::to_string(found.index()) + " starting frame " +
+                          std::to_string(kDebugGizmoScaleDragStartFrame));
+            } else {
+                LOG_WARN("ENGINE_DEBUG_GIZMO_SCALE_DRAG=\"" + gizmoScaleDragName +
+                          "\" does not match any entity's name");
+            }
+        }
+    }
+
+    // Phase 18k: ENGINE_DEBUG_GIZMO_MODE_SWITCH -- see
+    // debugGizmoModeSwitchTargetsFromEnv()'s own comment for the full design.
+    // Resolved once here, at startup, exactly like every other debug target
+    // above -- update() is what actually calls setGizmoMode() with each
+    // entry, one per fixed scripted frame (kDebugGizmoModeSwitchFrame +
+    // kDebugGizmoModeSwitchFrameSpacing * index), the identical "parse once,
+    // consume one entry per scripted frame" shape debugOpenSceneNames_ below
+    // already establishes.
+    {
+        debugGizmoModeSwitchTargets_ = debugGizmoModeSwitchTargetsFromEnv();
+        for (std::size_t i = 0; i < debugGizmoModeSwitchTargets_.size(); ++i) {
+            const std::uint64_t stepFrame = kDebugGizmoModeSwitchFrame + kDebugGizmoModeSwitchFrameSpacing * i;
+            LOG_INFO("ENGINE_DEBUG_GIZMO_MODE_SWITCH: will simulate switching the active gizmo tool to \"" +
+                      gizmoModeName(debugGizmoModeSwitchTargets_[i]) + "\" at frame " + std::to_string(stepFrame) +
+                      " (" + std::to_string(i + 1) + "/" + std::to_string(debugGizmoModeSwitchTargets_.size()) +
+                      ")");
         }
     }
 
@@ -3115,6 +3405,110 @@ void Application::update(double deltaTime, const InputState& input) {
         // (findEntityByName(), constructor) has a Transform by construction.
     }
 
+    // Phase 18k: ENGINE_DEBUG_GIZMO_SCALE_DRAG's own scripted synthetic
+    // scale drag -- the identical shape the ENGINE_DEBUG_GIZMO_DRAG/
+    // _ROTATE_DRAG blocks above both already establish (this block only ever
+    // decides WHAT synthetic mouse input to feed EditorUI this frame; the
+    // real hit-test/drag-state-machine/Transform-mutation code runs later
+    // this SAME frame, inside EditorUI's own updateGizmoScale(), called from
+    // render() -- only when gizmoMode_ == kScale). Every scale logged below
+    // is therefore this frame's value as of the START of update(), the
+    // identical one-frame latency the translate/rotate blocks above both
+    // document.
+    //
+    // Like the rotate block above (and unlike the translate block), this
+    // does NOT need to cache the entity's own start scale across frames --
+    // kDebugGizmoScaleDragTargetT's own entries are ABSOLUTE world-space
+    // distances from the gizmo's CURRENT origin (re-read fresh every frame
+    // below, exactly like EditorUI::updateGizmoScale() itself re-projects
+    // onto the SAME frozen anchor line every frame -- see
+    // GizmoScaleDragState's own gizmo.hpp comment), not deltas relative to
+    // anything this block itself needs to remember.
+    if (debugGizmoScaleDragEntity_.has_value()) {
+        Transform* transform = registry_.getComponent<Transform>(*debugGizmoScaleDragEntity_);
+        if (transform != nullptr) {
+            if (frameCount_ == kDebugGizmoScaleDragStartFrame) {
+                debugGizmoScaleDragStartScale_ = transform->scale();
+            }
+
+            if (frameCount_ >= kDebugGizmoScaleDragStartFrame &&
+                frameCount_ < kDebugGizmoScaleDragStartFrame + kDebugGizmoScaleDragStepCount) {
+                const std::size_t step = static_cast<std::size_t>(frameCount_ - kDebugGizmoScaleDragStartFrame);
+                // Same root-entity "local position IS world position"
+                // simplification gizmo.hpp's own header comment documents
+                // for the translate gizmo -- every entity this env var can
+                // target in this engine's own demo scene is unparented, so
+                // the gizmo's own origin is just the entity's own live
+                // position (scaling never moves it).
+                const glm::vec3 gizmoOrigin = transform->position();
+                const glm::vec3 targetWorldPoint =
+                    gizmoOrigin + gizmoAxisDirection(kDebugGizmoScaleDragAxis) * kDebugGizmoScaleDragTargetT[step];
+                const float aspect = viewportHeight_ != 0
+                                          ? static_cast<float>(viewportWidth_) / static_cast<float>(viewportHeight_)
+                                          : 1.0f;
+                const std::optional<glm::vec2> screenPoint =
+                    worldPointToScreenPoint(targetWorldPoint, static_cast<float>(viewportWidth_),
+                                             static_cast<float>(viewportHeight_), camera_.getViewMatrix(),
+                                             camera_.getProjectionMatrix(aspect));
+                if (screenPoint.has_value()) {
+                    editorUI_.setDebugMouseOverride(*screenPoint, /*mouseDown=*/true,
+                                                     /*mousePressedThisFrame=*/step == 0);
+                } else {
+                    LOG_WARN("ENGINE_DEBUG_GIZMO_SCALE_DRAG: target world point projects behind the camera at "
+                              "step " + std::to_string(step) + "; skipping");
+                }
+                const glm::vec3 scale = transform->scale();
+                LOG_INFO("Phase 18k gizmo-scale-drag-verify: frame " + std::to_string(frameCount_) + " step " +
+                          std::to_string(step) + ", entity " + std::to_string(debugGizmoScaleDragEntity_->index()) +
+                          " scale = (" + std::to_string(scale.x) + ", " + std::to_string(scale.y) + ", " +
+                          std::to_string(scale.z) + ")");
+            } else if (frameCount_ == kDebugGizmoScaleDragStartFrame + kDebugGizmoScaleDragStepCount) {
+                // One frame past the last scripted scale step -- release the
+                // mouse button, ending the drag the same way a real
+                // mouse-button-up would (updateGizmoScaleDrag()'s own
+                // release-branch contract, gizmo.hpp).
+                editorUI_.setDebugMouseOverride(std::nullopt, /*mouseDown=*/false, /*mousePressedThisFrame=*/false);
+                const glm::vec3 scale = transform->scale();
+                LOG_INFO("Phase 18k gizmo-scale-drag-verify: frame " + std::to_string(frameCount_) +
+                          " release, entity " + std::to_string(debugGizmoScaleDragEntity_->index()) +
+                          " final scale = (" + std::to_string(scale.x) + ", " + std::to_string(scale.y) + ", " +
+                          std::to_string(scale.z) + "), start scale was (" +
+                          std::to_string(debugGizmoScaleDragStartScale_.x) + ", " +
+                          std::to_string(debugGizmoScaleDragStartScale_.y) + ", " +
+                          std::to_string(debugGizmoScaleDragStartScale_.z) + ")");
+            }
+        }
+        // else: defensive only -- every entity this env var can resolve to
+        // (findEntityByName(), constructor) has a Transform by construction.
+    }
+
+    // Phase 18k: ENGINE_DEBUG_GIZMO_MODE_SWITCH's own scripted setGizmoMode()
+    // calls -- see debugGizmoModeSwitchTargetsFromEnv()'s own comment and
+    // kDebugGizmoModeSwitchFrame's own comment (both above) for the full
+    // design/why these frames in particular. Each entry fires exactly once
+    // (frameCount_ is monotonically increasing, so a given `stepFrame` can
+    // never match twice), calling the exact same setGizmoMode() a real
+    // edge-triggered W/E/R press (run(), below) calls -- only the raw INPUT
+    // (a key tap, which Xvfb has no physical keyboard to generate) is
+    // synthetic here; the state transition it causes, including the
+    // stale-drag-state reset, is the exact same production code every real
+    // press runs through. The identical one-entry-per-scripted-frame
+    // consumption shape the ENGINE_DEBUG_OPEN_SCENE loop just below already
+    // establishes -- reused here so a single ENGINE_DEBUG_GIZMO_MODE_SWITCH=
+    // e,w run can chain "switch away mid-drag, then switch back mid-drag"
+    // the way one single-value switch never could (see
+    // debugGizmoModeSwitchTargetsFromEnv()'s own comment for why that
+    // specifically is what closes this hook's own coverage gap).
+    for (std::size_t i = 0; i < debugGizmoModeSwitchTargets_.size(); ++i) {
+        const std::uint64_t stepFrame = kDebugGizmoModeSwitchFrame + kDebugGizmoModeSwitchFrameSpacing * i;
+        if (frameCount_ == stepFrame) {
+            LOG_INFO("ENGINE_DEBUG_GIZMO_MODE_SWITCH: firing entry " + std::to_string(i + 1) + "/" +
+                      std::to_string(debugGizmoModeSwitchTargets_.size()) + " at frame " +
+                      std::to_string(frameCount_));
+            setGizmoMode(debugGizmoModeSwitchTargets_[i]);
+        }
+    }
+
     // Phase 18h: ENGINE_DEBUG_UNDO/ENGINE_DEBUG_REDO's own scripted frames --
     // see debugUndoOrRedoCountFromEnv()'s own comment for the full design.
     // Fires exactly once each (frameCount_ is monotonically increasing, so
@@ -3486,6 +3880,24 @@ void Application::renderSelectionMask(const glm::mat4& view, const glm::mat4& pr
     selectedModel->model->drawDepthOnly(*selectionMaskShader_, worldMatrix);
 }
 
+void Application::setGizmoMode(GizmoMode mode) {
+    // See this method's own application.hpp header comment for the full
+    // design/why. No-op when nothing actually changes -- matches this
+    // class's own established "only act/log when something real happened"
+    // instinct elsewhere (e.g. the Phase 18j constructor-time gizmoMode_ log
+    // this method's own call site comment references).
+    if (mode == gizmoMode_) {
+        return;
+    }
+    LOG_INFO("Gizmo mode switched: \"" + gizmoModeName(gizmoMode_) + "\" -> \"" + gizmoModeName(mode) + "\"");
+    gizmoMode_ = mode;
+    // The landmine fix: abandon any drag in progress in EITHER tool (not
+    // just whichever one WAS active) so neither can resume from a stale
+    // anchor later -- see resetAllGizmoDragStates()'s own editor_ui.hpp
+    // comment for exactly what this resets.
+    editorUI_.resetAllGizmoDragStates();
+}
+
 void Application::renderGizmo(const glm::mat4& view, const glm::mat4& projection) {
     // Phase 18e: no selection, or the selection has no Transform to place a
     // gizmo at -- draw nothing, matching this engine's established "no
@@ -3553,14 +3965,25 @@ void Application::renderGizmo(const glm::mat4& view, const glm::mat4& projection
     gizmoShader_->setMat4("uView", view);
     gizmoShader_->setMat4("uProjection", projection);
 
-    // Phase 18j: which of the two gizmo tools' shared geometry this frame's
-    // three draws use -- gizmoRingMesh_ (mesh.hpp's makeGizmoRing()) needs
-    // no rotation table of its own beyond the one already built for
-    // gizmoArrowMesh_ below, since it deliberately lies in the local Y-Z
-    // plane (its own normal along local +X), the identical local-+X
-    // convention makeGizmoArrow() already uses -- see this method's own
-    // updated application.hpp comment.
-    Mesh& gizmoMesh = (gizmoMode_ == GizmoMode::kRotate) ? gizmoRingMesh_ : gizmoArrowMesh_;
+    // Phase 18j/18k: which of the three gizmo tools' shared geometry this
+    // frame's three draws use -- gizmoRingMesh_ (mesh.hpp's makeGizmoRing())
+    // and gizmoScaleMesh_ (makeGizmoScaleHandle()) both need no rotation
+    // table of their own beyond the one already built for gizmoArrowMesh_
+    // below, since both deliberately extend along/lie perpendicular to local
+    // +X (a ring's own normal, a scale handle's own shaft direction), the
+    // identical local-+X convention makeGizmoArrow() already uses -- see
+    // this method's own updated application.hpp comment.
+    Mesh& gizmoMesh = [&]() -> Mesh& {
+        switch (gizmoMode_) {
+            case GizmoMode::kRotate:
+                return gizmoRingMesh_;
+            case GizmoMode::kScale:
+                return gizmoScaleMesh_;
+            case GizmoMode::kTranslate:
+            default:
+                return gizmoArrowMesh_;
+        }
+    }();
     gizmoMesh.bind();
 
     struct GizmoAxisDraw {
@@ -5904,6 +6327,60 @@ void Application::run() {
             redo();
         }
         redoChordWasDown_ = redoChordDown;
+
+        // Phase 18k: W (translate) / E (rotate) / R (scale) -- the real,
+        // live gizmo tool switcher both Phase 18e and Phase 18j explicitly
+        // deferred until scale existed too, so it could be built once
+        // instead of revised twice. The identical edge-triggered,
+        // direct-window_-read shape ctrlSDown/ctrlZDown/redoChordDown above
+        // already establish -- single keys, not chords, but gated the same
+        // `!ImGui::GetIO().WantCaptureKeyboard` way (don't fire while an
+        // Inspector text/drag field has keyboard focus -- the identical
+        // "editor-chrome shortcut, not one of the camera/window-lifecycle
+        // actions InputActionMap exists to bind" reasoning those three chords'
+        // own comments already give applies here too) PLUS a new
+        // `!cameraCaptured_` gate: W and E specifically collide with
+        // InputActionMap's own MoveForward/MoveUp default bindings
+        // (input_action_map.cpp) -- without this gate, flying the free-fly
+        // camera with W would ALSO switch the gizmo to translate on every
+        // single held frame's first poll, and E (also bound to MoveUp
+        // alongside Space) would fight with the rotate gizmo the same way.
+        // Gating on `!cameraCaptured_` sidesteps that collision entirely
+        // (the camera and the gizmo are never interactable at the same
+        // time -- captured means WASD/mouse fly the camera and no ImGui
+        // panel, gizmo included, can be clicked at all) and, not
+        // coincidentally, is also the only state in which switching the
+        // active gizmo tool means anything real to switch. Unity's own W/E/R
+        // convention (not Blender's G/R/S) precisely because G/R/S are
+        // ordinary letters a user would otherwise type into a future
+        // Inspector text field -- W/E/R are no different in that specific
+        // regard, which is exactly why the WantCaptureKeyboard gate matters
+        // here at least as much as it does for Ctrl+S/Ctrl+Z above.
+        //
+        // Each press calls setGizmoMode() -- the ONE place gizmoMode_ is
+        // ever allowed to actually change (see that method's own
+        // application.hpp comment for the full landmine-fix design) -- never
+        // a direct `gizmoMode_ = ...` assignment here.
+        const bool wDown = !ImGui::GetIO().WantCaptureKeyboard && !cameraCaptured_ &&
+                            window_.isKeyPressed(GLFW_KEY_W);
+        if (wDown && !wKeyWasDown_) {
+            setGizmoMode(GizmoMode::kTranslate);
+        }
+        wKeyWasDown_ = wDown;
+
+        const bool eDown = !ImGui::GetIO().WantCaptureKeyboard && !cameraCaptured_ &&
+                            window_.isKeyPressed(GLFW_KEY_E);
+        if (eDown && !eKeyWasDown_) {
+            setGizmoMode(GizmoMode::kRotate);
+        }
+        eKeyWasDown_ = eDown;
+
+        const bool rDown = !ImGui::GetIO().WantCaptureKeyboard && !cameraCaptured_ &&
+                            window_.isKeyPressed(GLFW_KEY_R);
+        if (rDown && !rKeyWasDown_) {
+            setGizmoMode(GizmoMode::kScale);
+        }
+        rKeyWasDown_ = rDown;
 
         update(deltaTime, input);
         render();

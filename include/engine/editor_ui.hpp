@@ -819,6 +819,39 @@ public:
     // never calls this at all.
     void setDebugMouseOverride(std::optional<glm::vec2> screenPos, bool mouseDown, bool mousePressedThisFrame);
 
+    // Phase 18k: resets all three gizmo tools' own persistent cross-frame
+    // drag state (gizmoDragState_/gizmoRotateDragState_/gizmoScaleDragState_
+    // below) back to their idle default (GizmoAxis::kNone, every anchor
+    // field meaningless again) in one call -- the fix for the specific
+    // landmine Phase 18j's own review explicitly left open for this phase:
+    // through Phase 18j, `gizmoMode_` (application.hpp) never changed after
+    // construction, so whichever ONE of updateGizmo()/updateGizmoRotate()
+    // actually ran each frame was always the SAME one for the whole run --
+    // the other tool's own drag state could never go stale, because the
+    // tool that owned it was never skipped mid-drag. Phase 18k adds real,
+    // live, mid-run mode switching (W/E/R, Application::run(), via
+    // Application::setGizmoMode()) for the first time, which breaks that
+    // assumption: renderDockspaceShell() only ever calls ONE of the three
+    // update*() functions per frame (whichever matches the CURRENT
+    // gizmoMode), so a drag left in progress in one tool at the exact frame
+    // the mode switches away from it would otherwise sit frozen with a real
+    // grabbed axis and a now-stale anchor indefinitely -- ready to resume
+    // from that stale anchor (potentially teleporting the entity) if the
+    // user ever switches back to that same tool while the mouse happens to
+    // still be down.
+    //
+    // Called from exactly ONE place: Application::setGizmoMode() (the one
+    // place `gizmoMode_` itself is ever allowed to change), every time the
+    // mode genuinely changes -- never from inside this class itself, and
+    // never conditionally on which tool was actually mid-drag (unconditional
+    // is simpler AND strictly safer: resetting a tool that was already idle
+    // is a harmless no-op, exactly matching this class's own default-
+    // constructed GizmoDragState/GizmoRotateDragState/GizmoScaleDragState
+    // values). A public method (unlike updateGizmo()/updateGizmoRotate()/
+    // updateGizmoScale() themselves, all private) specifically because its
+    // one real caller is Application, not code inside this class.
+    void resetAllGizmoDragStates();
+
     // The Viewport panel's own most recently recorded
     // ImGui::GetContentRegionAvail(), from the last renderDockspaceShell()
     // call -- 0 before that has ever run once. Application::render() reads
@@ -979,6 +1012,40 @@ private:
                             const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
                             std::optional<Command>& transformEditCommitted);
 
+    // Phase 18k: the scale gizmo's own mouse-interaction handling -- the
+    // identical role/shape updateGizmo()/updateGizmoRotate() above both
+    // play for their own tools, adapted for cube-tipped axis handles and a
+    // scale RATIO instead of an absolute position or an incremental angle:
+    // hit-tests which handle (if any) the mouse is over -- reusing
+    // gizmo.hpp's hitTestGizmoAxes() UNMODIFIED, the same straight-line-
+    // segment picking the translate gizmo already uses (a scale handle is
+    // geometrically the same finite axis segment for hit-testing purposes;
+    // only its DRAWN tip shape differs -- see that reuse's own gizmo.hpp
+    // comment), runs gizmo.hpp's updateGizmoScaleDrag() state machine, and,
+    // while dragging, calls `transform->setScale(*result.newScale)` directly
+    // (unlike updateGizmoRotate()'s own transform->rotate(), a scale drag
+    // hands back an ABSOLUTE new scale every frame, the identical
+    // "setPosition()-shaped" application updateGizmo() itself already uses
+    // for translate, just for the scale field instead of position). A
+    // private member function for the identical reason updateGizmo()/
+    // updateGizmoRotate() both are: it needs this class's own persistent
+    // cross-frame state (gizmoScaleDragState_ below).
+    //
+    // Called from renderDockspaceShell() INSTEAD OF updateGizmo()/
+    // updateGizmoRotate() (never more than one of the three in the same
+    // frame) whenever that call's own `gizmoMode` parameter is
+    // GizmoMode::kScale -- same placement/ordering constraint and the
+    // identical return-value contract (true on any frame the mouse is
+    // hovering OR dragging a handle, so the double-click camera-capture
+    // guard suppresses itself) updateGizmo()'s own header comment documents
+    // in full. Every other parameter mirrors updateGizmo()'s own same-named
+    // parameter exactly.
+    bool updateGizmoScale(EntityRegistry& registry, std::optional<EntityId> selectedEntity,
+                           const glm::vec3& cameraPosition, const glm::mat4& cameraView,
+                           const glm::mat4& cameraProjection, const ImVec2& panelScreenPos,
+                           const ImVec2& contentRegion, const ImVec2& toolbarBgMin, const ImVec2& toolbarBgMax,
+                           std::optional<Command>& transformEditCommitted);
+
     bool layoutBuilt_ = false;
     // Phase 17d: true from the frame a title-bar drag starts (a left-click on
     // the title bar's own empty, non-button area -- see renderTitleBar()'s
@@ -1076,6 +1143,25 @@ private:
     // updateGizmoRotate()'s own header comment). Meaningless (left at its
     // default) whenever gizmoRotateDragState_.axis == GizmoAxis::kNone.
     glm::quat gizmoRotateDragStartRotation_{1.0f, 0.0f, 0.0f, 0.0f};
+
+    // Phase 18k: the scale gizmo's own persistent cross-frame drag state --
+    // gizmo.hpp's own GizmoScaleDragState, the identical "not dragging /
+    // dragging-axis-X/Y/Z" state machine described there, threaded back in
+    // as `current` on every updateGizmoScale() call and overwritten with
+    // whatever it returns. Has to persist across frames for the same reason
+    // gizmoDragState_/gizmoRotateDragState_ above both do.
+    GizmoScaleDragState gizmoScaleDragState_;
+    // The selected entity's own Transform::scale() as of the frame
+    // gizmoScaleDragState_ transitioned from kNone to a real axis -- used
+    // ONLY as the `before` half of the completed-edit undo Command built on
+    // release, the identical role gizmoRotateDragStartRotation_ above plays
+    // for the rotate gizmo's own rotation edits (NOT a re-applied anchor the
+    // way gizmoDragStartLocalPosition_ is for translate -- updateGizmoScale()
+    // instead assigns the entity's LIVE scale directly to each frame's
+    // absolute `result.newScale`, the identical "setPosition()-shaped"
+    // application updateGizmo() itself already uses). Meaningless (left at
+    // its default) whenever gizmoScaleDragState_.axis == GizmoAxis::kNone.
+    glm::vec3 gizmoScaleDragStartScale_{1.0f, 1.0f, 1.0f};
 
     // Phase 15d: built exactly once, in the constructor -- see this class's
     // own header comment above and asset_browser.hpp's own "Caching"

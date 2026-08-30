@@ -9946,6 +9946,391 @@ the identical "grow the existing pure module" precedent Phase 18g's own
     three-rings screenshot reports **17,360** of 480,000 pixels differing,
     an unmistakable, visually-confirmed rotation.
 
+### Phase 18k: a scale gizmo, plus the real W/E/R move/rotate/scale tool switcher
+
+The third and final gizmo tool, plus the real, live, in-UI tool switcher both
+Phase 18e and Phase 18j explicitly deferred until now -- "once scale exists
+too, so it can be built once for all three tools instead of partially now
+and revised twice" (Phase 18j's own README section, above). Both halves land
+in this one phase, closing the arc those two phases opened.
+
+- **Rendering: `makeGizmoScaleHandle()`, a cube-tipped handle reusing
+  `makeGizmoArrow()`'s own shaft verbatim.** `mesh.hpp`'s new
+  `makeGizmoScaleHandle()` builds the identical thin cylindrical shaft
+  `makeGizmoArrow()` already builds (byte-for-byte the same construction,
+  duplicated rather than shared via a helper -- matching this file's own
+  existing precedent of each `makeGizmoXyz()` being a fully self-contained,
+  independently readable builder), then caps it with a small solid CUBE
+  (6 faces, 4 vertices each, real per-face outward normals, the identical
+  `makeCube()` idiom just translated along +X instead of centered on the
+  origin) in place of that arrow's cone -- the standard DCC-tool visual
+  distinction between a move handle and a scale handle. `shaftLength=0.82`
+  + `tipSize=0.18` sum to the same unit length `makeGizmoArrow()`/
+  `makeGizmoRing()` both already use, so `Application::renderGizmo()`'s
+  existing per-axis rotation table (X: no rotation; Y: +90 deg about Z; Z:
+  -90 deg about Y) and `gizmoAxisLength()`-based uniform scale apply to it
+  completely unmodified -- a plain 3-way mesh selector
+  (`gizmoArrowMesh_`/`gizmoRingMesh_`/`gizmoScaleMesh_`) is the only new
+  code that method needed.
+- **Hit-testing: `hitTestGizmoAxes()`, reused unmodified.** A scale handle's
+  pickable geometry is the exact same finite line segment from the gizmo's
+  own origin outward along one axis that the translate gizmo's arrows
+  already use -- the cube-vs-cone tip only changes what's DRAWN, never what
+  `hitTestGizmoAxes()` tests against -- so `EditorUI::updateGizmoScale()`
+  calls it verbatim, exactly like `updateGizmo()` does. No second,
+  near-duplicate hit-test function was written.
+- **Interaction math: `gizmo.hpp`'s new `updateGizmoScaleDrag()`, reusing
+  `closestPointsBetweenLines()` verbatim and converting its result into a
+  RATIO instead of a delta.** The chosen mapping, world-space distance along
+  the axis to scale multiplier: `ratio = (current distance from the gizmo's
+  own origin to where the ray currently projects on the frozen axis line) /
+  (that SAME distance at grab time)`, then `newComponent = startScale[axis]
+  * ratio` -- dragging further from the origin than the grab point scales
+  UP, dragging back toward (or past) the origin scales DOWN (then flips
+  negative), and the gizmo's own handle naturally tracks the growing/
+  shrinking object since it's drawn at the entity's own live position with
+  no dependency on scale. Both the grab-time anchor (`startAxisT`) and the
+  origin the axis line is measured from (`startGizmoOrigin`) are frozen at
+  grab time and never re-read mid-drag, the identical "the axis line has to
+  stay fixed in space for the whole gesture" discipline `GizmoDragState`
+  already establishes for translate -- applied here for a related but
+  distinct reason (`GizmoDragState`'s own anchor freezes because the
+  ENTITY's position is what's changing under it; scale's anchor freezes
+  because re-reading the origin fresh wouldn't itself move, but re-deriving
+  the ratio's own denominator from a moving reference would still make the
+  math depend on frame ordering in a way a fixed anchor avoids). A grab is
+  declined -- not just when `closestPointsBetweenLines()` itself fails
+  (ray nearly parallel to the axis, the identical translate-gizmo case) --
+  but also when the grab lands closer than `kGizmoScaleMinGrabDistance`
+  (0.01 world units) to the gizmo's own origin, a new degeneracy unique to
+  scale: the grab distance is the ratio's own DENOMINATOR, so a near-zero
+  one is declined the same "no meaningful anchor, don't divide by ~0"
+  instinct this file already applies to every other near-degenerate case,
+  just guarding a division instead of a determinant/dot-product this time.
+- **The zero/negative-scale clamp: `kGizmoMinScaleComponent = 0.01`, applied
+  to the RESULT, not the ratio.** Checked against `transform.hpp`'s
+  `Transform::getModelMatrix()`, not assumed: a zero scale component
+  collapses the model matrix along that axis to a singular (non-invertible)
+  matrix, degenerate for any downstream code that needs to invert it (a
+  normal matrix built as `transpose(inverse(mat3(model)))`, the standard
+  technique this engine's own lit shaders use); a NEGATIVE component mirrors
+  the mesh along that axis without correspondingly flipping its triangle
+  winding, which this engine's own rendering does not correct for on its
+  own -- the mesh would render visibly inside-out/inverted (and, combined
+  with the same uninverted normal-matrix concern, wrong-signed lighting
+  normals) rather than the "flip in place" a user dragging a handle back
+  past the origin would actually expect. `updateGizmoScaleDrag()` therefore
+  clamps `max(rawComponent, kGizmoMinScaleComponent)` on every frame's
+  result -- catching both a too-small-positive raw ratio AND a negative one
+  the same way (`max()` against a positive floor handles both in one
+  comparison). 0.01, not 0.0, both because a literal zero is exactly the
+  degenerate case being avoided and because it happens to already match this
+  engine's own pre-existing Inspector convention -- the Transform panel's
+  own `Scale` `DragFloat3` (`editor_ui.cpp`, predating this phase) was
+  already hand-clamped to `[0.01, 100.0]`, so this phase's own floor is not
+  a new number invented in isolation, it's the SAME one the rest of this
+  editor already treats as "the smallest sane scale."
+- **State machine: `updateGizmoScaleDrag()`, the same idle/dragging-X/Y/Z
+  shape as the other two tools' own state machines.** `GizmoScaleDragState`
+  (`axis`, `startAxisT`, `startEntityScale`, `startGizmoOrigin`) mirrors
+  `GizmoDragState`'s own shape field-for-field, adapted for the ratio math
+  above; edge-triggered grab (only a fresh `mousePressedThisFrame` press
+  starts a drag, a held-but-not-fresh press does nothing, the identical
+  contract `updateGizmoDrag()`/`updateGizmoRotateDrag()` both already
+  enforce); a clean release (`!mouseDown` returns to the default-constructed
+  idle state); and the same "hold the last-known anchor, don't jump to
+  garbage" resume-cleanly behavior on a briefly-degenerate mid-drag frame.
+  `EditorUI::updateGizmoScale()` is a clean parallel to `updateGizmo()`/
+  `updateGizmoRotate()` (never a forced three-way merge), assigning the
+  entity's live scale directly to each frame's absolute `result.newScale`
+  (the identical `setPosition()`-shaped application `updateGizmo()` already
+  uses for translate -- contrast `updateGizmoRotate()`'s own incremental
+  `transform->rotate()`), and builds the identical before/after
+  `TransformSnapshot` undo `Command` on release, guarded by
+  `transformSnapshotsEqual()` the same way both other tools already are.
+  **Camera-capture precedence, the identical mechanism.** `updateGizmoScale()`
+  returns `true` on any frame the mouse is hovering OR dragging a handle --
+  the same `gizmoActiveThisFrame` signal feeding `renderDockspaceShell()`'s
+  double-click-to-capture guard that both other tools' own return values
+  already do, so a scale drag suppresses Phase 16's camera capture through
+  the exact same check, not a second one.
+
+#### The real switcher: W (translate) / E (rotate) / R (scale)
+
+- **Unity's convention, not Blender's, and specifically because of it.**
+  Blender's own G/R/S would collide with ordinary typing into a future
+  Inspector text field (G, R, and S are all real letters); W/E/R are no
+  different in that specific regard, which is exactly why the same
+  `!ImGui::GetIO().WantCaptureKeyboard` gate this project's existing
+  Ctrl+S/Ctrl+Z shortcuts already use matters here too -- reused verbatim,
+  not a new gating scheme.
+- **Single keys, not chords, but the identical edge-triggered,
+  direct-`window_`-read shape.** `Application::run()`'s new
+  `wKeyWasDown_`/`eKeyWasDown_`/`rKeyWasDown_` members are three separate
+  bools (not one shared "was any tool-switch key down"), the identical
+  reason `ctrlZWasDown_`/`redoChordWasDown_` are already two separate bools:
+  releasing W and, in the same gesture, pressing E must register as a fresh
+  switch, not be suppressed by translate's own edge-tracking.
+- **A new gate neither Ctrl+S nor Ctrl+Z needed: `!cameraCaptured_`.** W and
+  E specifically collide with `InputActionMap`'s own `MoveForward`/`MoveUp`
+  default bindings (`input_action_map.cpp` -- `MoveUp` is bound to BOTH
+  Space and E). Without this gate, flying the free-fly camera with W would
+  also switch the gizmo to translate on every held frame's first poll, and E
+  would fight the rotate gizmo the same way. Gating on `!cameraCaptured_`
+  sidesteps the collision entirely (the camera and a gizmo are never
+  interactable at the same time -- captured means WASD/mouse fly the camera
+  and no ImGui panel, gizmo included, can be clicked at all) and, not
+  coincidentally, is also the only state in which switching the active tool
+  means anything real to switch.
+- **`Application::setGizmoMode()`: the ONE place `gizmoMode_` is ever
+  allowed to change.** Both the constructor's own
+  `ENGINE_DEBUG_GIZMO_MODE` application and `run()`'s new W/E/R handling
+  call this rather than assigning `gizmoMode_` directly -- a no-op (no log,
+  no reset) when the requested mode already matches the current one, so a
+  real W press while translate is already active, or the constructor
+  applying an unset/"translate" env var onto the in-class default, are both
+  harmless. `ENGINE_DEBUG_GIZMO_MODE` still exists, now just as the
+  STARTING mode for a headless run (it now also accepts `scale`) --
+  verified both still work, see Verify below.
+- **The landmine fix: `EditorUI::resetAllGizmoDragStates()`, called from
+  `setGizmoMode()` every time the mode genuinely changes.** Phase 18j's own
+  review left this explicit, already-known gap open: through Phase 18j,
+  `gizmoMode_` was set exactly once, in the constructor, and never touched
+  again for the rest of a run -- so whichever ONE of
+  `updateGizmo()`/`updateGizmoRotate()` ran each frame was always the SAME
+  one for the whole run, and the OTHER tool's own persistent drag state
+  (`gizmoDragState_`/`gizmoRotateDragState_`) could never go stale, because
+  the tool that owned it was never skipped mid-drag. This phase adds real,
+  live, mid-run switching for the first time, which breaks that assumption:
+  `renderDockspaceShell()` only ever calls ONE of
+  `updateGizmo()`/`updateGizmoRotate()`/`updateGizmoScale()` per frame
+  (whichever matches the CURRENT `gizmoMode_`) -- so a drag left in progress
+  in one tool at the exact frame the mode switches away from it would
+  otherwise sit frozen with a real grabbed axis and a now-stale anchor
+  indefinitely, ready to resume from that stale anchor (potentially
+  teleporting the entity) if the user ever switched back to that same tool
+  while the mouse happened to still be down. `resetAllGizmoDragStates()`
+  resets all THREE tools' own drag state to idle unconditionally, in one
+  call, every time -- not conditionally on which one was actually mid-drag
+  (unconditional is simpler AND strictly safer: resetting an already-idle
+  tool is a harmless no-op). A mid-drag mode switch therefore cleanly
+  ABANDONS that drag: the entity keeps whatever position/rotation/scale the
+  partial drag had already applied (each frame's delta is applied directly
+  to the live Transform as it happens, never deferred until release), but no
+  further movement happens, no undo `Command` is pushed for the now-
+  abandoned partial edit (there is no clean "release" to build one from),
+  and every tool starts genuinely fresh (`axis == kNone`) the next time it's
+  actually used.
+- **Toolbar buttons: kept keyboard-only, deliberately.** The floating
+  Viewport toolbar (`renderViewportToolbarOverlay()`) already carries six
+  buttons at a self-measuring, auto-centered width
+  (`toolbarGroupWidthLastFrame_`); adding three more mode-indicator buttons
+  was evaluated and set aside for two concrete reasons, not just "ran out of
+  scope": first, this phase's own verification explicitly requires a
+  no-selection/translate-mode screenshot to be **pixel-identical** to the
+  pre-18k baseline (see Verify below) -- any visible toolbar change would
+  break that comparison outright, and the whole point of that check is
+  proving this phase touches nothing about the toolbar's own established
+  appearance. Second, three new icons would need three new Font Awesome
+  codepoints hand-subsetted into `assets/fonts/editor-icons.ttf` (the
+  `kIconGlyphRanges` array this project re-subsets by hand each phase that
+  adds one, per its own Phase 17b/17c/18h precedent) for a feature that a
+  single keypress already reaches cleanly -- real, but avoidable, scope.
+  Keyboard-only is the right size for this phase; toolbar buttons remain a
+  clean, independent follow-up if a later phase wants a purely-mouse-driven
+  path to the same switch.
+- **Deliberately NOT done this phase** (documented scope, not an
+  oversight):
+  - **No parent-hierarchy-aware scale.** Exactly Phase 18e's/Phase 18j's own
+    documented local-vs-world simplification, applied to scale instead of
+    position/rotation: the handle's own visual origin is the entity's
+    resolved WORLD position, but the scale ratio is applied directly onto
+    the entity's own LOCAL `Transform::scale()`, unconverted through any
+    parent's own transform.
+  - **No mutual self-occlusion between the three handles**, and **no
+    hover-highlight color change** -- the identical, identically-scoped
+    polish items both Phase 18e's and Phase 18j's own README sections
+    already list for their own tools, unchanged here for scale.
+  - **No lock-editing-to-Edit-mode.** All three gizmos work in exactly
+    whatever mode they already worked in through Phase 18j; Phase 18l's own
+    scope, explicitly next, untouched here.
+  - **No non-uniform-scale-vs-rotation interaction polish** (e.g. a
+    "uniform scale" modifier key, or per-axis scale gizmo handles that
+    visually stretch to preview the drag before release) -- this phase ships
+    the standard three-independent-axis DCC-tool behavior only, matching
+    exactly what Maya/3ds Max/Blender/Unity/Unreal's own DEFAULT scale
+    gizmo (no modifier held) already does.
+- **Verify.**
+  - A full clean rebuild (`rm -rf build`, `cmake -B build -S .
+    -DCMAKE_BUILD_TYPE=Debug`) produced **zero warnings**. `ctest` reports
+    **18/18 passing** -- the same 18 targets as Phase 18j (this phase adds
+    no new test executable either; it extends `gizmo_test` in place again,
+    since it tests the same `gizmo.cpp` file every gizmo phase has grown).
+    The new block covers: a full `updateGizmoScaleDrag()` idle -> grab ->
+    multi-step drag (2x -> 3x -> **exactly back to 1x** -> **0.4x, below the
+    original**) -> release sequence, with every intermediate value hand-
+    computed and only the DRAGGED axis's own component ever changing (a
+    distinct-per-axis starting scale, `(2,3,4)`, specifically so a bug
+    touching the wrong axis or all three would visibly fail); a dedicated
+    near-zero-ratio clamp case (raw `0.001` clamps to exactly
+    `kGizmoMinScaleComponent`, not `0`) and a dedicated negative-ratio clamp
+    case (dragging past the origin also clamps to the same positive floor,
+    never negative); the edge-triggering contract; a grab declined for a
+    ray parallel to the axis; a grab declined for landing too close to the
+    origin (`kGizmoScaleMinGrabDistance`'s own new degeneracy); and a
+    mid-drag-parallel-then-resumes-cleanly case proving no leftover/
+    corrupted anchor after a skipped frame. **The mode-switch drag-state-
+    reset fix** gets its own dedicated proof, using `updateGizmoDrag()` (the
+    real production translate state machine, `gizmoDragState_`'s own type)
+    directly: a real drag is put mid-gesture (grabbed, moved to x=5), then
+    the EXACT SAME "mouse still down, no fresh press, cursor now at a
+    different point (x=6)" input is fed against the UNRESET stale state
+    (incorrectly resumes, teleporting to `(6,0,0)` -- the landmine,
+    reproduced) and again against the reset state
+    (`GizmoDragState{}`, exactly what `resetAllGizmoDragStates()` produces
+    -- correctly starts nothing, no position update at all -- the fix,
+    proven), plus a confirmation that the newly-active tool
+    (`updateGizmoRotateDrag()`) is equally unaffected by the same leftover
+    mouse-down input. Worth being precise about what this unit proof does
+    and does not cover: `tests/gizmo_test.cpp` links only `gizmo.cpp`, never
+    `EditorUI`/`Application`, so this proves `updateGizmoDrag()`'s own
+    behavior differs correctly between a reset and an unreset state -- it
+    does NOT call the real `EditorUI::resetAllGizmoDragStates()` or
+    `Application::setGizmoMode()` at all, so it alone cannot catch a
+    regression in that actual integration code (e.g. the reset call being
+    deleted from `setGizmoMode()`). That integration is what the new
+    headless, mid-drag-mode-switch-and-back proof below covers instead --
+    see "The actual discriminating proof" further down this same list.
+  - **Zero regression to the default appearance, proven against a real
+    pre-18k baseline, not assumed.** A pre-Phase-18k build (Phase 18j's own
+    commit, `449dc00`, built fresh in a separate `git worktree`) and this
+    phase's build were both run headlessly with a fixed-delay manual
+    capture (Phase 18j's own established workaround for
+    `run_headless.sh`'s polling-based capture occasionally landing on a
+    mid-settle transient frame). `compare -metric AE` between the two
+    builds' own no-selection screenshots reports **`0`** differing pixels
+    (byte-identical PNG file sizes, **274,493 bytes each** -- the exact same
+    byte count Phase 18j's own README already recorded for this identical
+    comparison, confirming the capture technique itself reproduces
+    byte-for-byte). Setting `ENGINE_DEBUG_GIZMO_MODE=scale` with still no
+    selection ALSO reports **`0`** differing pixels against that same
+    baseline -- `Application::renderGizmo()`'s leading "no selection => draw
+    nothing" guard runs before `gizmoMode_` is ever consulted, so the new
+    tool genuinely never engages with nothing selected, regardless of mode.
+  - **The three tools' handles, visually confirmed distinct.** Screenshots
+    with `ENGINE_DEBUG_SELECT=scene` and each of
+    `ENGINE_DEBUG_GIZMO_MODE=translate|rotate|scale` in turn show, at the
+    identical camera pose: translate's three CONE-tipped arrows, rotate's
+    three RINGS, and scale's three CUBE-tipped handles -- clearly,
+    unambiguously distinct shapes at the same handle length/position, the
+    standard DCC-tool visual language.
+  - **Full wired-path proof: a scripted scale drag actually produces
+    non-uniform per-axis scaling.** A new
+    `ENGINE_DEBUG_GIZMO_SCALE_DRAG=<entity name>` env var (only active when
+    `ENGINE_DEBUG_GIZMO_MODE=scale`) feeds a scripted sequence of synthetic
+    screen-space mouse positions -- aimed at successive absolute world
+    distances along the X axis (`0.4 -> 0.8 -> 1.2 -> 0.4 -> 0.16`, the
+    grab distance reused verbatim from the translate gizmo's own
+    already-proven-safe `kDebugGizmoDragOffsets[0]`, since a fresh GRAB
+    (unlike every later step) is a real hit-test against the handle's own
+    finite, camera-distance-scaled drawn length, not just a re-projection
+    onto an infinite line) -- into `EditorUI::updateGizmoScale()` through
+    the SAME `setDebugMouseOverride()` entry point `ENGINE_DEBUG_GIZMO_DRAG`/
+    `_ROTATE_DRAG` already established; only the raw mouse input is
+    synthetic, every function downstream is the exact same production code
+    a real drag runs through. Run against `scene` (starting scale
+    `(1,1,1)`), the log shows the X component evolving
+    `1.000000 -> 1.000000 [grab] -> 2.000006 -> 3.000010 -> 1.000000 ->
+    0.400000 [release]` while Y/Z stay at exactly `1.000000` throughout --
+    matching the hand-computed ratios (`0.8/0.4=2`, `1.2/0.4=3`,
+    `0.4/0.4=1`, `0.16/0.4=0.4`) to five decimal places, and a screenshot
+    taken after the drag completes shows the Inspector's own `Scale` field
+    reading `0.400 1.000 1.000` and the `scene` mesh visibly compressed
+    along its own local X axis relative to every earlier screenshot, while
+    the ground/spheres/other entities are completely unaffected -- an
+    unmistakable, visually-confirmed NON-uniform scale.
+  - **The live W/E/R switcher, proven both alone and mid-drag.** Since
+    Xvfb has no physical keyboard to generate a real keypress from outside
+    the process (the same constraint `ENGINE_DEBUG_SIMULATE_ESCAPE`'s own
+    comment already documents for the mouse-equivalent case -- confirmed
+    directly here too: `xdotool key`/`keydown`/`keyup` sent at the X11
+    level, with and without an explicit `--window` target, against this
+    WM-less Xvfb produced no observable effect on the running app, most
+    likely because GLFW's own key-focus routing depends on window-manager
+    cooperation this headless setup doesn't provide), a new
+    `ENGINE_DEBUG_GIZMO_MODE_SWITCH=<w|e|r>[,<w|e|r>...]` env var resolves
+    each entry directly to the `GizmoMode` a real tap of that key would
+    request and fires one scripted `Application::setGizmoMode()` call per
+    entry, each at its own fixed frame -- the exact same production function
+    a real edge-triggered W/E/R press calls, so only the INPUT is synthetic.
+    Run alone (`ENGINE_DEBUG_SELECT=scene ENGINE_DEBUG_GIZMO_MODE_SWITCH=e`),
+    the log shows `Gizmo mode switched: "translate" -> "rotate"` firing at
+    frame 17, and a screenshot taken afterward shows the rotate rings now
+    rendered (started translate, per the default). Run COMBINED with a
+    translate drag already in progress (`ENGINE_DEBUG_GIZMO_DRAG=scene
+    ENGINE_DEBUG_GIZMO_MODE_SWITCH=e`, the switch landing at frame 17, mid-
+    way through the drag's own scripted frame window `[15, 20)`): the
+    logged position climbs `0.000000 -> 0.000000 [grab] -> 0.500001`
+    through frame 17, then freezes at exactly `0.500001` for every remaining
+    scripted frame (18, 19, and release at 20). **This single-switch proof by
+    itself, an independent review later confirmed, does NOT actually exercise
+    `resetAllGizmoDragStates()` -- it was mis-stated as doing so in an
+    earlier revision of this section.** The freeze is fully explained by
+    `renderDockspaceShell()`'s own dispatch `switch` simply no longer calling
+    `updateGizmo()` once `gizmoMode_ != kTranslate`, nothing to do with the
+    reset; and the newly-active rotate tool not spuriously moving is
+    trivially true on this run's first-ever entry into rotate mode
+    regardless of whether the reset ran, since `gizmoRotateDragState_` was
+    already sitting at its default-constructed idle value from construction,
+    untouched by anything yet. Reviewer-verified directly: temporarily
+    turning `resetAllGizmoDragStates()` into a no-op, rebuilding, and
+    re-running this exact single-switch scenario produced a **byte-for-byte
+    identical log**, with or without the fix -- proof this scenario alone
+    could never catch a regression here.
+  - **The actual discriminating proof: switch away from a mid-drag tool,
+    then back, while the drag's own mouse-down input is still being fed.**
+    `ENGINE_DEBUG_GIZMO_MODE_SWITCH` now accepts a comma-separated LIST (the
+    same list shape `ENGINE_DEBUG_OPEN_SCENE`, Phase 18i, already
+    established for chaining more than one scripted action into a single
+    run), so a single run can schedule a SECOND switch, back to the original
+    tool, later in the same run -- the one scenario the fix actually guards
+    against and the single-switch proof above could never reach. Run with
+    `ENGINE_DEBUG_SELECT=scene ENGINE_DEBUG_GIZMO_DRAG=scene
+    ENGINE_DEBUG_GIZMO_MODE_SWITCH=e,w` (switch to rotate at frame 17, mid-
+    drag, then back to translate at frame 19, the drag script's own LAST
+    step, still with mouse "held"): with the fix intact, the log shows the
+    identical `0.000000 -> 0.000000 [grab] -> 0.500001` climb through frame
+    17 as the single-switch run above, then **stays frozen at exactly
+    `0.500001` all the way through the switch back to translate at frame 19
+    and release at frame 20** -- `gizmoDragState_` was reset to idle by the
+    first switch, so the drag script's own still-being-fed mouse-down input
+    at frame 19 has no fresh press to grab with (`mousePressedThisFrame` is
+    only true on step 0), and nothing moves. **Non-vacuousness, verified
+    directly the same way the reviewer's own audit worked**:
+    `EditorUI::resetAllGizmoDragStates()` was temporarily turned into a
+    no-op (`return;` as its first line) and the engine rebuilt. The SAME
+    `e,w` run then produced a final logged position of `2.000001, 0.000000,
+    0.000000` instead of the frozen `0.500001` -- with the reset gone,
+    `gizmoDragState_` sat exactly where frame 16 left it (`axis == kX`,
+    anchored at the entity's ORIGINAL position) all through frames 17-18, so
+    switching back to translate at frame 19 found a still-active drag
+    (`axis != kNone`, which `updateGizmoDrag()`'s own state machine resumes
+    unconditionally on any held mouse, `mousePressedThisFrame` or not) and
+    re-projected onto that stale anchor using frame 19's own mouse position,
+    teleporting the entity roughly to that frame's own target offset instead
+    of leaving it frozen -- the exact landmine this phase's fix exists to
+    prevent, reproduced on demand. Restoring `resetAllGizmoDragStates()` and
+    rebuilding brought the log back to the frozen `0.500001` shown above.
+    This is the test that actually would have caught the fix being deleted
+    or broken; the single-switch proof above is kept for what it still does
+    prove (a genuine mid-run mode switch reaching `setGizmoMode()` at all,
+    and the freeze from the dispatch `switch`), just no longer credited with
+    proving the reset. `ENGINE_DEBUG_GIZMO_MODE_SWITCH=e` alone (no comma)
+    was re-run after this change and still fires exactly one switch at frame
+    17 with an unchanged log -- confirming the list syntax is a pure
+    extension of the original single-value contract, not a breaking change
+    to it.
+
 ## Libraries used and why
 
 | Library     | How it's obtained                          | Why |
